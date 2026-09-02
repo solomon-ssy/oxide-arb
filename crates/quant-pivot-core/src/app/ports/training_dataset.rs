@@ -6,8 +6,10 @@ use async_trait::async_trait;
 use blake3::Hasher;
 use chrono::{DateTime, Duration, Utc};
 use futures_util::StreamExt;
-use quant_pivot_compute::ComputeExecutor;
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
+use quant_pivot_error::{
+    QuantError, QuantResult, infra::InfraError, research::ResearchError, storage::StorageError,
+};
 use quant_pivot_models::{
     domain::{
         api::{BuildTrainingDatasetRequest, TrainingDatasetPlanView, TrainingDatasetView},
@@ -310,6 +312,7 @@ impl CoreTrainingDatasetPort {
                 let identity_hash = identity.identity_hash;
                 let materialized = SourceSliceMaterializer::new(
                     SourceSliceMaterializerDeps {
+                        compute: Arc::clone(&self.compute),
                         facts: Arc::clone(&self.fact_read),
                         catalog: Arc::clone(&self.catalog_repo),
                         clob_market_info: Arc::clone(&self.clob_market_info_repo),
@@ -708,9 +711,11 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
             .await?;
         self.verify_source_slice_request(&plan_request, false)
             .await?;
-        let frozen = SourceSliceReader::new(Arc::clone(&self.artifact_store))
-            .read(&source_slice)
-            .await?;
+        let source_cancel = CancellationToken::new();
+        let frozen =
+            SourceSliceReader::new(Arc::clone(&self.artifact_store), Arc::clone(&self.compute))
+                .read(&source_slice, &source_cancel)
+                .await?;
         let service = self
             .service_for(&request.decision_policy_snapshot_id)
             .await?;
@@ -750,9 +755,10 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
             .await?;
         self.verify_source_slice_request(&plan_request, true)
             .await?;
-        let frozen = SourceSliceReader::new(Arc::clone(&self.artifact_store))
-            .read(&source_slice)
-            .await?;
+        let frozen =
+            SourceSliceReader::new(Arc::clone(&self.artifact_store), Arc::clone(&self.compute))
+                .read(&source_slice, &cancel)
+                .await?;
         // Effectively-once recovery: completed artifacts are returned as-is;
         // planned/building rows are validated and resumed by the service.
         if let Some(training_dataset_id) = &request.training_dataset_id
@@ -811,9 +817,10 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
             .await?;
         self.verify_source_slice_request(&plan_request, true)
             .await?;
-        let frozen_source = SourceSliceReader::new(Arc::clone(&self.artifact_store))
-            .read(&source_slice)
-            .await?;
+        let frozen_source =
+            SourceSliceReader::new(Arc::clone(&self.artifact_store), Arc::clone(&self.compute))
+                .read(&source_slice, &cancel)
+                .await?;
         if let Some(training_dataset_id) = &body.training_dataset_id
             && let Some(existing) = self.dataset_repo.find_by_id(training_dataset_id).await?
         {
@@ -855,10 +862,16 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
     async fn build_feedback(
         &self,
         request: FeedbackDatasetBuildRequest,
+        max_working_set_bytes: u64,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetInfo> {
         request.validate().map_err(QuantError::from)?;
+        let working_set =
+            usize::try_from(max_working_set_bytes).map_err(|error| InfraError::Misconfigured {
+                detail: format!("feedback Dataset working-set bytes do not fit usize: {error}"),
+            })?;
+        let compute_memory = OfflineMemory::try_bytes(working_set)?;
         let training_dataset_id = request.training_dataset_id;
         let decision_policy_snapshot_id = request.source_lineage.decision_policy_snapshot_id;
         let dataset_service = Arc::new(self.service_for(&decision_policy_snapshot_id).await?);
@@ -870,6 +883,8 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
                 feature_repository: Arc::clone(&self.feature_repo),
                 factor_repository: Arc::clone(&self.factor_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
+                compute: Arc::clone(&self.compute),
+                compute_memory,
                 dataset_service,
             })
             .build(request, progress, cancel),

@@ -221,7 +221,7 @@ impl PgModelRoutePromotionRepository {
                 .allows_authorization_policy(runtime.entry_authorization_policy)
         {
             return Err(Self::conflict(
-                "runtime mode or runtime-control revision changed before promotion",
+                "entry-authorization policy or runtime-control revision changed before promotion",
             ));
         }
         Ok(())

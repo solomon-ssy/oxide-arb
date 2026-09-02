@@ -13,13 +13,14 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Duration as StdDuration,
 };
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
-use quant_pivot_compute::ComputeExecutor;
+use quant_pivot_compute::{ComputeExecutor, OFFLINE_MEMORY_BYTES, OfflineMemory};
 use quant_pivot_core::{
     app::ports::{
         backtest::{CoreBacktestPort, CoreBacktestPortDeps},
@@ -31,7 +32,9 @@ use quant_pivot_core::{
         backtest::{BacktestInput, BacktestService, BacktestServiceDeps},
         frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
         model_calibration_fit::ModelCalibrationFitService,
-        model_serving_preimage::{ModelServingPreimageDeps, ModelServingPreimageService},
+        model_serving_preimage::{
+            ModelPreimageReadContext, ModelServingPreimageDeps, ModelServingPreimageService,
+        },
         model_training::{
             ModelTrainerConfig, ModelTrainerService, ModelTrainerServiceDeps, TrainModelInput,
         },
@@ -40,7 +43,7 @@ use quant_pivot_core::{
         trade_policy_preimage::{TradePolicyPreimageVerifier, TradePolicyPreimageVerifierDeps},
     },
 };
-use quant_pivot_error::{QuantError, research::ResearchError, storage::StorageError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     config::PortfolioSolverDeployConfig,
     domain::{
@@ -130,7 +133,10 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_research::{
-    artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
+    artifact::{
+        ArtifactByteStream, ArtifactDurability, ArtifactKey, ArtifactNamespace,
+        ArtifactObjectMetadata, ArtifactStore, LocalArtifactStore,
+    },
     execution_semantics::BookFidelity,
     factors::{FactorEngine, FactorValue, NormalizedFactor, names::MOMENTUM_ROC},
     features::{
@@ -169,7 +175,9 @@ use quant_pivot_system_tests::{
             bind_fixture_decision_capture, model_learning_cohort, persist_replayable_source_slice,
             seed_source_manifest,
         },
-        trade_policy_fixtures::{PublishedTradePolicyFixture, PublishedTradePolicyFixtureInput},
+        trade_policy_fixtures::{
+            FixtureBookTiming, PublishedTradePolicyFixture, PublishedTradePolicyFixtureInput,
+        },
     },
 };
 use rust_decimal::Decimal;
@@ -177,6 +185,7 @@ use rust_decimal_macros::dec;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, sea_query::Expr,
 };
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -188,6 +197,151 @@ const TICKS: i64 = 12;
 const MARKETS_PER_TICK: usize = 20;
 const BASE_TS: i64 = 1_700_000_000;
 const TICK_INTERVAL_SECS: i64 = 3600;
+const PREIMAGE_READ_DEADLINE: StdDuration = StdDuration::from_secs(5);
+
+enum TrainerArtifactFault {
+    MainTransport,
+    MainCorrupt,
+    BinaryCorrupt,
+    CancelAfterBinaryKey(CancellationToken),
+    CancelAfterSourceRead {
+        target: ArtifactUri,
+        cancel: CancellationToken,
+    },
+    SignalSourceRead {
+        target: ArtifactUri,
+        read: Arc<Notify>,
+    },
+}
+
+struct TrainerArtifactFaultStore {
+    inner: Arc<dyn ArtifactStore>,
+    fault: TrainerArtifactFault,
+    fired: AtomicBool,
+}
+
+impl TrainerArtifactFaultStore {
+    fn new(inner: Arc<dyn ArtifactStore>, fault: TrainerArtifactFault) -> Self {
+        Self {
+            inner,
+            fault,
+            fired: AtomicBool::new(false),
+        }
+    }
+
+    fn fire_once(&self) -> bool {
+        self.fired
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn is_model_json(value: &str) -> bool {
+        let path = value.split_once('?').map_or(value, |(path, _)| path);
+        (path.starts_with("models/") || path.contains("/models/"))
+            && Path::new(path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    }
+
+    fn is_model_binary(value: &str) -> bool {
+        let path = value.split_once('?').map_or(value, |(path, _)| path);
+        (path.starts_with("models/") || path.contains("/models/"))
+            && Path::new(path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"))
+    }
+}
+
+#[async_trait]
+impl ArtifactStore for TrainerArtifactFaultStore {
+    async fn put_stream(
+        &self,
+        key: ArtifactKey,
+        stream: ArtifactByteStream,
+    ) -> QuantResult<ArtifactUri> {
+        self.inner.put_stream(key, stream).await
+    }
+
+    async fn get_stream(&self, uri: &ArtifactUri) -> QuantResult<ArtifactByteStream> {
+        self.inner.get_stream(uri).await
+    }
+
+    async fn durability(&self, uri: &ArtifactUri) -> QuantResult<ArtifactDurability> {
+        self.inner.durability(uri).await
+    }
+
+    async fn metadata(&self, uri: &ArtifactUri) -> QuantResult<ArtifactObjectMetadata> {
+        self.inner.metadata(uri).await
+    }
+
+    async fn signed_download_url(
+        &self,
+        uri: &ArtifactUri,
+        valid_for: StdDuration,
+    ) -> QuantResult<String> {
+        self.inner.signed_download_url(uri, valid_for).await
+    }
+
+    async fn get(&self, uri: &ArtifactUri) -> QuantResult<Vec<u8>> {
+        let value = uri.as_str();
+        match &self.fault {
+            TrainerArtifactFault::MainTransport
+                if Self::is_model_json(value) && self.fire_once() =>
+            {
+                Err(ResearchError::ArtifactTransport {
+                    uri: uri.to_string(),
+                    detail: "injected model readback transport failure".to_owned(),
+                }
+                .into())
+            }
+            TrainerArtifactFault::MainCorrupt if Self::is_model_json(value) && self.fire_once() => {
+                Ok(b"corrupt model artifact".to_vec())
+            }
+            TrainerArtifactFault::BinaryCorrupt
+                if Self::is_model_binary(value) && self.fire_once() =>
+            {
+                Ok(b"corrupt classical estimator".to_vec())
+            }
+            TrainerArtifactFault::CancelAfterSourceRead { target, cancel }
+                if uri == target && self.fire_once() =>
+            {
+                let bytes = self.inner.get(uri).await?;
+                cancel.cancel();
+                Ok(bytes)
+            }
+            TrainerArtifactFault::SignalSourceRead { target, read }
+                if uri == target && self.fire_once() =>
+            {
+                let bytes = self.inner.get(uri).await?;
+                read.notify_one();
+                Ok(bytes)
+            }
+            _ => self.inner.get(uri).await,
+        }
+    }
+
+    async fn exists(&self, uri: &ArtifactUri) -> QuantResult<bool> {
+        self.inner.exists(uri).await
+    }
+
+    async fn get_by_key(&self, key: &ArtifactKey) -> QuantResult<Vec<u8>> {
+        let bytes = self.inner.get_by_key(key).await?;
+        if let TrainerArtifactFault::CancelAfterBinaryKey(cancel) = &self.fault
+            && Self::is_model_binary(&key.relative_path())
+            && self.fire_once()
+        {
+            cancel.cancel();
+        }
+        Ok(bytes)
+    }
+
+    async fn exists_by_key(&self, key: &ArtifactKey) -> QuantResult<bool> {
+        self.inner.exists_by_key(key).await
+    }
+}
+
 const KNOWLEDGE_LAG_SECS: i64 = 10;
 
 struct CancelAtPhase {
@@ -956,6 +1110,7 @@ impl ModelSpecFixture {
             db,
             store,
             PublishedTradePolicyFixtureInput {
+                book_timing: FixtureBookTiming::standard(),
                 decision_policy_snapshot_id: policy_snapshot_id,
                 profile_ref,
                 scope,
@@ -1748,6 +1903,7 @@ impl TrainerPreimageFixture {
         registry: &Arc<dyn ModelRegistryRepository>,
         dataset_repo: &Arc<dyn TrainingDatasetRepository>,
         calibration_repo: &Arc<dyn CalibrationArtifactRepository>,
+        compute: &Arc<ComputeExecutor>,
     ) -> (
         Arc<ModelServingPreimageService>,
         Arc<TradePolicyPreimageVerifier>,
@@ -1784,6 +1940,7 @@ impl TrainerPreimageFixture {
             },
         ));
         let serving = Arc::new(ModelServingPreimageService::new(ModelServingPreimageDeps {
+            compute: Arc::clone(compute),
             model_registry_repo: Arc::clone(registry),
             dataset_repo: Arc::clone(dataset_repo),
             source_slice_repo: Arc::new(PgSourceSliceRepository::new(db.clone())),
@@ -1793,6 +1950,290 @@ impl TrainerPreimageFixture {
             artifact_store: Arc::clone(store),
         }));
         (serving, trade_policy)
+    }
+
+    async fn assert_full_objects(
+        db: &DatabaseConnection,
+        store: &Arc<dyn ArtifactStore>,
+        scenario: &TrainingBacktestScenario,
+        compute: &Arc<ComputeExecutor>,
+    ) {
+        let dataset_repo: Arc<dyn TrainingDatasetRepository> =
+            Arc::new(PgTrainingDatasetRepository::new(db.clone()));
+        let calibration_repo: Arc<dyn CalibrationArtifactRepository> =
+            Arc::new(PgCalibrationArtifactRepository::new(db.clone()));
+        let dataset = dataset_repo
+            .find_by_id(&scenario.training_dataset_id)
+            .await
+            .expect("read full-object training Dataset")
+            .expect("training Dataset exists");
+        let bytes = store
+            .get(&dataset.source_lineage.source_slice.manifest_uri)
+            .await
+            .expect("read full-object Source Slice manifest");
+        let manifest = serde_json::from_slice::<SourceSliceManifest>(&bytes)
+            .expect("decode full-object Source Slice manifest");
+        let objects = manifest
+            .objects
+            .into_iter()
+            .map(|object| object.uri)
+            .collect::<Vec<_>>();
+        let target = objects
+            .first()
+            .expect("Source Slice must own fact objects")
+            .clone();
+        let corrupt_target = objects.last().expect("Source Slice final object").clone();
+        let counted = Arc::new(ReadCountingArtifactStoreFixture::new(
+            Arc::clone(store),
+            objects.clone(),
+        ));
+        let counted_store: Arc<dyn ArtifactStore> =
+            Arc::<ReadCountingArtifactStoreFixture>::clone(&counted);
+        let (preimages, _) = Self::build(
+            db,
+            &counted_store,
+            &scenario.registry,
+            &dataset_repo,
+            &calibration_repo,
+            compute,
+        );
+        let memory = compute
+            .acquire_offline_memory(
+                OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES).expect("full offline memory budget"),
+            )
+            .await
+            .expect("reserve full verification memory");
+        assert_eq!(compute.available_offline_memory_bytes(), 0);
+        let cancel = CancellationToken::new();
+        let context = ModelPreimageReadContext::new(&cancel, Some(&memory));
+        let verified = tokio::time::timeout(
+            PREIMAGE_READ_DEADLINE,
+            preimages.load(&scenario.version, &context),
+        )
+        .await
+        .expect("FullObjects must reuse its caller's full lease, not await itself")
+        .expect("verify complete Source Slice under the existing lease");
+        assert_eq!(
+            verified.training_dataset().training_dataset_id,
+            scenario.training_dataset_id
+        );
+        assert!(
+            objects.iter().all(|uri| counted.reads(uri) > 0),
+            "leased FullObjects verification must read every Source Slice object"
+        );
+        assert_eq!(compute.available_offline_memory_bytes(), 0);
+        drop(verified);
+        drop(context);
+        drop(memory);
+        Self::assert_released(compute).await;
+        Box::pin(Self::assert_cancel_wait(
+            db, store, scenario, compute, &target,
+        ))
+        .await;
+        Box::pin(Self::assert_cancelled_read(
+            db, store, scenario, compute, &target,
+        ))
+        .await;
+        Box::pin(Self::assert_corrupt_read(
+            db,
+            store,
+            scenario,
+            compute,
+            &corrupt_target,
+        ))
+        .await;
+    }
+
+    async fn assert_cancel_wait(
+        db: &DatabaseConnection,
+        store: &Arc<dyn ArtifactStore>,
+        scenario: &TrainingBacktestScenario,
+        compute: &Arc<ComputeExecutor>,
+        target: &ArtifactUri,
+    ) {
+        let read = Arc::new(Notify::new());
+        let fault = Arc::new(TrainerArtifactFaultStore::new(
+            Arc::clone(store),
+            TrainerArtifactFault::SignalSourceRead {
+                target: target.clone(),
+                read: Arc::clone(&read),
+            },
+        ));
+        let fault_store: Arc<dyn ArtifactStore> = Arc::<TrainerArtifactFaultStore>::clone(&fault);
+        let dataset_repo: Arc<dyn TrainingDatasetRepository> =
+            Arc::new(PgTrainingDatasetRepository::new(db.clone()));
+        let calibration_repo: Arc<dyn CalibrationArtifactRepository> =
+            Arc::new(PgCalibrationArtifactRepository::new(db.clone()));
+        let (preimages, _) = Self::build(
+            db,
+            &fault_store,
+            &scenario.registry,
+            &dataset_repo,
+            &calibration_repo,
+            compute,
+        );
+        let memory = compute
+            .acquire_offline_memory(
+                OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES).expect("full offline memory budget"),
+            )
+            .await
+            .expect("hold memory while another read waits");
+        let cancel = CancellationToken::new();
+        let context = ModelPreimageReadContext::new(&cancel, None);
+        let result = tokio::time::timeout(PREIMAGE_READ_DEADLINE, async {
+            let cancel_after_read = async {
+                // The store signals only after bytes arrive; the verifier's
+                // next await is the exhausted memory admission.
+                read.notified().await;
+                cancel.cancel();
+            };
+            let (result, ()) = tokio::join!(
+                preimages.load(&scenario.version, &context),
+                cancel_after_read
+            );
+            result
+        })
+        .await
+        .expect("cancelled FullObjects memory wait must exit promptly");
+        assert!(matches!(
+            result,
+            Err(QuantError::Research(ResearchError::Cancelled { .. }))
+        ));
+        assert!(
+            fault.fired.load(Ordering::SeqCst),
+            "cancellation must reach the real Source Slice read"
+        );
+        drop(context);
+        assert_eq!(compute.available_offline_memory_bytes(), 0);
+        drop(memory);
+        Self::assert_released(compute).await;
+    }
+
+    async fn assert_cancelled_read(
+        db: &DatabaseConnection,
+        store: &Arc<dyn ArtifactStore>,
+        scenario: &TrainingBacktestScenario,
+        compute: &Arc<ComputeExecutor>,
+        target: &ArtifactUri,
+    ) {
+        let cancel = CancellationToken::new();
+        let fault = Arc::new(TrainerArtifactFaultStore::new(
+            Arc::clone(store),
+            TrainerArtifactFault::CancelAfterSourceRead {
+                target: target.clone(),
+                cancel: cancel.clone(),
+            },
+        ));
+        let fault_store: Arc<dyn ArtifactStore> = Arc::<TrainerArtifactFaultStore>::clone(&fault);
+        let dataset_repo: Arc<dyn TrainingDatasetRepository> =
+            Arc::new(PgTrainingDatasetRepository::new(db.clone()));
+        let calibration_repo: Arc<dyn CalibrationArtifactRepository> =
+            Arc::new(PgCalibrationArtifactRepository::new(db.clone()));
+        let (preimages, _) = Self::build(
+            db,
+            &fault_store,
+            &scenario.registry,
+            &dataset_repo,
+            &calibration_repo,
+            compute,
+        );
+        let memory = compute
+            .acquire_offline_memory(
+                OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES).expect("full offline memory budget"),
+            )
+            .await
+            .expect("reserve full cancellation-test memory");
+        let context = ModelPreimageReadContext::new(&cancel, Some(&memory));
+        let result = tokio::time::timeout(
+            PREIMAGE_READ_DEADLINE,
+            preimages.load(&scenario.version, &context),
+        )
+        .await
+        .expect("cancellation after source bytes arrive must exit promptly");
+        assert!(
+            fault.fired.load(Ordering::SeqCst),
+            "real target source object must be read"
+        );
+        assert!(matches!(
+            result,
+            Err(QuantError::Research(ResearchError::Cancelled { .. }))
+        ));
+        drop(context);
+        drop(memory);
+        Self::assert_released(compute).await;
+    }
+
+    async fn assert_corrupt_read(
+        db: &DatabaseConnection,
+        store: &Arc<dyn ArtifactStore>,
+        scenario: &TrainingBacktestScenario,
+        compute: &Arc<ComputeExecutor>,
+        target: &ArtifactUri,
+    ) {
+        let tampered: Arc<dyn ArtifactStore> = Arc::new(ReadTamperArtifactStoreFixture::new(
+            Arc::clone(store),
+            target.clone(),
+            b"corrupt Source Slice object".to_vec(),
+        ));
+        let dataset_repo: Arc<dyn TrainingDatasetRepository> =
+            Arc::new(PgTrainingDatasetRepository::new(db.clone()));
+        let calibration_repo: Arc<dyn CalibrationArtifactRepository> =
+            Arc::new(PgCalibrationArtifactRepository::new(db.clone()));
+        let (preimages, _) = Self::build(
+            db,
+            &tampered,
+            &scenario.registry,
+            &dataset_repo,
+            &calibration_repo,
+            compute,
+        );
+        let memory = compute
+            .acquire_offline_memory(
+                OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES).expect("full offline memory budget"),
+            )
+            .await
+            .expect("reserve full corruption-test memory");
+        let cancel = CancellationToken::new();
+        let context = ModelPreimageReadContext::new(&cancel, Some(&memory));
+        let result = tokio::time::timeout(
+            PREIMAGE_READ_DEADLINE,
+            preimages.load(&scenario.version, &context),
+        )
+        .await
+        .expect("corrupt Source Slice must fail without a nested memory wait");
+        assert!(matches!(
+            result,
+            Err(QuantError::Research(
+                ResearchError::ArtifactHashMismatch { .. }
+            ))
+        ));
+        drop(context);
+        drop(memory);
+        Self::assert_released(compute).await;
+    }
+
+    async fn assert_released(compute: &ComputeExecutor) {
+        tokio::time::timeout(PREIMAGE_READ_DEADLINE, async {
+            loop {
+                if let Some(lease) = compute
+                    .try_acquire_offline(
+                        OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES)
+                            .expect("full offline memory budget"),
+                    )
+                    .expect("inspect complete compute admission after verification")
+                {
+                    drop(lease);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("verification must release memory, job, and CPU permits");
+        assert_eq!(
+            compute.available_offline_memory_bytes(),
+            OFFLINE_MEMORY_BYTES
+        );
     }
 }
 
@@ -1813,11 +2254,18 @@ impl TrainerFixture {
             Arc::new(PgTrainingDatasetRepository::new(db.clone()));
         let calibration_repo: Arc<dyn CalibrationArtifactRepository> =
             Arc::new(PgCalibrationArtifactRepository::new(db.clone()));
-        let (serving_preimages, trade_policy_preimages) =
-            TrainerPreimageFixture::build(db, &store, &registry, &dataset_repo, &calibration_repo);
+        let compute = Arc::new(ComputeExecutor::new().expect("test compute executor"));
+        let (serving_preimages, trade_policy_preimages) = TrainerPreimageFixture::build(
+            db,
+            &store,
+            &registry,
+            &dataset_repo,
+            &calibration_repo,
+            &compute,
+        );
         ModelTrainerService::new(
             ModelTrainerServiceDeps {
-                compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
+                compute,
                 dataset_repo,
                 factor_repo,
                 artifact_store: store,
@@ -1919,6 +2367,55 @@ impl TrainerContractMatrix {
         }
     }
 
+    async fn trainer_for(&self, store: Arc<dyn ArtifactStore>) -> ModelTrainerService {
+        let factor_repo = Arc::clone(&self.factor_repo);
+        let factor_repo: Arc<dyn FactorRepository> = factor_repo;
+        TrainerFixture::build(
+            &self.db,
+            store,
+            Arc::clone(&self.registry),
+            factor_repo,
+            self.policy_snapshot_id,
+        )
+        .await
+    }
+
+    async fn classical_fixture(&self, scope: &str) -> (ModelSpecInfo, SeededDataset) {
+        let family = ModelFamily::ClassicalLogisticRegression;
+        let ClassicalDatasetFixture { rows, label_name } =
+            ClassicalDatasetFixture::for_family(family);
+        let spec = ModelSpecFixture::persist(
+            &self.db,
+            scope,
+            family,
+            model_spec_fixtures::pooled_horizon_secs(),
+            ModelInputContract::single_required("book.visible_liquidity_usd"),
+            ModelTrainingContract {
+                target: ModelTrainingTarget::OutcomePayout,
+                validation_folds: 3,
+                evaluation_trade_policy_artifact_id: None,
+            },
+        )
+        .await;
+        let dataset = SeededDataset::persist(
+            &self.db,
+            &self.store,
+            TrainingDatasetSeed {
+                model_spec: &spec,
+                policy_snapshot_id: self.policy_snapshot_id,
+                profile_ref: model_spec_fixtures::pooled_profile_ref(),
+                evaluation_track: ResearchEvaluationTrack::ResearchOnly,
+                label_name,
+                examples: rows,
+                purpose: DatasetPurpose::Training,
+                scope,
+                factor_serving_plane: None,
+            },
+        )
+        .await;
+        (spec, dataset)
+    }
+
     async fn verify(&self) {
         Box::pin(self.reject_model_spec_drift()).await;
         Box::pin(self.reject_policy_drift()).await;
@@ -1933,6 +2430,9 @@ impl TrainerContractMatrix {
         Box::pin(self.verify_policy_routing_rebind(&policy)).await;
         Box::pin(self.reject_policy_tamper(&policy)).await;
         Box::pin(self.reject_policy_profile_drift(&policy)).await;
+        Box::pin(self.verify_main_readback_failure()).await;
+        Box::pin(self.verify_transient_retry()).await;
+        Box::pin(self.verify_classical_artifacts()).await;
     }
 
     async fn assert_rejected_state(&self) {
@@ -2104,6 +2604,7 @@ impl TrainerContractMatrix {
             &self.db,
             &self.store,
             PublishedTradePolicyFixtureInput {
+                book_timing: FixtureBookTiming::standard(),
                 decision_policy_snapshot_id: weather_policy_snapshot_id,
                 profile_ref: profile.profile_ref.clone(),
                 scope: "trainer-policy-bound",
@@ -2268,17 +2769,21 @@ impl TrainerContractMatrix {
             Arc::new(PgTrainingDatasetRepository::new(self.db.clone()));
         let calibration_repo: Arc<dyn CalibrationArtifactRepository> =
             Arc::new(PgCalibrationArtifactRepository::new(self.db.clone()));
+        let compute = Arc::new(ComputeExecutor::new().expect("test preimage compute executor"));
         let (preimages, _) = TrainerPreimageFixture::build(
             &self.db,
             &self.store,
             &self.registry,
             &dataset_repo,
             &calibration_repo,
+            &compute,
         );
+        let read_context = ModelPreimageReadContext::default();
         let verified = preimages
-            .load(&persisted)
+            .load(&persisted, &read_context)
             .await
             .expect("verify complete policy-bound serving graph");
+        drop(read_context);
         assert_eq!(
             verified.training_dataset().training_dataset_id,
             fixture.dataset_id
@@ -2683,12 +3188,10 @@ impl TrainerContractMatrix {
             cancel: cancellation.clone(),
             phase: "register",
         };
-        let cancelled = Box::pin(self.trainer.train(
-            TrainInputFixture::for_dataset(&self.weighted_spec, self.weighted_dataset.id),
-            &progress,
-            &cancellation,
-        ))
-        .await;
+        let input = TrainInputFixture::for_dataset(&self.weighted_spec, self.weighted_dataset.id);
+        let model_run_id = input.model_run_id;
+        let retry_input = input.clone();
+        let cancelled = Box::pin(self.trainer.train(input, &progress, &cancellation)).await;
         assert!(
             matches!(
                 cancelled,
@@ -2714,27 +3217,46 @@ impl TrainerContractMatrix {
             versions_before,
             "cancellation before fit must not register a model version"
         );
-        let cancelled_runs = Entity::find()
-            .filter(Column::Status.eq(ModelRunStatus::Cancelled))
-            .all(&self.db)
+        let recoverable_run = Entity::find_by_id(model_run_id)
+            .one(&self.db)
             .await
-            .expect("load cancelled model runs");
-        let [cancelled_run] = cancelled_runs.as_slice() else {
-            panic!("exactly one cancelled training run must be durable");
-        };
+            .expect("load recoverable model run")
+            .expect("recoverable model run");
+        assert_eq!(recoverable_run.status, ModelRunStatus::Running);
+        assert!(recoverable_run.error_code.is_none());
+        assert!(recoverable_run.error_message.is_none());
+        assert!(recoverable_run.finished_at.is_none());
+
+        let retried = Box::pin(self.trainer.train(
+            retry_input,
+            &NoopProgressSink,
+            &CancellationToken::new(),
+        ))
+        .await
+        .expect("same model run must recover after generic cancellation");
+        assert_eq!(retried.model_run_id, model_run_id);
         assert_eq!(
-            cancelled_run.error_code,
-            Some(ModelRunErrorCode::CancelledByOperator)
+            self.factor_repo.register_calls(),
+            register_calls_before + 2,
+            "recovery retries the idempotent factor registration"
         );
-        assert!(cancelled_run.finished_at.is_some());
         assert_eq!(
-            Entity::find()
-                .filter(Column::Status.eq(ModelRunStatus::Running))
+            ModelVersionEntity::find()
                 .count(&self.db)
                 .await
-                .expect("count orphaned model runs"),
-            0,
-            "no cancellation boundary may leave a Running model run"
+                .expect("count versions after cancellation recovery"),
+            versions_before + 1,
+            "the exact retry must commit one model version"
+        );
+        let succeeded = Entity::find_by_id(model_run_id)
+            .one(&self.db)
+            .await
+            .expect("load recovered model run")
+            .expect("recovered model run");
+        assert_eq!(succeeded.status, ModelRunStatus::Succeeded);
+        assert_eq!(
+            succeeded.model_version_id,
+            Some(retried.version.model_version_id)
         );
     }
 
@@ -2813,6 +3335,162 @@ impl TrainerContractMatrix {
                 "classical trainer must not insert factor revisions"
             );
         }
+    }
+
+    async fn verify_main_readback_failure(&self) {
+        let store: Arc<dyn ArtifactStore> = Arc::new(TrainerArtifactFaultStore::new(
+            Arc::clone(&self.store),
+            TrainerArtifactFault::MainCorrupt,
+        ));
+        let trainer = self.trainer_for(store).await;
+        let input = TrainInputFixture::for_dataset(&self.weighted_spec, self.weighted_dataset.id);
+        let model_version_id = input.model_version_id;
+        let model_run_id = input.model_run_id;
+        let Err(error) =
+            Box::pin(trainer.train(input, &NoopProgressSink, &CancellationToken::new())).await
+        else {
+            panic!("corrupt model readback must fail closed");
+        };
+        assert!(matches!(
+            error,
+            QuantError::Research(ResearchError::ArtifactHashMismatch { .. })
+        ));
+        assert!(
+            self.registry
+                .find_model_version(&model_version_id)
+                .await
+                .expect("load rejected model version")
+                .is_none(),
+            "corrupt readback must precede the atomic model-version commit"
+        );
+        let run = Entity::find_by_id(model_run_id)
+            .one(&self.db)
+            .await
+            .expect("load corrupt-readback run")
+            .expect("corrupt-readback run");
+        assert_eq!(run.status, ModelRunStatus::Failed);
+        assert_eq!(run.error_code, Some(ModelRunErrorCode::TrainingFailed));
+        assert!(run.finished_at.is_some());
+    }
+
+    async fn verify_transient_retry(&self) {
+        let store: Arc<dyn ArtifactStore> = Arc::new(TrainerArtifactFaultStore::new(
+            Arc::clone(&self.store),
+            TrainerArtifactFault::MainTransport,
+        ));
+        let trainer = self.trainer_for(store).await;
+        let input = TrainInputFixture::for_dataset(&self.weighted_spec, self.weighted_dataset.id);
+        let model_version_id = input.model_version_id;
+        let model_run_id = input.model_run_id;
+        let Err(error) =
+            Box::pin(trainer.train(input.clone(), &NoopProgressSink, &CancellationToken::new()))
+                .await
+        else {
+            panic!("injected transport failure must surface");
+        };
+        assert!(matches!(
+            error,
+            QuantError::Research(ResearchError::ArtifactTransport { .. })
+        ));
+        assert!(
+            self.registry
+                .find_model_version(&model_version_id)
+                .await
+                .expect("load transient model version")
+                .is_none()
+        );
+        let running = Entity::find_by_id(model_run_id)
+            .one(&self.db)
+            .await
+            .expect("load transient model run")
+            .expect("transient model run");
+        assert_eq!(running.status, ModelRunStatus::Running);
+        assert!(running.error_code.is_none());
+        assert!(running.error_message.is_none());
+        assert!(running.finished_at.is_none());
+
+        let recovered =
+            Box::pin(trainer.train(input, &NoopProgressSink, &CancellationToken::new()))
+                .await
+                .expect("same exact model run must recover after transient I/O");
+        assert_eq!(recovered.model_run_id, model_run_id);
+        assert_eq!(recovered.version.model_version_id, model_version_id);
+        let succeeded = Entity::find_by_id(model_run_id)
+            .one(&self.db)
+            .await
+            .expect("load recovered transient run")
+            .expect("recovered transient run");
+        assert_eq!(succeeded.status, ModelRunStatus::Succeeded);
+        assert_eq!(succeeded.model_version_id, Some(model_version_id));
+    }
+
+    async fn verify_classical_artifacts(&self) {
+        let (corrupt_spec, corrupt_dataset) = self
+            .classical_fixture("trainer-classical-corrupt-readback")
+            .await;
+        let corrupt_store: Arc<dyn ArtifactStore> = Arc::new(TrainerArtifactFaultStore::new(
+            Arc::clone(&self.store),
+            TrainerArtifactFault::BinaryCorrupt,
+        ));
+        let corrupt_trainer = self.trainer_for(corrupt_store).await;
+        let corrupt_input = TrainInputFixture::for_dataset(&corrupt_spec, corrupt_dataset.id);
+        let corrupt_version_id = corrupt_input.model_version_id;
+        let corrupt_run_id = corrupt_input.model_run_id;
+        let Err(error) = Box::pin(corrupt_trainer.train(
+            corrupt_input,
+            &NoopProgressSink,
+            &CancellationToken::new(),
+        ))
+        .await
+        else {
+            panic!("corrupt classical estimator readback must fail closed");
+        };
+        assert!(matches!(
+            error,
+            QuantError::Research(ResearchError::ArtifactHashMismatch { .. })
+        ));
+        assert!(
+            self.registry
+                .find_model_version(&corrupt_version_id)
+                .await
+                .expect("load rejected classical version")
+                .is_none(),
+            "classical estimator verification must precede the PG commit"
+        );
+        let failed = Entity::find_by_id(corrupt_run_id)
+            .one(&self.db)
+            .await
+            .expect("load corrupt classical run")
+            .expect("corrupt classical run");
+        assert_eq!(failed.status, ModelRunStatus::Failed);
+        assert_eq!(failed.error_code, Some(ModelRunErrorCode::TrainingFailed));
+
+        let (commit_spec, commit_dataset) = self
+            .classical_fixture("trainer-classical-commit-wins")
+            .await;
+        let cancellation = CancellationToken::new();
+        let commit_store: Arc<dyn ArtifactStore> = Arc::new(TrainerArtifactFaultStore::new(
+            Arc::clone(&self.store),
+            TrainerArtifactFault::CancelAfterBinaryKey(cancellation.clone()),
+        ));
+        let commit_trainer = self.trainer_for(commit_store).await;
+        let commit_input = TrainInputFixture::for_dataset(&commit_spec, commit_dataset.id);
+        let commit_version_id = commit_input.model_version_id;
+        let commit_run_id = commit_input.model_run_id;
+        let committed =
+            Box::pin(commit_trainer.train(commit_input, &NoopProgressSink, &cancellation))
+                .await
+                .expect("verified estimator commit-intent must win cancellation");
+        assert!(cancellation.is_cancelled());
+        assert_eq!(committed.version.model_version_id, commit_version_id);
+        assert_eq!(committed.model_run_id, commit_run_id);
+        let succeeded = Entity::find_by_id(commit_run_id)
+            .one(&self.db)
+            .await
+            .expect("load commit-wins classical run")
+            .expect("commit-wins classical run");
+        assert_eq!(succeeded.status, ModelRunStatus::Succeeded);
+        assert_eq!(succeeded.model_version_id, Some(commit_version_id));
     }
 }
 
@@ -3487,6 +4165,7 @@ async fn prepare_training_scenario(
 }
 
 struct BacktestScenarioServices {
+    compute: Arc<ComputeExecutor>,
     backtester: BacktestService,
     backtest_port: Arc<CoreBacktestPort>,
     calibration_fitter: ModelCalibrationFitService,
@@ -3504,15 +4183,16 @@ async fn build_backtest_services(
         Arc::new(PgCalibrationArtifactRepository::new(db.clone()));
     let dataset_repo: Arc<dyn TrainingDatasetRepository> =
         Arc::new(PgTrainingDatasetRepository::new(db.clone()));
+    let compute = Arc::new(ComputeExecutor::new().expect("test compute executor"));
     let (serving_preimages, _trade_policy_preimages) = TrainerPreimageFixture::build(
         db,
         store,
         &scenario.registry,
         &dataset_repo,
         &calibration_repo,
+        &compute,
     );
     let policy_repo: Arc<dyn PolicyRepository> = Arc::new(PgPolicyRepository::new(db.clone()));
-    let compute = Arc::new(ComputeExecutor::new().expect("test compute executor"));
     let model_run_repo: Arc<dyn ModelRunRepository> =
         Arc::new(PgModelRunRepository::new(db.clone()));
     let backtest_report_repo: Arc<dyn BacktestReportRepository> =
@@ -3576,7 +4256,7 @@ async fn build_backtest_services(
     )
     .expect("backtest service");
     let backtest_port = Arc::new(CoreBacktestPort::new(CoreBacktestPortDeps {
-        compute,
+        compute: Arc::clone(&compute),
         portfolio_solver: PortfolioSolverDeployConfig::default(),
         dataset_repo: Arc::clone(&dataset_repo),
         artifact_store: Arc::clone(store),
@@ -3594,8 +4274,10 @@ async fn build_backtest_services(
         Arc::clone(&calibration_repo),
         model_run_repo,
         policy_repo,
+        Arc::clone(&compute),
     );
     BacktestScenarioServices {
+        compute,
         backtester,
         backtest_port,
         calibration_fitter,
@@ -4103,8 +4785,16 @@ pub async fn train_backtest_evaluation_e2e() {
 
     let scenario = Box::pin(prepare_training_scenario(&db, &store)).await;
     let services = build_backtest_services(&db, &store, &scenario).await;
+    Box::pin(TrainerPreimageFixture::assert_full_objects(
+        &db,
+        &store,
+        &scenario,
+        &services.compute,
+    ))
+    .await;
     let calibrated_version =
         fit_and_seal_calibration(&db, &scenario, &services, &scenario.version).await;
+    TrainerPreimageFixture::assert_released(&services.compute).await;
     let next_before_backtest = scenario
         .registry
         .next_version_for_spec(&scenario.model_spec.model_spec_id)
@@ -4254,13 +4944,15 @@ pub async fn comparison_reuses_inputs() {
         &scenario.registry,
         &dataset_repo,
         &calibration_repo,
+        &base_services.compute,
     );
+    let read_context = ModelPreimageReadContext::default();
     serving_preimages
-        .load(&champion)
+        .load(&champion, &read_context)
         .await
         .expect("load champion preimage baseline");
     serving_preimages
-        .load(&candidate)
+        .load(&candidate, &read_context)
         .await
         .expect("load candidate preimage baseline");
     let preimage_reads = read_targets
@@ -4438,10 +5130,17 @@ pub async fn train_cpcv_persists_decomposition() {
         Arc::new(PgBacktestPathSetRepository::new(db.clone()));
     let model_run_repo: Arc<dyn ModelRunRepository> =
         Arc::new(PgModelRunRepository::new(db.clone()));
-    let (serving_preimages, _trade_policy_preimages) =
-        TrainerPreimageFixture::build(&db, &store, &registry, &dataset_repo, &calibration_repo);
+    let compute = Arc::new(ComputeExecutor::new().expect("test compute executor"));
+    let (serving_preimages, _trade_policy_preimages) = TrainerPreimageFixture::build(
+        &db,
+        &store,
+        &registry,
+        &dataset_repo,
+        &calibration_repo,
+        &compute,
+    );
     let port = CoreCpcvBacktestPort::new(CoreCpcvBacktestPortDeps {
-        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
+        compute,
         portfolio_solver: PortfolioSolverDeployConfig::default(),
         artifact_store: Arc::clone(&store),
         path_set_repo,

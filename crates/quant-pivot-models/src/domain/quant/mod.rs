@@ -58,6 +58,7 @@ mod portfolio;
 mod portfolio_scenario;
 mod promotion_permit;
 mod recommendation;
+mod recommendation_economic_outcome;
 mod recommendation_execution_rollup;
 #[allow(clippy::needless_update)] // Insert DTO omits DB-managed created_at.
 mod recommendation_resolution_outcome;
@@ -76,6 +77,7 @@ mod research_job;
 #[allow(clippy::needless_update)] // Insert DTO omits DB-managed created_at.
 mod research_readiness;
 mod resolution_observation;
+mod route_economic_health;
 #[allow(clippy::needless_update)] // NewMarketSelectionMember covers all ActiveModel columns
 mod selection;
 #[allow(clippy::needless_update)] // Child settlement inserts omit DB-managed timestamps.
@@ -103,12 +105,18 @@ pub use account_chain_execution::{
     NewAccountChainExecution,
 };
 pub use account_pause::{
-    AccountPauseConfirmation, AccountPauseDispatch, AccountPauseSubmissionInfo,
-    NewAccountPauseSubmission,
+    AccountPauseConfirmation, AccountPauseDispatch, AccountPauseOperationInfo,
+    NewAccountPauseOperation,
 };
 pub use account_recovery::{
-    AccountExecutionAssociationInfo, AccountExecutionAssociationOutcome,
-    AccountRecoveryIncidentInfo, NewAccountExecutionAssociation, NewAccountRecoveryIncident,
+    AccountCleanFunderBlockerEvidence, AccountCleanFunderBlockerInfo,
+    AccountExecutionAssociationInfo, AccountExecutionAssociationOutcome, AccountRecoveryAssessment,
+    AccountRecoveryAssessmentInput, AccountRecoveryCreatedLot, AccountRecoveryCreatedLots,
+    AccountRecoveryExecutionDelta, AccountRecoveryIncidentInfo, AccountRecoveryLotAllocation,
+    AccountRecoveryLotBalance, AccountRecoveryManifestDraft, AccountRecoveryManifestInfo,
+    AccountRecoveryMismatch, AccountRecoverySellAllocation, AccountRecoveryTokenBalance,
+    FinalizeAccountRecoveryIncident, NewAccountCleanFunderBlocker, NewAccountExecutionAssociation,
+    NewAccountRecoveryIncident, NewAccountRecoveryManifest, SealAccountRecoveryIncident,
 };
 pub use attribution::{
     AttributionArtifactContractError, AttributionArtifactInfo, AttributionSubject,
@@ -122,6 +130,7 @@ pub use basis_alert::{BasisAlertInfo, NewBasisAlert};
 pub use calibration_artifact::{
     CalibrationArtifactInfo, CalibrationArtifactPayload, ModelScoreCalibrationCommit,
     ModelScoreCalibrationCommitOutcome, NewCalibrationArtifact,
+    VerifiedModelScoreCalibrationCommit,
 };
 pub use candidate::{DomainAvailability, MarketCandidate, MarketDataHealth};
 pub use capital::{CapitalAllocationInfo, CapitalAllocationPatch, NewCapitalAllocation};
@@ -171,8 +180,8 @@ pub use feedback_cohort::{
     FEEDBACK_COHORT_PAGE_LIMIT, FeedbackCohortCandidate, FeedbackCohortContractError,
     FeedbackCohortCursor, FeedbackCohortDecision, FeedbackCohortEvidence, FeedbackCohortPage,
     FeedbackCohortPageQuery, FeedbackCohortSnapshot, FeedbackCohortWindow,
-    FeedbackExecutionEvidence, FeedbackExecutionState, FeedbackRecommendationContext,
-    FeedbackResolutionEvidence,
+    FeedbackEconomicEvidence, FeedbackExecutionEvidence, FeedbackExecutionState,
+    FeedbackRecommendationContext, FeedbackResolutionEvidence,
 };
 pub use feedback_coordinator_fault::{
     FeedbackCoordinatorFaultInfo, FeedbackCoordinatorFaultInput, FeedbackCoordinatorFaultReason,
@@ -240,13 +249,14 @@ pub use model_route_bootstrap::{
     ModelRouteBootstrapRoute,
 };
 pub use outcome_reconciliation::{
-    AccountExecutionFeeFact, ExecutionAttemptBarrier, ExecutionAttemptDeferredReason,
-    ExecutionAttemptDerivation, ExecutionAttemptReconciliationCandidate,
-    ExecutionAttemptReconciliationError, ExecutionAttemptReconciliationResult,
-    ExecutionAttemptSourceGraph, ExecutionAttemptTaskClaim, ExecutionRollupTaskClaim,
-    OutcomeTaskSettlement, RecommendationResolutionReconciliationCandidate,
-    ResolutionOutcomeDeferredReason, ResolutionOutcomeReconciliationResult,
-    ResolutionOutcomeTaskClaim,
+    AccountExecutionFeeFact, EconomicOutcomeDeferredReason, EconomicOutcomeReconciliationResult,
+    EconomicOutcomeReplayContext, EconomicOutcomeTaskClaim, EconomicOutcomeTaskSettlement,
+    ExecutionAttemptBarrier, ExecutionAttemptDeferredReason, ExecutionAttemptDerivation,
+    ExecutionAttemptReconciliationCandidate, ExecutionAttemptReconciliationError,
+    ExecutionAttemptReconciliationResult, ExecutionAttemptSourceGraph, ExecutionAttemptTaskClaim,
+    ExecutionRollupTaskClaim, OutcomeTaskSettlement,
+    RecommendationResolutionReconciliationCandidate, ResolutionOutcomeDeferredReason,
+    ResolutionOutcomeReconciliationResult, ResolutionOutcomeTaskClaim,
 };
 pub use portfolio::{NewPortfolioPlan, PortfolioPlanInfo};
 pub use portfolio_scenario::{
@@ -269,6 +279,13 @@ pub use promotion_permit::{
 };
 pub use recommendation::{
     NewRecommendation, NewRecommendationReport, RecommendationInfo, RecommendationReportInfo,
+};
+pub use recommendation_economic_outcome::{
+    EconomicExitEvidenceKind, EconomicOutcomeCensorReason, NewRecommendationEconomicOutcome,
+    RecommendationEconomicAmounts, RecommendationEconomicEvidence,
+    RecommendationEconomicOutcomeError, RecommendationEconomicOutcomeInfo,
+    RecommendationEconomicOutcomeInput, RecommendationEconomicOutcomePayload,
+    RecommendationEconomicStateDetail,
 };
 pub use recommendation_execution_rollup::{
     ExecutionRollupBarrier, ExecutionRollupDeferredReason, ExecutionRollupReconciliationResult,
@@ -294,8 +311,8 @@ pub use report_diff::{
 };
 pub use report_fact_delivery::{NewReportFactDelivery, ReportFactDeliveryInfo};
 pub use report_route_run::{
-    NewReportRouteRun, ReportRouteRun, ReportRouteRunInfo, RouteCandidateFunnel, RouteLineageView,
-    RouteModelLineage, RouteRunOutcome,
+    NewReportRouteRun, ReportRouteRun, ReportRouteRunInfo, RouteCandidateFunnel,
+    RouteHistoryLineage, RouteLineageView, RouteModelLineage, RouteRunOutcome,
 };
 pub use report_run::{
     ClaimReportSchedule, EnqueueReportRunOutcome, MaterializeReportSchedule,
@@ -322,6 +339,10 @@ pub use resolution_observation::{
     ResolutionProjectionBarrier, ResolutionProjectionClaim, ResolutionProjectionRemediationInfo,
     ResolutionProjectionSettlement, ResolutionRemediationCommit, ResolutionScanCommitOutcome,
 };
+pub use route_economic_health::{
+    NewRouteEconomicHealth, RouteEconomicHealthEvidenceDocument, RouteEconomicHealthIdentity,
+    RouteEconomicHealthInfo, RouteEconomicHealthSource,
+};
 pub use selection::{
     MarketSelectionInfo, MarketSelectionMemberInfo, MarketSelectionModel, NewMarketSelection,
     NewMarketSelectionMember,
@@ -336,7 +357,7 @@ pub use source_slice::{
 };
 pub use strategy_position_lot::{
     CumulativePositionExit, CumulativePositionFill, NewStrategyPositionLot, PositionExit,
-    PositionExitReconciliation, PositionFill, StrategyPositionLot,
+    PositionExitReconciliation, PositionFill, PositionFillReconciliation, StrategyPositionLot,
 };
 pub use trade_policy::{
     CompleteTradePolicyValidation, FailTradePolicyValidation, NewTradePolicyArtifact,

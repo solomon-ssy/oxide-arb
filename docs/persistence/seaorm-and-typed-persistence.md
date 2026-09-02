@@ -1,6 +1,6 @@
 # SeaORM 与强类型持久化规范
 
-本文档是 quant-pivot PostgreSQL/SeaORM 持久化的规范性事实源。所有新表、字段、repository、migration 和 phase 计划都必须遵守本文；现有实现与本文冲突时，应在当前 clean-break 阶段直接修正，不保留兼容 parser、dual-write、compatibility view 或 compatibility re-export。作为正式模块 API 的 canonical public barrel 不属于兼容层，可以保留。
+本文档是 quant-pivot PostgreSQL/SeaORM 持久化的规范性事实源。所有新表、字段、repository、唯一 fresh-bootstrap snapshot 和 phase 计划都必须遵守本文；现有实现与本文冲突时，应在当前 clean-break 阶段直接修正，不保留兼容 parser、dual-write、compatibility view 或 compatibility re-export。作为正式模块 API 的 canonical public barrel 不属于兼容层，可以保留。
 
 ## 1. 核心原则
 
@@ -25,7 +25,7 @@
 | 是未经解释的外部原始 payload，必须保真以供审计/重放？ | `ExternalJsonDocument` JSONB | catalog/CLOB upstream raw payload |
 | 只是可选文本备注，且没有结构化业务语义？ | nullable `TEXT` + 长度/CHECK | operator comment |
 
-“将来可能增加字段”本身不是使用裸 JSON 的理由。闭合 struct 可通过显式 schema-version 和破坏式 migration 演进；可选字段只能表示真实业务可选性，不能作为兼容旧 payload 的后门。
+“将来可能增加字段”本身不是使用裸 JSON 的理由。在当前未投产阶段，闭合 struct 的变化直接更新 canonical type/format 和唯一 v1 fresh bootstrap，然后从 disposable 空库重建；可选字段只能表示真实业务可选性，不能作为兼容旧 payload 的后门。
 
 ## 3. Typed JSONB 范式
 
@@ -66,9 +66,9 @@ Rust struct 与 PostgreSQL 列布局是两个不同层次的决策：
 
 - 内部字段需要 SQL 查询、索引、约束、局部更新，或拥有各自生命周期时，struct 只是 domain DTO，数据库仍应拆成具名列/子表；此时不需要 `FromJsonQueryResult`。
 - 内部 key 固定、整体写入/读取/校验/哈希、没有单字段查询与局部更新语义时，它是 atomic value object，使用 typed JSONB；此时 entity 字段必须直接使用 derive `FromJsonQueryResult` 的 struct/enum。
-- key 是否“未来可能扩展”不能决定 JSONB。项目自有 fixed document 的演进必须通过显式 format version + clean-break migration，不能退化成 `Value` 或随意 optional key。
+- key 是否“未来可能扩展”不能决定 JSONB。项目自有 fixed document 的变化必须同时更新显式 format version、canonical type 与唯一 fresh bootstrap，并重建 disposable 空库；不能退化成 `Value` 或随意 optional key。
 
-`ModelSpecThesis` 属于第二类：`summary`、`hypothesis`、`limitations` 是一个不可分割的研究论题，随整个 ModelSpec WORM、共同参与 `definition_hash`，系统不按单字段过滤或局部 patch。因此使用 `ModelSpecThesis` typed JSONB + `FromJsonQueryResult`；可执行字段仍分别使用关系列或独立 typed contract。若未来出现“按 limitation 检索/审批单条 limitation”的真实需求，应迁移到关系模型，而不是对 JSONB 做临时字符串查询。
+`ModelSpecThesis` 属于第二类：`summary`、`hypothesis`、`limitations` 是一个不可分割的研究论题，随整个 ModelSpec WORM、共同参与 `definition_hash`，系统不按单字段过滤或局部 patch。因此使用 `ModelSpecThesis` typed JSONB + `FromJsonQueryResult`；可执行字段仍分别使用关系列或独立 typed contract。若未来出现“按 limitation 检索/审批单条 limitation”的真实需求，应在未投产的 canonical schema 中直接改为关系模型并从空库重建，而不是对 JSONB 做临时字符串查询。
 
 `quant_model_version.training_objective` 同样是原子 provenance document，但其形态不是一个“可选字段大全”。canonical 类型是 format v1 的 `ModelTrainingObjective`，内部使用 `learning_to_rank`、`classical_pointwise`、`hand_authored` 判别联合；LTR 的固定参数由 `TrainingObjectiveSpec` 表达。SeaORM entity 直接持有该类型，API/TypeScript 使用同构 union，数据库 CHECK 约束 format/tag。不得恢复 `_json` 字段名、`Record<String, Value>` 或前端 key 探测。
 
@@ -149,16 +149,16 @@ DB CHECK 必须验证 document format、数组/boolean/hash 形态以及 manifes
 - `research_job.result_ref` 是跨多个结果实体 namespace 的多态引用。持久化使用受 lifecycle CHECK 约束的 `result_kind + result_ref` 成对列，domain/API/UI 使用 `{ kind, id }` tagged reference；禁止把 UUID 包装成任一具体结果 ID 来制造虚假单一 identity，也禁止恢复无 discriminator 的 response 字段。
 - `SHOW`、catalog、ClickHouse identifier 等 SQL identifier 必须来自封闭 enum/manifest。即使 SQL 是静态管理语句，也不得让 `&str` 从调用方流入格式化位置。
 
-## 6. Entity First 与 boot migration
+## 6. Entity First 与唯一 fresh bootstrap
 
 - runtime dense entity 是常规 table、column、relation、FK 和基础 index 的源。
-- 唯一 clean-boot migration 保存 immutable v1 entity time capsule，并使用 `SchemaBuilder::apply`。migration ledger 已保证 migration 只执行一次；初始化路径禁止使用 runtime `SchemaRegistry::sync`。
+- 唯一 clean-boot snapshot 保存 immutable v1 entity time capsule，并由现有 SeaORM bootstrap API 使用 `SchemaBuilder::apply`。bootstrap ledger 只记录这一个安装事实；初始化路径禁止使用 runtime `SchemaRegistry::sync`。
 - ActiveEnum、array-only enum、复杂 CHECK、partial/expression index、WORM trigger 等 Entity First 尚不能表达的对象，通过集中 typed schema spec/SeaQuery 补齐。
 - 禁止在 repository 或 runtime startup 中手写 DDL。
 - PostgreSQL empty check 覆盖 table、view、materialized view、sequence、type、function 和 trigger；ClickHouse 对象必须与 manifest 精确相等。
-- migration snapshot、runtime entity、normalized manifest 三者必须由 CI 做 regenerate-and-diff；禁止手工维护互相漂移的多份 schema owner。
+- v1 bootstrap snapshot、runtime entity、normalized manifest 三者必须由 CI 做 regenerate-and-diff；禁止手工维护互相漂移的多份 schema owner。
 
-参考 SeaORM 官方的 [Entity First workflow](https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-first/)：`apply` 用于 migration 初始化，`sync` 会查询 live schema，更适合开发期同步而非生产 boot migration。
+参考 SeaORM 官方的 [Entity First workflow](https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-first/)：本项目只在 deploy-only fresh bootstrap 中使用 `apply`；`sync` 会查询 live schema，不得用于 runtime 自动 DDL。
 
 ## 7. Query 与 relation loading
 
@@ -210,9 +210,9 @@ CI 只用 deterministic statement/row/byte budget 判定。p50/p95/p99 通过 tr
 - ClickHouse typed schema/query renderer；
 - 明确标注的 test-only corruption case。
 
-`PostgreSQL` raw result 由固定 query shape 和 typed decode 约束；其 catalog、lifecycle 与 migration SQL 必须与 owning function 放在同一模块。`ClickHouse` native reads 通过 `ClickHouseQueryLimits` 设置稳定 `log_comment`，并以 `max_result_rows`、`max_result_bytes`、`result_overflow_mode=throw` 在服务端拒绝越界结果。identifier 必须来自封闭 enum/manifest，不得格式化用户输入字符串。
+`PostgreSQL` raw result 由固定 query shape 和 typed decode 约束；其 catalog、lifecycle 与 bootstrap SQL 必须与 owning function 放在同一模块。`ClickHouse` native reads 通过 `ClickHouseQueryLimits` 设置稳定 `log_comment`，并以 `max_result_rows`、`max_result_bytes`、`result_overflow_mode=throw` 在服务端拒绝越界结果。identifier 必须来自封闭 enum/manifest，不得格式化用户输入字符串。
 
-动态 renderer 的 identifier 来源同样是契约：runtime research-readiness 在插值前要求整个 `ResearchSourceBinding` 与 canonical built-in registry 精确相等；PG/CH lifecycle 只接受通过长度/字符校验并被 dialect quote 的配置标识，或 compiled migration manifest 中的封闭对象名。仅“做了转义”但来源仍开放的字符串不满足该边界。
+动态 renderer 的 identifier 来源同样是契约：runtime research-readiness 在插值前要求整个 `ResearchSourceBinding` 与 canonical built-in registry 精确相等；PG/CH lifecycle 只接受通过长度/字符校验并被 dialect quote 的配置标识，或 compiled bootstrap manifest 中的封闭对象名。仅“做了转义”但来源仍开放的字符串不满足该边界。
 
 普通 CRUD、join、aggregate、upsert 和 SeaQuery 可表达的 DDL 不得以“更方便”为由改写成 native SQL。review 必须确认 raw SQL 位于基础设施或 repository owner，参数通过 bind/typed `Statement` 传入，动态 identifier 已按 dialect 校验并 quote；test-only corruption SQL 只允许留在隔离的测试模块。
 
@@ -225,7 +225,7 @@ CI 只用 deterministic statement/row/byte budget 判定。p50/p95/p99 通过 tr
 - ID/hash/method/status 是否为 newtype/enum？
 - 能否一次 join/load 完成，是否有 statement-count 断言？
 - transaction 是否覆盖状态、audit、outbox、idempotency result？
-- migration/entity/manifest/API/TS contract 是否 regenerate-and-diff 一致？
+- v1 bootstrap/entity/manifest/API/TS contract 是否 regenerate-and-diff 一致？
 - corruption、unknown field/tag、hash mismatch、CAS race、rollback 是否有测试？
 
 ## 11. 官方资料基线

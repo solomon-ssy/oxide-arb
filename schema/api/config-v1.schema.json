@@ -159,27 +159,6 @@
         "reason"
       ]
     },
-    "AutoExecutionConfig": {
-      "description": "Auto-execution policy.",
-      "type": "object",
-      "properties": {
-        "max_orders_per_report": {
-          "description": "Maximum orders auto-created per report.",
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "max_total_usd_per_report": {
-          "description": "Maximum total USD auto-executed per report.",
-          "$ref": "#/$defs/DecimalValue"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "max_orders_per_report",
-        "max_total_usd_per_report"
-      ]
-    },
     "BuyModelRoute": {
       "description": "Exact Buy-side route represented by one report and one durable model run.\n\n`Pooled` may contain only non-vertical market categories. `Crypto` and\n`Weather` are isolated category routes because their `ResearchProfile`,\ndomain-source, factor-plane, and serving-contract preimages are distinct.",
       "type": "string",
@@ -318,7 +297,7 @@
         "model_routing",
         "report_schedule",
         "operations_policy",
-        "execution_automation_policy"
+        "execution_authorization_policy"
       ]
     },
     "ConfigResourceSummaryView": {
@@ -977,27 +956,30 @@
         "min_entry_book_depth_usd"
       ]
     },
-    "ExecutionAutomationPolicy": {
-      "description": "Explicit authorization for semi-automatic and automatic execution.",
+    "ExecutionAuthorizationPolicy": {
+      "description": "Explicit authorization policy for recommendation entry intents.",
       "type": "object",
       "properties": {
-        "auto_execution": {
-          "$ref": "#/$defs/AutoExecutionConfig"
+        "operator_approval_ttl_secs": {
+          "description": "Seconds an operator authorization remains valid before admission must\nobtain fresh account, market, policy, and economic-health evidence.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "policy_automatic_limits": {
+          "$ref": "#/$defs/PolicyAutomaticLimits"
         },
         "schema_version": {
           "$ref": "#/$defs/SchemaVersion",
           "x-format": "integer",
           "x-ui-visible": false
-        },
-        "semi_auto": {
-          "$ref": "#/$defs/SemiAutoConfig"
         }
       },
       "additionalProperties": false,
       "required": [
         "schema_version",
-        "semi_auto",
-        "auto_execution"
+        "operator_approval_ttl_secs",
+        "policy_automatic_limits"
       ]
     },
     "ExecutionBreakerConfig": {
@@ -1069,6 +1051,9 @@
         "exit_monitor": {
           "$ref": "#/$defs/ExitMonitorPolicy"
         },
+        "maker_rebate": {
+          "$ref": "#/$defs/MakerRebatePolicy"
+        },
         "portfolio": {
           "$ref": "#/$defs/PortfolioConfig"
         },
@@ -1088,6 +1073,7 @@
         "entry_order_policy",
         "exit_monitor",
         "reconciliation",
+        "maker_rebate",
         "breaker"
       ]
     },
@@ -1168,6 +1154,34 @@
       "additionalProperties": false,
       "required": [
         "emergency_exit"
+      ]
+    },
+    "MakerRebatePolicy": {
+      "description": "Frozen account-level policy for valuing delayed maker rebates.",
+      "type": "object",
+      "properties": {
+        "fallback_lag_from_program_close_secs": {
+          "description": "Conservative lag from UTC program-day close while observed history is insufficient.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "observed_p95_min_samples": {
+          "description": "Complete venue-reported-accrual to wallet-credit program days required for p95.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "payout_threshold_usd": {
+          "description": "Day-local minimum venue-calculated accrual required for payout.",
+          "$ref": "#/$defs/DecimalValue"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "payout_threshold_usd",
+        "fallback_lag_from_program_close_secs",
+        "observed_p95_min_samples"
       ]
     },
     "MarketCategory": {
@@ -1450,6 +1464,12 @@
           "format": "uint64",
           "minimum": 0
         },
+        "economic_source_lateness_secs": {
+          "description": "Maximum arrival lag admitted before a horizon outcome seals typed censor evidence.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "enabled": {
           "description": "Whether the outcome reconciliation worker is enabled.",
           "type": "boolean"
@@ -1472,7 +1492,8 @@
         "enabled",
         "sweep_secs",
         "candidate_batch_size",
-        "source_block_span"
+        "source_block_span",
+        "economic_source_lateness_secs"
       ]
     },
     "PolicyActivationKind": {
@@ -1677,7 +1698,7 @@
         "model_evaluation_claim",
         "future_report_run_reconcile",
         "operational_admission",
-        "execution_automation_policy_admission"
+        "execution_authorization_admission"
       ]
     },
     "PolicyApprovalDecision": {
@@ -1753,6 +1774,27 @@
         "created_at"
       ]
     },
+    "PolicyAutomaticLimits": {
+      "description": "Limits for policy-automatic authorization.",
+      "type": "object",
+      "properties": {
+        "max_orders_per_report": {
+          "description": "Maximum automatically authorized orders per report.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_total_usd_per_report": {
+          "description": "Maximum total USD automatically authorized per report.",
+          "$ref": "#/$defs/DecimalValue"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "max_orders_per_report",
+        "max_total_usd_per_report"
+      ]
+    },
     "PolicyConsumer": {
       "type": "string",
       "enum": [
@@ -1767,8 +1809,7 @@
         "model_runner",
         "report_scheduler",
         "worker_admission",
-        "alert_dispatcher",
-        "runtime_mode_gate"
+        "alert_dispatcher"
       ]
     },
     "PolicyDocument": {
@@ -1858,11 +1899,11 @@
           "type": "object",
           "properties": {
             "document": {
-              "$ref": "#/$defs/ExecutionAutomationPolicy"
+              "$ref": "#/$defs/ExecutionAuthorizationPolicy"
             },
             "resource_kind": {
               "type": "string",
-              "const": "execution_automation_policy"
+              "const": "execution_authorization_policy"
             }
           },
           "required": [
@@ -1963,7 +2004,7 @@
       "description": "Revision identities frozen at a decision boundary.",
       "type": "object",
       "properties": {
-        "execution_automation_policy": {
+        "execution_authorization_policy": {
           "type": [
             "string",
             "null"
@@ -2976,22 +3017,6 @@
         "allow_near_resolution",
         "min_time_to_resolution_secs",
         "max_time_to_resolution_secs"
-      ]
-    },
-    "SemiAutoConfig": {
-      "description": "Semi-auto approval policy.",
-      "type": "object",
-      "properties": {
-        "approval_ttl_secs": {
-          "description": "Approval time-to-live in seconds.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "approval_ttl_secs"
       ]
     },
     "ValidatePolicyDraftRequest": {

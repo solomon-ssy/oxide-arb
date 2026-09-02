@@ -49,7 +49,7 @@ const DRIFT_SCHEMA_DOMAIN: &str = "quant-pivot/feedback-drift-schema";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageNoActionReason {
-    NoPolicyObservations,
+    NoModelLearningCandidates,
     InsufficientMatureLabels,
     InsufficientNewMatureLabels,
     InsufficientCoverage,
@@ -60,7 +60,7 @@ impl CoverageNoActionReason {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::NoPolicyObservations => "feedback_no_policy_observations",
+            Self::NoModelLearningCandidates => "feedback_no_model_learning_candidates",
             Self::InsufficientMatureLabels => "feedback_insufficient_mature_labels",
             Self::InsufficientNewMatureLabels => "feedback_insufficient_new_mature_labels",
             Self::InsufficientCoverage => "feedback_insufficient_coverage",
@@ -72,7 +72,9 @@ impl CoverageNoActionReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoverageGateInput {
-    pub policy_evaluation_count: u64,
+    /// Every recommendation classified by the frozen `ModelLearning` cohort.
+    /// Policy-evaluation-only economic outcomes never enter this denominator.
+    pub model_learning_candidate_count: u64,
     pub mature_label_count: u64,
     pub new_mature_label_count: u64,
     pub minimum_mature_labels: u64,
@@ -101,21 +103,22 @@ impl CoverageGateInput {
             || self.minimum_new_mature_labels > self.minimum_mature_labels
             || self.minimum_coverage <= Decimal::ZERO
             || self.minimum_coverage > Decimal::ONE
-            || self.mature_label_count > self.policy_evaluation_count
+            || self.mature_label_count > self.model_learning_candidate_count
             || self.new_mature_label_count > self.mature_label_count
         {
             return Err(methodology(
                 "feedback coverage counts or thresholds do not reconcile",
             ));
         }
-        let coverage = if self.policy_evaluation_count == 0 {
+        let coverage = if self.model_learning_candidate_count == 0 {
             Decimal::ZERO
         } else {
-            (Decimal::from(self.mature_label_count) / Decimal::from(self.policy_evaluation_count))
-                .round_dp(RESEARCH_DECIMAL_SCALE)
+            (Decimal::from(self.mature_label_count)
+                / Decimal::from(self.model_learning_candidate_count))
+            .round_dp(RESEARCH_DECIMAL_SCALE)
         };
-        let reason = if self.policy_evaluation_count == 0 {
-            Some(CoverageNoActionReason::NoPolicyObservations)
+        let reason = if self.model_learning_candidate_count == 0 {
+            Some(CoverageNoActionReason::NoModelLearningCandidates)
         } else if self.mature_label_count < self.minimum_mature_labels {
             Some(CoverageNoActionReason::InsufficientMatureLabels)
         } else if self.new_mature_label_count < self.minimum_new_mature_labels {
@@ -366,7 +369,7 @@ impl FeedbackCoverageArtifact {
             ));
         }
         let expected_input = CoverageGateInput {
-            policy_evaluation_count: self.cohorts.policy_evaluation.eligible_count(),
+            model_learning_candidate_count: self.cohorts.model_learning.candidate_count(),
             mature_label_count: mature_count,
             new_mature_label_count: self.new_mature_label_count,
             minimum_mature_labels: self.feedback_policy.minimum_mature_labels,

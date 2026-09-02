@@ -15,7 +15,7 @@ pub use economic::{
     EconomicTierFactory, ExecutableCashTierSeedFactory, ExecutableCashTierSeedInput,
     ExecutablePassiveTierSeedFactory, ExecutablePassiveTierSeedInput,
     ExecutableTierLadderSeedFactory, ExecutableTierLadderSeedInput, ExecutableTierSeed,
-    ExistingPortfolioFactory,
+    ExistingPortfolioFactory, TierSeedBuild,
 };
 pub use global::{
     GlobalPortfolioInput, GlobalPortfolioPlanner, GlobalPortfolioResult, PlannedEconomicTier,

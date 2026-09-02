@@ -404,11 +404,14 @@ pub struct OutcomeReconciliationPolicy {
     pub candidate_batch_size: u64,
     /// Maximum finalized source blocks scanned per resolution pass.
     pub source_block_span: u64,
+    /// Maximum arrival lag admitted before a horizon outcome seals typed censor evidence.
+    pub economic_source_lateness_secs: u64,
 }
 
 impl OutcomeReconciliationPolicy {
     pub const MAX_CANDIDATE_BATCH_SIZE: u64 = 10_000;
     pub const MAX_SOURCE_BLOCK_SPAN: u64 = 10_000;
+    pub const MAX_ECONOMIC_SOURCE_LATENESS_SECS: u64 = 604_800;
 }
 
 impl Default for OutcomeReconciliationPolicy {
@@ -418,6 +421,7 @@ impl Default for OutcomeReconciliationPolicy {
             sweep_secs: 60,
             candidate_batch_size: 256,
             source_block_span: 256,
+            economic_source_lateness_secs: 300,
         }
     }
 }

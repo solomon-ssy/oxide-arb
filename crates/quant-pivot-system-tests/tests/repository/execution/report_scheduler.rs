@@ -1,19 +1,27 @@
 //! Durable report-coordinator persistence system contracts.
 
 use chrono::{Duration, Utc};
+use quant_pivot_error::storage::{StorageError, entity::DECISION_POLICY_SNAPSHOT};
 use quant_pivot_models::{
     domain::quant::{
         ClaimReportSchedule, MaterializeReportSchedule, NewReportRun, ReconcileReportSchedule,
         ReportRunClaimConfig,
     },
-    enums::quant::{
-        ReportRunStatus, ReportRunTerminalReason, ReportScheduleGapReason, ReportTriggerKind,
+    enums::{
+        quant::{
+            ReportRunStatus, ReportRunTerminalReason, ReportScheduleGapReason, ReportTriggerKind,
+        },
+        runtime_config::ConfigResourceKind,
     },
     types::{ContentHash, DecisionPolicySnapshotId, ReportRunId, ReportTriggerKey},
 };
-use quant_pivot_repository::{postgres::PgReportRunRepository, traits::ReportRunRepository};
+use quant_pivot_repository::{
+    postgres::{PgPolicyRepository, PgReportRunRepository},
+    traits::{PolicyRepository, ReportRunRepository},
+};
 use quant_pivot_system_tests::{
-    postgres::setup_pg, support::policy_fixtures::bootstrap_default_policy_bundle,
+    postgres::setup_pg,
+    support::policy_fixtures::{activate_policy_bundle, bootstrap_default_policy_bundle},
 };
 use sea_orm::DatabaseConnection;
 use uuid::Uuid;
@@ -88,6 +96,70 @@ pub async fn two_coordinators_claim_run() {
         .expect("claimed report has a decision time");
     assert_eq!(decision_at.timestamp_subsec_nanos() % 1_000_000, 0);
     assert_eq!(claimed[0].started_at, Some(decision_at));
+}
+
+pub async fn activation_read_stays_coherent() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let original_id = activate_runtime(&db).await;
+    let policies = PgPolicyRepository::new(db.clone());
+    let runs = PgReportRunRepository::new(db);
+    let activation = policies
+        .load_current_activation(None)
+        .await
+        .expect("read coordinator activation")
+        .expect("active coordinator policy");
+    assert_eq!(activation.decision_policy_snapshot_id, original_id);
+
+    // Freeze the exact interleaving: B commits after reading activation A,
+    // before the coordinator resolves the snapshot referenced by A.
+    let successor_id = activate_policy_bundle(
+        &policies,
+        ConfigResourceKind::RecommendationPolicy,
+        "report-schedule-interleaving",
+        "activate between the coordinator's activation and snapshot reads",
+        |snapshot| snapshot.recommendation.reports.ad_hoc_default_top_n += 1,
+    )
+    .await;
+    assert_ne!(successor_id, original_id);
+    let snapshot = policies
+        .load_snapshot(&activation.decision_policy_snapshot_id)
+        .await
+        .expect("resolve the activation's immutable snapshot")
+        .expect("the prior snapshot remains immutable");
+    assert_eq!(snapshot.decision_policy_snapshot_id, original_id);
+    let current = policies
+        .load_current_bundle()
+        .await
+        .expect("read successor bundle")
+        .expect("successor is active");
+    assert_eq!(current.decision_policy_snapshot_id, successor_id);
+    assert_eq!(
+        current.snapshot.recommendation.reports.ad_hoc_default_top_n,
+        snapshot
+            .snapshot
+            .recommendation
+            .reports
+            .ad_hoc_default_top_n
+            + 1
+    );
+
+    let stale = runs
+        .reconcile_schedules(&snapshot.decision_policy_snapshot_id, Vec::new())
+        .await
+        .expect_err("the old coherent snapshot must lose the active-policy CAS");
+    assert!(matches!(
+        stale,
+        StorageError::StateConflict {
+            entity: DECISION_POLICY_SNAPSHOT,
+            id: Some(id),
+            detail,
+        } if id == original_id.to_string()
+            && detail == "runtime config changed during report schedule operation"
+    ));
+    runs.reconcile_schedules(&successor_id, Vec::new())
+        .await
+        .expect("the next pass can reconcile the successor policy");
 }
 
 pub async fn restart_coalesces_latest_gap() {

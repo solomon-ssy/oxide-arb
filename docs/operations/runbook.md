@@ -1,6 +1,6 @@
 # quant-pivot 生产运行 Runbook
 
-> Last reviewed: 2026-07-24.
+> Last reviewed: 2026-08-29.
 >
 > This document is an operating manual for quant-pivot on Polymarket. It explains how to prepare credentials and capital, start the system, read reports, place governed orders, sell or redeem positions, and respond to incidents. It is not investment advice. Every buy/sell decision must be traceable to a published `RecommendationReport`, an `OrderIntent`, an `ExecutionOrder`, or an explicit operator incident action.
 
@@ -8,12 +8,12 @@
 
 1. **Polymarket-only.** 本系统只支持 Polymarket Gamma、CLOB、Data API、Polygon 结算链路。
 2. **主产物是 `RecommendationReport`。** 系统先给出 Top-N 推荐，推荐里包含买什么、什么时候买、买多少、什么时候卖、卖多少、依据什么。
-3. **`report_only` 不是模拟。** `report_only` 不签名、不下单，但报告 sizing 基于真实 venue 账户：CLOB collateral 加 Data API positions。因此启动和生成报告也需要真实 `private_key`、`quant.account.funder` 和可读账户。
-4. **私钥只在可执行模式签名。** `semi_auto` / `auto_execution` 下提交订单时才会用私钥签 CLOB order；`report_only` 只用认证客户端读取账户和 CLOB L2 凭证。
+3. **不存在模拟或仅报告模式。** 每份报告 sizing 都基于真实 venue 账户：CLOB collateral 加 Data API positions。因此启动和生成报告需要真实 `private_key`、`quant.account.funder` 和可读账户。
+4. **Entry authority 独立治理。** 安全默认值是 `OperatorApprovalRequired`；`PolicyAutomatic` 必须通过全局 preflight 与逐 intent admission，且不改变报告可见性。
 5. **所有执行默认 fail-closed。** 缺私钥 credential、缺 funder、账户不一致、active policy/preflight 无效、数据质量不足、book 过期、kill switch 非 `closed`、capital/reconciliation 异常，都会拒绝或延后执行。
-6. **人工只能收紧订单。** `approve` 允许降低 shares、降低 limit price、降低 max notional；不能放大报告给出的风险包络。
+6. **人工授权只能收紧订单。** operator authorization 允许降低 shares、降低 limit price、降低 max notional；不能放大报告给出的风险包络。
 7. **资金真相来自 venue。** `AccountSnapshot` 使用 CLOB collateral 和 Data API positions，runtime budget 只是上限，不是凭空可花资金。
-8. **先治理，后执行。** 生产订单优先走 `semi_auto` 或 `auto_execution` 的 `OrderIntent` 链路；直接在 Polymarket UI 手动交易只适合作为人工 `report_only` 操作或事故处置，审计和 attribution 会弱于系统内订单。
+8. **先治理，后执行。** 生产订单走 `OrderIntent` + authorization evidence + admission 链路；直接在 Polymarket UI 手动交易只允许严格 break-glass 处置，并会触发 account recovery。
 
 ## 1. 外部资料与系统事实来源
 
@@ -37,9 +37,9 @@
 
 | 角色 | 可以做什么 | 禁止事项 |
 |------|------------|----------|
-| Operator | 启停进程、健康检查、运行 ad-hoc report、切 mode、设置 kill switch、处理事故 | 不修改策略参数除非有量化/负责人授权 |
+| Operator | 启停进程、健康检查、运行 ad-hoc report、切换 entry authorization policy、设置 kill switch、处理事故 | 不修改策略参数除非有量化/负责人授权 |
 | Quant | 配置 selection、features、factors、model、portfolio、reports、execution 策略；解释推荐 | 不直接绕过治理提交订单 |
-| Approver | 在 `semi_auto` 审批或拒绝 `OrderIntent` | 不扩大 shares、price、notional |
+| Approver | 授权或拒绝 `PendingAuthorization` OrderIntent | 不扩大 shares、price、notional |
 | Admin | 管理用户、角色、JWT、secret readiness、policy 激活/回滚 | 不把私钥、JWT signing key、relayer key 写入仓库、环境变量或命令行 |
 
 新部署会 seed `admin`，但不存在默认口令。执行 `postgres-schema apply` 前，secret manager 必须把
@@ -48,36 +48,31 @@
 使 schema finalize 失败；应用 runtime 不读取该文件。首次登录后仍应轮换口令或创建实名管理员并禁用
 bootstrap 账户。
 
-## 3. Runtime mode 与 kill switch
+## 3. Entry authorization 与 kill switch
 
-### 3.1 Runtime mode
+### 3.1 Entry authorization policy
 
-| Mode | 报告 | 创建 intent | 人工审批 | 自动策略批准 | 签名 / 提交订单 |
-|------|------|-------------|----------|--------------|-----------------|
-| `report_only` | 是 | 否 | 不适用 | 否 | 否 |
-| `semi_auto` | 是 | 是，状态 `pending_approval` | 必须 | 否 | 仅 `approve` 后人工 `submit` |
-| `auto_execution` | 是 | 是，状态 `approved_by_policy` | 非必需 | 是 | admission 通过后自动或人工提交 |
+| Policy | 报告 | Intent authorization | 升级条件 |
+|------|------|-------------|----------|
+| `operator_approval_required` | 始终可见 | intent 进入 `pending_authorization`，必须冻结操作员证据 | 安全默认/降级，无 readiness 前置条件，但仍需 CAS、RBAC、reason |
+| `policy_automatic` | 始终可见 | 只有 recommendation ceiling 允许且无 blocker 时冻结 active-policy 证据 | 所有 active Route 必须有 exact identity 的 fresh `Healthy` economic evidence，完整 preflight 通过 |
 
-允许的升级/降级路径：
+升级示例：
 
-```mermaid
-stateDiagram-v2
-    [*] --> report_only
-    report_only --> semi_auto: preflight
-    semi_auto --> report_only: tighten
-    semi_auto --> auto_execution: preflight
-    auto_execution --> semi_auto: tighten
-    auto_execution --> report_only: tighten
+```bash
+curl -sS -X POST "$BASE/api/system/runtime-controls/entry-authorization-policy" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" \
+  -H "X-Acting-Role: operator" \
+  -H "Content-Type: application/json" \
+  -d '{"expected_revision": 7, "policy": "policy_automatic", "reason": "all Route economic-health and execution preflights passed"}'
 ```
-
-`report_only` 不能直接升级到 `auto_execution`。先进入 `semi_auto`，完成 shadow / readiness 后再升级。
 
 ### 3.2 Kill switch
 
 | State | 新开仓 | 普通自动卖出 | 用途 |
 |-------|--------|--------------|------|
 | `closed` | 允许 | 允许 | 正常状态 |
-| `report_only_forced` | 禁止 | 允许 | 强制只生成报告，不新增 exposure |
 | `exit_only` | 禁止 | 允许 | 只允许退出或减仓 |
 | `execution_halted` | 禁止 | 禁止 | 暂停所有自动执行，人工处理 |
 | `emergency_halted` | 禁止 | 禁止普通自动退出；进入紧急处置 | 严重事故，清除时需要 operator ack |
@@ -88,12 +83,13 @@ stateDiagram-v2
 BASE=http://127.0.0.1:8080
 TOKEN=...
 
-curl -sS -X POST "$BASE/api/system/kill-switch" \
+curl -sS -X POST "$BASE/api/system/runtime-controls/kill-switch" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept-Api-Version: v1" \
   -H "X-Acting-Role: operator" \
   -H "Content-Type: application/json" \
   -d '{
+    "expected_revision": 8,
     "state": "exit_only",
     "reason": "venue instability: stop new entries, keep exits enabled",
     "ack": false
@@ -108,11 +104,11 @@ curl -sS -X POST "$BASE/api/system/kill-switch" \
 
 | 项 | 是否必须 | 用于 | 配置位置 | 说明 |
 |----|----------|------|----------|------|
-| Polygon / Polymarket signer private key | 所有 mode 必须 | CLOB auth、账户读取、可执行模式签订单 | `[keys].private_key = "REPLACE_WITH_PRIVATE_KEY"` | 明文仅写入 gitignored 或权限 `0600` 的 deploy TOML；解析后由 `SecretText` 持有 |
-| `quant.account.funder` | 所有 mode 必须 | 读取 collateral、positions、计算 capital base | explicit deploy TOML 的 `[quant.account].funder` | EOA 必须等于 signer；contract wallet 必须是 signer/有效 session signer 控制的官方派生钱包 |
-| `quant.account.wallet_kind` | 所有 mode 必须 | 决定签名类型和 funder 校验 | explicit deploy TOML 的 `[quant.account].wallet_kind` | 支持 `eoa`、`proxy`、`gnosis_safe`、`deposit_wallet`；fresh boot 的 Deposit Wallet 只接受当前官方 `BeaconProxy` |
+| Polygon / Polymarket signer private key | 所有部署必须 | CLOB auth、账户读取；只在 intent 已授权且 admission 通过后签订单 | `[keys].private_key = "REPLACE_WITH_PRIVATE_KEY"` | 明文仅写入 gitignored 或权限 `0600` 的 deploy TOML；解析后由 `SecretText` 持有 |
+| `quant.account.funder` | 所有部署必须 | 读取 collateral、positions、计算 capital base | explicit deploy TOML 的 `[quant.account].funder` | EOA 必须等于 signer；contract wallet 必须是 signer/有效 session signer 控制的官方派生钱包 |
+| `quant.account.wallet_kind` | 所有部署必须 | 决定签名类型和 funder 校验 | explicit deploy TOML 的 `[quant.account].wallet_kind` | 支持 `eoa`、`proxy`、`gnosis_safe`、`deposit_wallet`；fresh boot 的 Deposit Wallet 只接受当前官方 `BeaconProxy` |
 | CLOB L2 credentials | 不单独配置 | CLOB trading endpoints | 自动派生 | SDK connect 时由 private key 和 wallet topology 派生 |
-| Polygon RPC URL | 所有 mode 必须 | on-chain 读写、结算、赎回 | explicit deploy TOML 的 `[polymarket.onchain].rpc_endpoint` | 生产必须使用 protected endpoint variant 与可靠 RPC，配置超时 |
+| Polygon RPC URL | 所有部署必须 | on-chain 读写、结算、赎回 | explicit deploy TOML 的 `[polymarket.onchain].rpc_endpoint` | 生产必须使用 protected endpoint variant 与可靠 RPC，配置超时 |
 | Gasless relayer key/address | proxy/safe/deposit_wallet 且会提交链上交易时必须 | gasless wallet-create/approval/redeem/settlement | `[polymarket.relayer].api_key = "REPLACE_WITH_RELAYER_API_KEY"`；address 为非敏感配置 | EOA 可直接付 gas；relayer key 不得暴露到前端 |
 | JWT signing key | Web API 必须 | HS256 登录和 API 认证 | `[web.jwt].signing_key = "REPLACE_WITH_JWT_SIGNING_KEY"` | 值为 Base64URL-no-pad 编码的恰好 32 个随机字节；轮换立即使所有旧 JWT 失效 |
 | Evidence signing key | 研究证据生产必须 | BLAKE3 keyed attestation | `[research.evidence_attestation].signing_key = "REPLACE_WITH_EVIDENCE_SIGNING_KEY"` | 值为 64 个小写 hex；历史 key 同样由 `SecretText` 持有，禁止与 JWT key 复用 |
@@ -126,9 +122,10 @@ fresh boot 的输入域，不提供 reader、兼容分支或历史兜底。
 
 | 组件 | 用途 | 运行前检查 |
 |------|------|------------|
-| Postgres | 系统主库、policy revisions/approvals/activations、reports、intents、orders、positions、operation log | 空库只执行单一 boot migration；runtime 连接池账号无 DDL 权限 |
+| Postgres | 系统主库、policy revisions/approvals/activations、reports、intents、orders、positions、operation log | 空库只执行单一 fresh bootstrap；runtime 连接池账号无 DDL 权限 |
 | ClickHouse | market facts、features、数据质量、研究分析 | database 存在，批量写入权限正常 |
 | Redis | JWT revocation、缓存、运行时辅助状态 | 连接、认证、DB、key prefix 正确 |
+| S3 artifact store | Dataset/model/research evidence 的 immutable bytes | bucket versioning 与 Object Lock retention 已启用；provider 必须原生持久化并可 GET 回读配置 prefix 上唯一一条 enabled `AbortIncompleteMultipartUpload` rule，`days_after_initiation = 1`，且不得附带 object expiration/transition；应用对可观测写失败主动 abort，provider lifecycle 只兜底进程崩溃/强制取消。Disposable MinIO 仅以其原生 global stale-upload sweep 验证同类兜底行为，不能替代 production S3 prefix contract |
 | Web server | API、UI、WS、metrics | listen host/port、CORS、JWT 配置正确 |
 | Metrics backend | `/metrics` scrape | Prometheus 或同等采集已配置 |
 | Log backend | 结构化日志 | production 建议 `log_json=true` |
@@ -137,7 +134,7 @@ fresh boot 的输入域，不提供 reader、兼容分支或历史兜底。
 
 Deploy Config 只包含启动时才能决定的内容：服务 endpoint、bind/CORS、deployment identity、PostgreSQL/ClickHouse/Redis/artifact store 连接位置、Polymarket/provider binding、日志/TLS/JWT metadata 与主机资源预算。进程只接受一个由 `--config-file <absolute-path>` 指定的完整 TOML，并要求 `--expected-environment` 与文件内环境精确一致；不存在 compiled-default merge、目录发现、local overlay、环境变量 leaf override 或缺字段回填。
 
-Runtime 热更新由六个强类型 policy resource 负责：`recommendation_policy`、`execution_risk_policy`、`model_routing`、`report_schedule`、`operations_policy`、`execution_automation_policy`。每个资源独立 revision、固定 clean-install `schema_version = 1`，必须经过 Draft → Validate/Preflight → Approve → Activate；不存在旧资源名、兼容 parser、双读双写或自动回滚。
+Runtime 热更新由六个强类型 policy resource 负责：`recommendation_policy`、`execution_risk_policy`、`model_routing`、`report_schedule`、`operations_policy`、`execution_authorization_policy`。每个资源独立 revision、固定 clean-install `schema_version = 1`，必须经过 Draft → Validate/Preflight → Approve → Activate；不存在旧资源名、兼容 parser、双读双写或自动回滚。
 
 Feature、factor、domain 语义和 research/training methodology 属于 content-addressed immutable profile/job artifact，不从 Deploy Config 或热配置读取。详细操作见 §7。
 
@@ -149,9 +146,15 @@ Feature、factor、domain 语义和 research/training methodology 属于 content
 install -d -m 0700 /etc/quant-pivot
 install -m 0600 config/quant-pivot.production.example.toml /etc/quant-pivot/quant-pivot.toml
 ${EDITOR:?set EDITOR} /etc/quant-pivot/quant-pivot.toml
+cargo run -p quant-pivot-xtask -- config validate \
+  --config-file /etc/quant-pivot/quant-pivot.toml \
+  --expected-environment production
 ```
 
 systemd unit 的 `ExecStart` 必须显式传入 `--config-file /etc/quant-pivot/quant-pivot.toml --expected-environment production`，且不设置任何 secret environment。启动前检查所有 `REPLACE_WITH_*` 已替换、文件 owner 是 service user、mode 精确为 `0600`。
+`config validate` 只执行严格解析、文件权限、环境 identity 与 common semantic validation；成功仅输出
+路径和环境，不连接基础设施，也不会投影或打印任何配置字段。失败输出经过固定消息收敛，不回显 parser
+source，以免 secret 行进入终端或 CI 日志。
 
 PostgreSQL 与 ClickHouse 各自只配置一组 `user + password`，由 runtime、schema CLI 与 Fresh Boot 复用。所有
 schema mutation 与 pre-production reset 必须持有同一跨进程 advisory lock；应用启动仍只执行 verify，绝不
@@ -200,7 +203,7 @@ readiness，不返回值。
    - `available` 足够覆盖计划交易。
 8. **调整 runtime budget。** 如果新增资金只是备用，不希望策略使用全部余额，降低 `portfolio.budget.total_budget_usd` 或各 exposure caps。
 
-充值完成前不要提高 mode；账户读取失败时不要假定资金可用。
+充值完成前不要启用新入场或升级到 `PolicyAutomatic`；账户读取失败时不要假定资金可用。
 
 ### 5.3 订单 allowance
 
@@ -211,9 +214,43 @@ Polymarket CLOB 下单要求：
 | BUY | pUSD / collateral allowance >= spend |
 | SELL | conditional token allowance >= sell amount |
 
-当前系统的 CLOB client 负责认证和下单，但没有在 runbook 层保证自动补齐所有 allowance。上线前必须用 Polymarket UI、官方 SDK 或 wallet 工具确认 funder 对 CLOB/exchange adapter 的 allowance 足够。allowance 不足时，系统 admission 可能通过，但 venue 提交会失败或 reconciliation 进入异常路径。
+系统不会自动补 allowance，也不会在订单路径调用 approval 或 allowance-cache update。最终 admission
+从 exact funder 读取订单方向对应的 live balance/allowance，并核对 exact V2 spender；缺失或不足返回
+`defer`，intent 保持可重试且不会进入 claim。通过后，CLOB client 在签名前再次读取同一维度的 fresh
+funding/rules evidence；如果 allowance 在两次检查之间被撤销，则本次 preparation cleanly rejected，
+且不发送 `POST /order`；它本身不是 ambiguous venue outcome。
 
-### 5.4 费用、滑点和 bridge 成本
+操作者仍必须通过 Polymarket UI、官方 SDK 或受控 wallet 工具完成独立 approval，并在链上确认后让
+CLOB `balance-allowance` 重新可见。不要把 approve 嵌入重试循环，也不要用配置值、历史响应或“余额
+足够”推断 allowance 足够。
+
+### 5.4 订单网格、minimum 与精度
+
+订单约束不是 deploy tunable。报告和回放从同一 PIT CLOB market-info 冻结 tick、minimum order size 与
+NegRisk；最终 admission 与 CLOB client 都用 live `/book` 的 market/token/tick/minimum/NegRisk 重新核对。
+
+- aggressive BUY hard cap 按 tick 向下对齐，且不得高于 `1 - tick` 或治理 slippage cap；
+- canonical shares 总是向下到 2 位；counter amount 根据 tick 使用 3/4/5/6/5/6 位精度；
+- canonical 后低于 venue minimum 的 tier 不进入 global portfolio solver；
+- CLOB client 构造 unsigned V2 order 后，逐字段复核 token、side、maker/taker amount、maker/signer、
+  order type 与 expiration；完全一致后才签名和提交。
+
+| Tick | Price decimals | Shares decimals | Counter-amount decimals |
+|------|---------------:|----------------:|------------------------:|
+| `0.1` | 1 | 2 | 3 |
+| `0.01` | 2 | 2 | 4 |
+| `0.005` | 3 | 2 | 5 |
+| `0.0025` | 4 | 2 | 6 |
+| `0.001` | 3 | 2 | 5 |
+| `0.0001` | 4 | 2 | 6 |
+
+Shares（以及 aggressive BUY 的 principal input）只向下取 2 位；counter amount 超过表中精度时，
+先向上取到 `counter decimals + 4` 作为 guard，再向下取到表中精度。禁止 midpoint rounding 或向上放大
+shares/principal。
+
+不要在运维脚本或 UI 中二次 round；出现 rule mismatch 时等待 PIT/live CLOB truth 收敛并重新生成报告。
+
+### 5.5 费用、滑点和 bridge 成本
 
 运行前必须把三类成本纳入决策：
 
@@ -225,14 +262,14 @@ Polymarket CLOB 下单要求：
 
 Polymarket 当前文档描述 taker fee 与成交额、fee rate 和价格相关，maker fee 为 0，SDK 会处理 venue fee 细节。运营上仍要用实际 execution/trade/settlement 结果做账，不要在报告阶段提前把 fee 估成确定 PnL。
 
-### 5.5 提现 SOP
+### 5.6 提现 SOP
 
 提现是资金移出系统，必须先冻结新增风险。
 
 1. **切到安全状态。**
-   - 常规提现：切 `report_only` 或设置 `report_only_forced`。
+   - 常规提现：先降级为 `operator_approval_required` 并设置 `exit_only`。
    - 有未平仓但只想停止开仓：设置 `exit_only`。
-   - 不要在 `auto_execution` 且 kill switch `closed` 时提现。
+   - 不要在 `policy_automatic` 且 kill switch `closed` 时提现。
 
 2. **确认没有进行中的系统动作。**
 
@@ -265,7 +302,7 @@ Polymarket 当前文档描述 taker fee 与成交额、fee rate 和价格相关�
 
 5. **系统侧复核。** 提现完成后再次读取 `GET /api/quant/account/live`。如 capital base 下降，必须治理并降低 `execution_risk_policy` 中的 budget/caps，否则后续 report 会被 budget exhausted 或 admission 拒绝。
 
-6. **解除冻结。** 只有当 account snapshot、reconciliation、positions 都一致后，才把 kill switch 恢复为 `closed` 或切回目标 mode。
+6. **解除冻结。** 只有当 account snapshot、reconciliation、positions 都一致后，才把 kill switch 恢复为 `closed`；如需更改 entry policy，另行通过 CAS/RBAC/audit 治理路径设置 `EntryAuthorizationPolicy`。
 
 ## 6. 启动与基础健康检查
 
@@ -361,7 +398,7 @@ curl -sS "$BASE/api/quant/account/live" \
 - process running；
 - Postgres/ClickHouse/Redis healthy；
 - private key present；
-- `quant_runtime_mode` 初始为 `report_only`；
+- `entry_authorization_policy` 初始为 `operator_approval_required`；
 - kill switch 为 `closed` 或明确的收紧状态；
 - live account snapshot 成功；
 - no pending/unresolvable reconciliation；
@@ -376,7 +413,7 @@ curl -sS "$BASE/api/quant/account/live" \
 | 层 | 存储 | 采集内容 | 用途 | 大致可用时间 |
 |----|------|----------|------|--------------|
 | **L1 目录 + 实时盘口** | Postgres `market` / `event`；进程内 BookStore；CLOB WS | Gamma 全量/增量同步；订阅 token 的 L2 订单簿 | 市场列表、实时 book、报告选市（live PIT） | 启动后 **数分钟**（首次 Gamma full sync + WS shard 就绪） |
-| **L2 历史盘口事实** | ClickHouse `book_snapshots`、`tick_events`、`book_l2_replay_hot`、`book_microstructure_*` | WS 增量写入；异步 fact writer 批量刷盘 | 离线训练集的 PIT 特征/标签、回测 | 持续 ingest **数小时** 起有可用窗口；训练窗口越长需要越久 |
+| **L2 历史盘口事实** | ClickHouse `quant_book_l2_ledger`、`book_microstructure_*` | WS 增量进入唯一应用级 ledger coordinator；canonical ledger 走同步 durable insert，派生 microstructure 使用有界 fact writer | 离线训练集的 PIT 特征/标签、回测 | 持续 ingest **数小时** 起有可用窗口；训练窗口越长需要越久 |
 | **L3 量化事实** | ClickHouse `quant_feature_event`、`quant_factor_event` 等 | 特征/因子/信号/报告流水线产出 | 研究分析、归因反馈、后续再训练 | 首份报告跑通后才有；冷启动阶段可忽略 |
 
 **训练集 build** 主要消费 **L1 目录 + L2 历史盘口**（以及可选的 live attribution，需已有执行闭环）。  
@@ -441,7 +478,15 @@ curl -sS "$BASE/api/quant/data-quality" \
 
 期望：`total_tokens > 0`；`fresh + acceptable` 占多数（= 可用盘口，静默但有效的冷门 book 属 `acceptable`，非故障）；`ingest_lag_exceeded: false`。  
 `worst_book_age_ms` 是跨 token 实际观测到的最差盘口年龄（对照阈值 `max_book_age_ms`）。  
-`worst_ingest_lag_ms` 接近或超过 `max_ingest_lag_ms` 表示 ClickHouse 入库管道（enqueue→flush）滞后，会影响离线训练集的 PIT 精度；它衡量写入背压，与 venue 盘口年龄无关。
+`worst_ingest_lag_ms` 接近或超过 `max_ingest_lag_ms` 表示 ClickHouse 入库管道（enqueue→flush）滞后，会影响离线训练集的 PIT 精度；它衡量写入背压，与 venue 盘口年龄无关。Canonical L2 还应检查 `quant_book_l2_ledger_persistence_stage_seconds{stage="admission_to_sink"}` 与 `{stage="sink_ack"}`：前者异常表示 Tokio/coordinator 调度停顿，后者异常表示同步 durable insert ACK 延迟。任一阶段越过 2 秒都会 quarantine publication；不得先放宽边界，应先消除阻塞源。
+
+同时检查 `ch_read_admission_wait_seconds{operation}` p99、`ch_read_permits_used` 与
+`ch_read_admission_rejections_total`。p99 偏离 fixed mixed-workload runner 的已签收 baseline
+或 permits 长时间贴满时，应减少并发 research/report workload、检查慢查询及 ClickHouse
+CPU/merge 状态；不得扩大 L2 publication deadline。Self-managed 部署还应确认启动已通过
+exact resource-governance audit，9363 `/metrics` 可抓取 live server merge/CPU/current metrics，
+且受治理的高频日志集合中只保留被消费的 `query_log`，未重新出现
+metric/text/trace/part logs。
 
 **5. 子系统健康**
 
@@ -598,7 +643,7 @@ curl -sS "$BASE/api/config/$KIND/schema" \
   -H "Accept-Api-Version: v1" | jq .
 ```
 
-合法 `KIND` 只有：`recommendation_policy`、`execution_risk_policy`、`model_routing`、`report_schedule`、`operations_policy`、`execution_automation_policy`。不要拼接自由字符串或旧 section path。
+合法 `KIND` 只有：`recommendation_policy`、`execution_risk_policy`、`model_routing`、`report_schedule`、`operations_policy`、`execution_authorization_policy`。不要拼接自由字符串或旧 section path。
 
 ### 7.2 Draft → Validate/Preflight → Approve → Activate
 
@@ -709,21 +754,21 @@ curl -sS -X POST \
 | Route champion/shadow/exit 与 scenario-model artifact binding | `model_routing` | 新 model evaluation / ReportRun claim |
 | timezone、cadence、enabled | `report_schedule` | reconcile 未 claim future runs |
 | halt、worker/outcome admission、notification routing | `operations_policy` | operational admission gate |
-| SemiAuto approval TTL / AutoExecution report caps | `execution_automation_policy` | mode preflight 后的新 admission |
+| Operator approval TTL / PolicyAutomatic report caps | `execution_authorization_policy` | authorization preflight 后的新 admission |
 
-立即停止新执行使用 `operations_policy` 的 kill-switch 动作；不要靠缩小 risk threshold 模拟紧急停机。`execution_automation_policy` 只管理自动化授权边界，runtime mode 由独立 governed action 切换；不要把 mode 当 Deploy Config。
+立即停止新执行使用 kill-switch governed action；不要靠缩小 risk threshold 模拟紧急停机。`execution_authorization_policy` 只管理授权 TTL/上限，当前 entry policy 由独立 governed action 切换；不要把即时控制当 Deploy Config。
 
 ### 7.5 Fresh Boot 与后续 schema 演进
 
 系统没有 `project-lifecycle.toml`、数据库 lifecycle state 或 production-seal API。空 PostgreSQL 只应用
-`m00000000_000001_bootstrap`，空 ClickHouse 只应用 version 1 bootstrap；API namespace `/api/v1` 与外部协议
+`m00000000_000001_bootstrap`，空 ClickHouse 只执行唯一无版本链 bootstrap；API namespace `/api/v1` 与外部协议
 编号不随内部 boot version 重置。
 
-若 fresh install 检测到未知非空 schema、未知 migration history 或 semantic schema fingerprint 不一致，
+若 fresh install 检测到未知非空 schema、未知 schema history 或 semantic schema fingerprint 不一致，
 工具必须 fail closed。`preproduction-reset` 是需要精确环境、短期 plan token 与操作者明确授权的独立破坏式
 CLI；应用运行时和 Web API 都不会自动清库、自动 DDL 或替操作者推断可销毁范围。
 
-标准 fresh deployment 必须由 deploy-only xtask 完成 PostgreSQL boot；不要只运行 migration 后直接启动
+标准 fresh deployment 必须由 deploy-only xtask 完成 PostgreSQL boot；不要只执行部分 DDL 后直接启动
 应用：
 
 ```bash
@@ -741,13 +786,13 @@ cargo run -p quant-pivot-xtask -- \
   --expected-environment local-development
 ```
 
-`apply` 在同一 schema mutation lease 内完成唯一 boot migration、catalog/admin finalize、immutable research
+`apply` 在同一 schema mutation lease 内完成唯一 fresh bootstrap、catalog/admin finalize、immutable research
 profiles 与 canonical six-resource policy bundle。其输出必须同时包含 schema version 和 policy
 bundle generation/snapshot identity；默认 `system_runtime_control.settlement_write_policy` 必须为
 `disabled`。应用 runtime 不会补 seed，也不会把缺失 active policy 当成可恢复状态；因此漏掉 deploy-only
 bootstrap 会使启动 fail closed，而不是静默生成策略。
 
-本项目当前没有生产历史。本轮 schema/data/format 只维护一个 clean-install boot truth；变更后重新创建受控、可销毁的开发/验收数据库并 fresh boot，不实现升级 migration、旧 schema 共享、双写或兼容回滚。任何真实数据库销毁或 production cutover 都必须另行获得操作者明确授权。资金写入仍独立由 runtime mode、kill switch、`SettlementWritePolicy` 与 money-path admission 控制。
+本项目当前没有生产历史。本轮 schema/data/format 只维护一个 clean-install boot truth；变更后重新创建受控、可销毁的开发/验收数据库并 fresh boot，不实现升级 migration、旧 schema 共享、双写或兼容回滚。任何真实数据库销毁或 production cutover 都必须另行获得操作者明确授权。新入场由 `EntryAuthorizationPolicy` + recommendation ceiling/blockers + kill switch + account-recovery/admission 独立控制；settlement chain write 另由 `SettlementWritePolicy` + money-path admission 控制。
 
 ### 7.6 S1 FreshBoot 业务能力与历史封印
 
@@ -776,7 +821,7 @@ HyperSync 拉取 chunk 全区间 header 并验证 extractor 侧 parent chain。�
 2. **目标 Buy route 已有 Champion** — `model_routing` 的 Pooled/Crypto/Weather 指针由唯一 route-governance transaction 建立，指向可加载的 immutable `ModelVersion`；模型行本身没有全局 `Published` serving 状态。
 3. **启用因子已注册且 Published** — 因子平面 fail-closed 要求每个启用因子在 `quant_factor_definition` 中 **存在且为 `Published`**；**未注册**（从未 register）或仍为 `Draft` 都会阻断（报错 `enabled definitions must be Published … must first be registered via POST /research/factors/register`）。因子定义**不再由报告热路径隐式注册**，必须显式走 register。
 4. **数据 ingest 就绪** — `operational_phase` 为 `operational`（或仅收紧型 degrade 仍允许报告）；实时 book 满足 data-quality 阈值。
-5. **账户可读** — 所有 mode 下 CLOB collateral + Data API positions 可用（ReportOnly 不是 dry-run）。
+5. **账户可读** — CLOB collateral + Data API positions 始终可用；报告没有模拟 fallback。
 
 因此 **第一次运行、库里没有任何模型时，报告必然失败** — 这是设计行为，不是 ingest 坏了。  
 默认 boot `report_schedule` 可能 **启用** `default_interval` 定时 schedule（每 300s），但初次 parity latch 是 uninitialized/open，所以日志首先出现：
@@ -791,7 +836,8 @@ HyperSync 拉取 chunk 全区间 header 并验证 extractor 侧 parent chain。�
 4. **注册并发布启用因子**（`POST /api/research/factors/register` → `POST /api/research/factors/publish-batch`）—— 满足报告因子平面的 fail-closed 门。
 5. 连续 ingest 直至 training-dataset **plan** 的 `planned_samples` 足够。
 6. 走 **train → calibration derivation → backtest + CPCV → subject-bound frozen parity → governed latch acknowledge → first-Champion bootstrap** 治理链。
-7. 保持 schedule 关闭，先做 ad-hoc canary + sampled/full parity；全部通过后才开启 schedule 和新入场（§8.1–§8.4）。
+7. 保持 schedule 关闭，先做 non-money-moving ad-hoc report rehearsal + sampled/full parity；
+   全部通过后才开启 schedule。新入场仍由独立 authorization/admission 边界决定（§8.1–§8.4）。
 
 **训练集与报告的关系**：
 
@@ -805,12 +851,12 @@ HyperSync 拉取 chunk 全区间 header 并验证 extractor 侧 parent chain。�
 
 ### 8.0.1 ClickHouse boot schema 门禁
 
-当前 ClickHouse 只有 version 1 bootstrap。首次启动任何 writer 前，使用同一配置身份显式 apply，再执行只读
+当前 ClickHouse 只有唯一无版本链 bootstrap。首次启动任何 writer 前，使用同一配置身份显式 bootstrap，再执行只读
 verify；两者与 PostgreSQL schema mutation / pre-production reset 共用同一 advisory lock：
 
 ```bash
 cargo run -p quant-pivot-xtask -- \
-  clickhouse-schema apply-online \
+  clickhouse-schema bootstrap \
   --config-file "$(pwd)/config/quant-pivot.toml" \
   --expected-environment local-development
 cargo run -p quant-pivot-xtask -- \
@@ -819,9 +865,33 @@ cargo run -p quant-pivot-xtask -- \
   --expected-environment local-development
 ```
 
-若发现未知 migration history、未知非空 schema、manifest checksum 或 schema fingerprint 不一致，命令立即
+若发现未知对象、非空/部分 bootstrap、manifest 或 schema fingerprint 不一致，命令立即
 fail closed；不会搬运旧 rows、创建兼容 view 或让 runtime startup 自动 DDL。只有明确授权的
 pre-production reset 可以销毁未投产环境，并从唯一 boot schema 重新创建。
+
+`db.clickhouse.resource_governance = "self_managed"` 要求服务加载仓库固定的
+`docker/clickhouse/config.d/quant-pivot-governance.xml`；缺失、server settings 漂移或无用
+system log 表重新启用时 runtime fail closed；Prometheus 必须同时抓取应用 `/metrics` 与
+ClickHouse `:9363/metrics`。数据库 runtime audit 负责 settings/log inventory，9363 的网络
+可达性由部署 probe 与 Prometheus scrape 负责，disposable production stack 会在启动时实测。
+ClickHouse Cloud 等 provider-owned 服务必须
+明确配置为 `provider_managed`：应用仍执行 read admission、每查询线程上限与 foreground
+priority，但 server capacity、system-log retention 和 mixed-workload 压测证据必须在真实
+Cloud promotion gate 单独签收，不能用本地 self-managed 审计结果替代。
+
+`db.clickhouse.io` 是完整 I/O deadline 合同，不是少数 caller 的可选 timeout：read deadline
+包含 admission 与完整 response decode；insert attempt 包含 lane permit、metadata、全部 send
+与 durable end ACK；bootstrap/verify/ensure 的每条 maintenance query 也必须有界。默认
+critical send/end/attempt 为 300/1,200/1,800ms，bulk 为 750/1,750/3,000ms；send + end
+不得超过 attempt，分别保留 300ms/500ms metadata 与调度余量。runtime
+query/maintenance 为 30s/120s；这些是 bootstrap capacity budget，只有 fixed mixed-workload
+证据才能调整，不能当作业务 SLO。`flush_interval_secs` 必须在 1..=5，bulk ACK 使用
+`flush + 三次 attempt/backoff + 500ms scheduling margin` 的 checked budget；一秒 derived-fact
+flush 的默认总预算为 10.8s，必须保持在共享 12s receipt deadline 内。`batch_size`
+限于 1..=5,000，variable queue 同时受默认 64MiB `max_inflight_write_bytes` 限制。若出现 typed `ClickHouseTimeout`，先检查
+`ch_read_admission_wait_seconds`、read/write permits、server 9363 CPU/merge 与 query log；permit
+会自动释放，durable worker 可按 transient policy 重试，禁止通过去掉 timeout 或扩大 canonical
+publication quarantine 处理。
 
 ### 8.1 从冷启动到第一份报告（完整流程）
 
@@ -840,8 +910,8 @@ flowchart TD
     validate --> proof[subject-bound frozen full parity]
     proof --> ack[governed latch acknowledge]
     ack --> bootstrap[first-Champion route bootstrap]
-    bootstrap --> canary[ad-hoc canary + sampled/full parity]
-    canary --> enable[开启 schedule 和新入场]
+    bootstrap --> rehearsal[non-money-moving ad-hoc report rehearsal + sampled/full parity]
+    rehearsal --> enable[开启 schedule]
     enable --> report[RecommendationReport 发布]
 ```
 
@@ -1103,10 +1173,10 @@ curl -sS "$BASE/api/config/model_routing/current" \
   -H "Accept-Api-Version: v1" | jq '.data.revision.document.document.model'
 ```
 
-**Step 3 — Canary 后开启报告**
+**Step 3 — Ad-hoc report rehearsal 后开启报告**
 
-保持 `ReportOnly`，先启用 ad-hoc 并手动触发（§8.4），验证 sampled + runtime full parity；至少完成
-profile 的一个完整 `retraining_cooldown` ReportOnly shadow 后，才允许把该 route 视为 operationally
+保持 `operator_approval_required`，先启用 ad-hoc 并手动触发（§8.4），验证 sampled + runtime full parity；至少完成
+profile 的一个完整 `retraining_cooldown` shadow 后，才允许把该 route 视为 operationally
 activated。之后才能开启 schedule；本阶段不扩大 execution、capital、signing 或 funder authority。
 
 ### 8.2 定时报告 vs Ad-hoc 报告
@@ -1119,7 +1189,7 @@ activated。之后才能开启 schedule；本阶段不扩大 execution、capital
 | `knowledge_lag_secs` | 取自 schedule 配置 | **请求体必填** |
 | 幂等键 | `schedule_id` + `trigger_time` 派生 | 请求体 `request_id`（客户端生成） |
 | HTTP | 无直接 HTTP（后台 scheduler） | `POST` 返回 **202 Accepted**（异步入队） |
-| 典型用途 | 生产周期性 Top-N | 事故恢复后验证、semi_auto 审批前刷新、策略变更后手动快照 |
+| 典型用途 | 生产周期性 Top-N | 事故恢复后验证、操作员授权前刷新、策略变更后手动快照 |
 
 两者走 **同一套** `ReportLifecycleService::run` 流水线；差异仅在触发源、参数来源和治理开关。
 
@@ -1156,7 +1226,7 @@ Schedule 被 **disabled** 时，worker 不会触发；若误配为 enabled 且�
 
 - 冷启动完成 first-Champion bootstrap 后，**第一次验证**报告流水线；
 - 数据质量事故恢复后（§16.1），确认新 report 正常再恢复交易；
-- `semi_auto` 审批窗口前需要 **最新** Top-N（runbook §11 场景）；
+- 操作员授权窗口前需要 **最新** Top-N（runbook §10 场景）；
 - governed policy 变更后，不想等到下一个 300s tick。
 
 **启用 ad-hoc**：
@@ -1219,7 +1289,7 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
 
 | 块 | 关键字段 | 操作意义 |
 |----|----------|----------|
-| Identity | report id、rank、market id、token id、outcome side、runtime mode | 买什么，来自哪份报告 |
+| Identity | report id、rank、market id、token id、outcome side、execution authority ceiling | 买什么，来自哪份报告，最大授权边界是什么 |
 | Route lineage | Route、route run、model/calibration/trade-policy/profile generations 与 hashes | 哪条 Route 产生了概率/现金流，契约是否完整 |
 | Entry plan | trigger kind、limit price、max slippage、valid window、min depth、max book age | 什么时候买、以什么价格买 |
 | Economics | nominal/robust expected net USD、profit-probability lower bound、max loss、CVaR contribution、capital USD-hours、marginal portfolio value | 为什么在跨 Route 全局组合中选它 |
@@ -1227,7 +1297,7 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
 | Exit plan | take profit、stop loss、time exit、signal invalidation、hold-to-resolution / redeem policy | 什么时候卖，卖多少 |
 | Risk envelope | market/event/category/Route exposure、liquidity、scenario loss、CVaR、drawdown | 这笔单的风险边界 |
 | Evidence | feature snapshot、book age、data quality、model/factor refs | 审计依据 |
-| Execution eligibility | eligible modes、auto ineligibility reasons、approval required | 能否在当前 mode 执行 |
+| Execution eligibility | ceiling、blockers、policy binding；当前 entry policy 与 intent authorization evidence 由各自 owner 展示 | 当前权限和前置条件是否允许执行 |
 
 如果报告为空，先看 empty reason：
 
@@ -1302,52 +1372,26 @@ Shares override 按最终 `shares × price` 原子重算资本预留。审批即
 1. **数据依据**：Gamma market metadata、CLOB L2 book、Data API positions、ClickHouse facts 是否新鲜；
 2. **模型依据**：Route-specific model、calibration、probability interval、Trade Policy 与 PIT lineage；
 3. **组合依据**：nominal/robust net USD、profit-probability lower bound、budget/exposure/time-bucket、scenario-loss/CVaR/drawdown 与 liquidity constraints；
-4. **治理依据**：runtime mode、kill switch、admission checks、operation log；
+4. **治理依据**：entry authorization policy、recommendation ceiling/blockers、Route economic health、kill switch、admission checks、operation log；
 5. **执行依据**：entry plan、order type、limit price、valid window。
 
 如果任一依据不可查，拒绝或延后交易。
 
-## 10. 在 `report_only` 下人工下单
+## 10. Operator-authorized 下单 SOP
 
-`report_only` 下系统不会创建 `OrderIntent`，也不会签名或提交订单。人工可以把 report 当成交易建议，在 Polymarket UI 或自有工具中手动下单，但必须接受这些后果：
+系统外手动交易不是常规报告消费路径。任何无法匹配系统 order 的 finalized account execution 都会 latch `ExitOnly` 并创建 account recovery incident。常规入场必须走以下链路。
 
-- 系统能通过 Data API 在后续 account snapshot 中看到 position；
-- 该交易没有系统内 `OrderIntent` 和 `ExecutionOrder` 审计链；
-- attribution、reconciliation、capital allocation 可能不完整；
-- 后续 exit monitor 不一定能按系统策略自动管理这笔外部仓位。
-
-人工下单 SOP：
-
-1. 读取最新报告和对应 recommendation；
-2. 只在 entry window 内操作；
-3. 用 recommendation 给出的 token/outcome；
-4. 使用 limit price，不要高于 report 的 cap；
-5. notional 不超过 `hard_reserved_cash_usd`；
-6. 下单后记录 operator note、venue order id、tx/trade id；
-7. 重新调用 `GET /api/quant/account/live` 确认 positions；
-8. 如果希望系统后续可审计，下一次应切 `semi_auto` 走 intent 链路。
-
-生产资金建议优先使用 `semi_auto`。
-
-## 11. `semi_auto` 下单 SOP
-
-### 11.1 切换到 `semi_auto`
+### 10.1 确认安全授权策略
 
 ```bash
-curl -sS -X POST "$BASE/api/system/quant-mode" \
+curl -sS "$BASE/api/system/runtime-controls" \
   -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-  -H "X-Acting-Role: operator" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "mode": "semi_auto",
-    "reason": "enable governed order intents after report-only readiness checks"
-  }' | jq .
+  -H "Accept-Api-Version: v1" | jq .data.entry_authorization_policy
 ```
 
-升级会跑 preflight。失败时按返回 check 修复，不要绕过。
+如需降级，POST `entry-authorization-policy` 并指定当前 `expected_revision`、`operator_approval_required` 与 reason。降级不需要 readiness preflight，但仍需 acting role 和 CAS。
 
-### 11.2 创建 intent
+### 10.2 创建 intent
 
 ```bash
 curl -sS -X POST "$BASE/api/quant/intents" \
@@ -1362,11 +1406,11 @@ curl -sS -X POST "$BASE/api/quant/intents" \
   }' | jq .
 ```
 
-`semi_auto` 下返回状态应是 `pending_approval`。
+返回状态必须是 `pending_authorization`，并且 authorization evidence 为空。
 
-### 11.3 审批或拒绝
+### 10.3 授权或拒绝
 
-审批并收紧订单：
+授权并收紧订单：
 
 ```bash
 curl -sS -X POST "$BASE/api/quant/intents/$INTENT_ID/approve" \
@@ -1376,14 +1420,13 @@ curl -sS -X POST "$BASE/api/quant/intents/$INTENT_ID/approve" \
   -H "X-Request-Id: approve-20260701-001" \
   -H "Content-Type: application/json" \
   -d '{
-    "reason": "book fresh and depth sufficient; approve with smaller notional",
+    "reason": "book fresh and depth sufficient; authorize with smaller notional",
     "override_amount": { "unit": "usd", "value": "25" },
     "override_price": "0.55"
   }' | jq .
 ```
 
-`override_amount.unit` 必须与 intent 冻结 `entry_order.amount.unit` 完全一致；省略 override 即按冻结值审批。
-审批成功后不会再出现第二个 Submit 操作。
+`override_amount.unit` 必须与 intent 冻结 `entry_order.amount.unit` 完全一致；省略 override 即按冻结值授权。成功后冻结 `AuthorizationEvidence::OperatorApproval`，dispatcher 自动 claim admission；不存在第二个人工 Submit 动作。
 
 拒绝：
 
@@ -1394,30 +1437,16 @@ curl -sS -X POST "$BASE/api/quant/intents/$INTENT_ID/reject" \
   -H "X-Acting-Role: approver" \
   -H "X-Request-Id: reject-20260701-001" \
   -H "Content-Type: application/json" \
-  -d '{"reason":"recommendation expired before approval"}' | jq .
+  -d '{"reason":"recommendation expired before authorization"}' | jq .
 ```
 
-### 11.4 提交到 CLOB
-
-这是实盘路径，会签名并提交订单。
-
-```bash
-curl -sS -X POST "$BASE/api/quant/intents/$INTENT_ID/submit" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-  -H "X-Acting-Role: trader" \
-  -H "X-Request-Id: submit-20260701-001" \
-  -H "Content-Type: application/json" \
-  -d '{"reason":"approved intent still passes admission"}' | jq .
-```
-
-结果解释：
+### 10.4 结果解释
 
 | HTTP / state | 含义 | 行动 |
 |--------------|------|------|
 | 200 + `filled` / `partially_filled` | venue 已确认成交或部分成交 | 查 position 和 execution order |
 | 200 + `ambiguous` | venue 响应不确定，capital held | 等 reconciliation，不要重复提交 |
-| 409 | admission deny 或状态不可提交 | 读 admission trace，修根因或放弃 |
+| 409 | authorization/admission deny 或状态不可提交 | 读 status reason/admission trace，修根因或放弃 |
 | 503 | transient defer | 等待数据/venue 恢复后重试 |
 
 提交后复核：
@@ -1436,11 +1465,11 @@ curl -sS "$BASE/api/quant/positions?order_intent_id=$INTENT_ID" \
   -H "Accept-Api-Version: v1" | jq .
 ```
 
-## 12. `auto_execution` SOP
+## 11. `PolicyAutomatic` SOP
 
-`auto_execution` 只适合在 `semi_auto` 稳定运行后启用。它不是跳过风控：策略可自动批准 intent，但提交前仍跑 admission、kill switch、capital、data quality、book、venue、credential、exit monitor 等检查。
+`PolicyAutomatic` 是 entry authorization capability upgrade，不是运行模式，也不改变报告生成。策略可以授权 intent，但仍需逐 intent admission。
 
-### 12.1 升级前条件
+### 11.1 升级前条件
 
 必须全部满足：
 
@@ -1448,48 +1477,50 @@ curl -sS "$BASE/api/quant/positions?order_intent_id=$INTENT_ID" \
 - private key、funder、wallet topology、relayer 配置通过 preflight；
 - 六类 active policy resource 与 immutable profile/model/dataset boot schema 1 有效；
 - feature parity latch clear，最近 sampled/full run 均为 `passed`，`parity_age_secs` 未超出运维时效；
-- `execution_automation_policy.auto_execution.max_orders_per_report` 与 `max_total_usd_per_report` 保守且大于零；
+- `execution_authorization_policy.policy_automatic_limits.max_orders_per_report` 与 `max_total_usd_per_report` 保守且大于零；
 - `execution_risk_policy.portfolio.admission` 的 robust/nominal net USD、profit probability lower bound 与 uncertainty width 门槛已经通过 OOS/backtest 证据治理；
 - `execution_risk_policy.portfolio.budget.total_budget_usd > 0` 且 account live snapshot 可用；
-- 已有 route Champion，且 ReportOnly shadow period / quality gate 通过；
+- 每个 active Route 有精确 model/profile/trade-policy identity 与 fresh `Healthy` economic evidence；
 - data quality healthy；
 - no pending/unresolvable reconciliation；
 - no impaired capital allocation；
 - kill switch 为 `closed`；
 - exit monitor healthy；
-- 近若干个 `semi_auto` 订单 attribution 和 reconciliation 正常。
+- 近期 operator-authorized 订单 attribution、economic outcome 和 reconciliation 正常。
 
-### 12.2 启用策略批准
+### 11.2 启用策略授权
 
-先在 Config 控制台编辑 `execution_automation_policy`，建议使用极小上限并完整执行 Review、preflight、approval 与 activation：
+先在 Config 控制台编辑 `execution_authorization_policy`，建议使用极小上限并完整执行 Review、preflight、approval 与 activation：
 
-在 `/system/config/execution_automation_policy` 设置：
+在 `/system/config/execution_authorization_policy` 设置：
 
 - `max_orders_per_report = 1`；
 - `max_total_usd_per_report = "20"`；
 
-资金、经济准入与入场风险上限属于 `execution_risk_policy`，不要混入 automation revision。CLI 自动化按 §7.2 使用 `KIND=execution_automation_policy` 的完整 typed document，并保留 activation CAS expectation。
+资金、经济准入与入场风险上限属于 `execution_risk_policy`，不要混入 authorization revision。CLI 按 §7.2 使用 `KIND=execution_authorization_policy` 的完整 typed document，并保留 activation CAS expectation。
 
-激活后再切 mode：
+激活后升级 entry authorization policy：
 
 ```bash
-curl -sS -X POST "$BASE/api/system/quant-mode" \
+curl -sS -X POST "$BASE/api/system/runtime-controls/entry-authorization-policy" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept-Api-Version: v1" \
   -H "X-Acting-Role: operator" \
   -H "Content-Type: application/json" \
   -d '{
-    "mode": "auto_execution",
-    "reason": "all auto-execution preflight checks passed; conservative caps enabled"
+    "expected_revision": 12,
+    "policy": "policy_automatic",
+    "reason": "all Route health and execution preflight checks passed; conservative caps enabled"
   }' | jq .
 ```
 
-### 12.3 Auto 日常监控
+### 11.3 自动授权日常监控
 
 每个 report 周期检查：
 
 - 最新 report 是否 published；
-- auto ineligibility reasons 是否为空；
+- recommendation ceiling 是否为 `policy_automatic` 且 blockers 为空；
+- Route economic health 是否仍 fresh Healthy；
 - 新 intent 数量不超过 `max_orders_per_report`；
 - 单 report 总 notional 不超过 `max_total_usd_per_report`；
 - execution order 没有异常积压；
@@ -1497,7 +1528,23 @@ curl -sS -X POST "$BASE/api/system/quant-mode" \
 - daily loss cap / breaker 未触发；
 - exit monitor 正常处理 open positions。
 
-任何异常先切 `exit_only` 或 `report_only_forced`，再排查。
+任何异常先将 entry policy 降级到 `operator_approval_required`；如存在账户/venue 风险同时把 kill switch 设为 `exit_only`。
+
+## 12. Strict account recovery SOP
+
+外部/未知 finalized account execution 会自动 latch `ExitOnly` 并创建 incident。恢复只能通过当前活动事件：
+
+```bash
+curl -sS "$BASE/api/system/execution-recovery/incidents/active" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" | jq .
+```
+
+1. 在控制台执行 **Pause and reconcile**。系统对每个当前 V2 Exchange 调用/确认 `pauseUser()`，动态读取 pause interval，连续捕获两份 CLOB/Data API 快照并对 finalized chain、reservation、settlement、lot 做精确对账。
+2. 如果 manifest 返回 `lot_allocation_required`，必须按 execution ID 对候选 lot 显式分配 shares；分配和必须精确等于外部 SELL shares。禁止 FIFO、均价或时间窗猜测。
+3. 只有最新 manifest `converged=true` 时才执行 **Seal**。Seal 会重取源事实并要求 hash identity 不变。
+4. Seal 后执行 **Unpause and finalize**。所有 Exchange 的 unpause transaction 必须完成 finality，incident 才能进入 `sealed` terminal。
+5. `clean_funder_required` 没有 ack/clear mutation；只能更换干净执行账户并 fresh boot。
 
 ## 13. 什么时候卖、卖多少、依据什么
 
@@ -1554,7 +1601,7 @@ curl -sS -X POST "$BASE/api/system/quant-mode" \
 
 ### 13.4 系统自动卖出与赎回
 
-`execution.exit_monitor.enabled=true` 时，系统会定期 recheck signal 和 exit 条件。kill switch 为 `closed`、`report_only_forced`、`exit_only` 时允许普通 auto exit；`execution_halted` 和 `emergency_halted` 不走普通自动退出。
+`execution.exit_monitor.enabled=true` 时，系统会定期 recheck signal 和 exit 条件。kill switch 为 `closed`、`exit_only` 时允许受治理退出；`execution_halted` 和 `emergency_halted` 不走普通自动退出。
 
 市场 resolved 后：
 
@@ -1571,7 +1618,7 @@ curl -sS -X POST "$BASE/api/system/quant-mode" \
 - case 的 current immutable inventory 中，只要有一个 lot 不是
   `HoldToResolution + RedeemPolicy::Auto`，`effective_policy` 就必须为 `ManualOnly`。它在 claim、
   batch authorization、canary、service admission 与 prepared-submission transaction CAS 全部阻断系统新
-  redeem；运营页必须展示 `inventory_lots` 的逐 lot mode/policy，不能用尚未产生的 confirmed payout
+  redeem；运营页必须展示 `inventory_lots` 的逐 lot `settlement_mode`/`redeem_policy`，不能用尚未产生的 confirmed payout
   allocations 代替；
 - 同一 `market × execution_account` 存在 `Planned`、`Accepted`、`Submitted`、`PartiallyFilled`、
   `CancelRequested` 或 `Ambiguous` execution order 时，库存不具备 quiescence；partial fill 的未成交余量
@@ -1581,10 +1628,10 @@ curl -sS -X POST "$BASE/api/system/quant-mode" \
   均允许单个具备该动作对应 `settlement_redeem:create`、`settlement_redeem:approve` 或
   `settlement_redeem:revoke` 权限的操作者独立完成；同一操作者同时具备所需权限时可以独立完成完整流程，
   不要求 requester/approver 分离，也不硬编码 system-admin 角色，但仍强制 fresh preflight、
-  scope digest、CAS、幂等、append-only 审计、TTL/上限和异步 worker；`auto` 仅允许
+  scope digest、CAS、幂等、append-only 审计、TTL/上限和异步 worker；`policy_automatic` 仅允许
   `AutomaticEligible` case 且要求当前
   deployment digest 存在 accepted governed-canary 数据库事实；
-- 已持久化的 submission 不受后续 mode/halt/manifest 变化影响，必须继续 exact replay、polling 和
+- 已持久化的 submission 不受后续 authorization policy/halt/manifest 变化影响，必须继续 exact replay、polling 和
   reconciliation，不得重新取 nonce、重签、换 target 或重复 redeem。
 
 任何真实资金动作前，值班人员必须逐项验证以下 release checklist；缺一项即保持 `disabled`：
@@ -1599,7 +1646,7 @@ curl -sS -X POST "$BASE/api/system/quant-mode" \
 5. action 精确绑定 `route × wallet_kind × deployment_digest × action/case × authorization digest × payout ceiling × expiry`；
 6. 任一 settlement governed action 均可由单个具备对应 create/approve/revoke 权限的操作者独立完成；
    权限由服务端 RBAC 决定，不要求 requester 与 approver 为不同 actor；
-7. canary 只在 `semi_auto` 下运行，并获得用户对精确 case/金额上限/route/wallet/digest 的独立授权；
+7. canary 只在 `governed_canary` settlement policy 下运行，并获得用户对精确 case/金额上限/route/wallet/digest 的独立授权；
 8. operator approval、receipt finality、mined wrapper call、pUSD Wrapped/mint、outcome balance 归零、lot allocation
    和 durable outbox 全部确认；
 9. timeout-after-submit、restart-with-relayer-ID、lease loss、reorg 和 rollback/revocation drill 全部通过；
@@ -1607,8 +1654,8 @@ curl -sS -X POST "$BASE/api/system/quant-mode" \
 
 accepted canary 仅是其精确 `route × wallet_kind × deployment_digest` 的 factual admission evidence，
 不生成文件 seal，也不单独授权后续交易；deployment digest 变化会自然导致旧授权/canary scope 不匹配。
-AutoExecution 必须另行完成 recovery/rollback drill，并由具备权限的操作者显式把
-`SettlementWritePolicy` 切换为 `auto`；不能由 SemiAuto canary 自动升级，也不要求第二名操作者。
+Policy-automatic settlement 必须另行完成 recovery/rollback drill，并由具备权限的操作者显式把
+`SettlementWritePolicy` 切换为 `policy_automatic`；不能由 governed canary 自动升级，也不要求第二名操作者。
 
 Settlement worker 的最低监控与告警契约如下。标签值由代码中的封闭枚举映射产生，禁止把 case ID、
 地址、错误文本等高基数字段放入 Prometheus label；完整证据从 Settlement 运营页的 case/action drawer
@@ -1634,7 +1681,7 @@ histogram_quantile(0.99, sum by (le) (rate(quant_settlement_submission_age_secon
 histogram_quantile(0.99, sum by (le) (rate(quant_settlement_finality_lag_seconds_bucket[10m]))) > 600
 ```
 
-系统不提供 `WALLET-CREATE`。当前 Phase 实施不得调用真实 order、approval、redeem 或 canary。
+系统不提供 `WALLET-CREATE`。Phase 12 Implementation Closure 只允许 disposable rehearsal，不得调用真实 venue order、chain approval/redeem 或 controlled canary；这些资金动作属于首次部署后的独立 Operational Activation，且需对精确 account/route/action/金额/digest 取得用户授权。
 
 ## 14. Reconciliation 与账务闭环
 
@@ -1671,7 +1718,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
   }' | jq .
 ```
 
-如果存在 `unresolvable`，不要升级到 `auto_execution`。
+如果存在 `unresolvable`，不要升级 entry policy 到 `policy_automatic`。
 
 ## 15. 日常操作清单
 
@@ -1679,7 +1726,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 
 - `GET /ready` 成功；
 - `GET /api/system/health` 无 degraded；
-- `GET /api/system/quant-mode` 是预期 mode；
+- `GET /api/system/runtime-controls` 返回预期 entry authorization policy；
 - `GET /api/system/kill-switch` 是预期 state；
 - `GET /api/quant/account/live` 账户可读，capital base 合理；
 - no stale report schedule；
@@ -1691,7 +1738,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 - latest sampled/full parity 为 `passed`，无 mismatch，无超过 materialization deadline 的 pending；
 - current route Champion 的 exact serving contract 与 immutable factor revisions 是预期版本；
 - 六类 active policy revision、bundle hash 与 decision snapshot 是预期值；
-- allowance 足够；
+- live balance/allowance evidence 对 exact V2 spender 为 ready；系统不会替 operator approve；
 - Polymarket status / RPC / bridge 无已知事故。
 
 ### 15.2 每次下单前
@@ -1704,7 +1751,8 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 - notional <= suggested；
 - exposure caps 未触发；
 - kill switch 允许 new entry；
-- mode 和 approval chain 正确；
+- recommendation ceiling/blockers、当前 entry policy 和 intent authorization evidence 相容；
+- admission trace 的 `venue_metadata` 与 `venue_funding` 均通过；
 - admission 返回 `allow`。
 
 ### 15.3 每次下单后
@@ -1719,7 +1767,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 
 ### 15.4 日终 / 停止交易
 
-- 切 `report_only_forced` 或 `report_only`；
+- 降级到 `operator_approval_required` 并设置 `exit_only`；
 - 处理所有 pending approval intent；
 - 检查 submitted/ambiguous orders；
 - 检查 open positions 和 exit state；
@@ -1741,7 +1789,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 
 处理：
 
-1. 设置 `report_only_forced` 或 `execution_halted`；
+1. 设置 `exit_only` 或 `execution_halted`；
 2. 查看 `/api/system/health` 和 data quality snapshot；
 3. 检查 CLOB WS、Gamma、Data API、ClickHouse 写入；
 4. 恢复后重新跑 ad-hoc report；
@@ -1752,7 +1800,9 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 常见原因：
 
 - allowance 不足；
-- order price/tick size 不合法；
+- PIT/live market identity、tick、minimum size 或 NegRisk 漂移；
+- order price、2dp shares 或 counter amount precision 不满足 canonical rules；
+- unsigned SDK payload 与 canonical maker/taker projection 不一致；
 - order book 变动导致 slippage 超限；
 - credentials/wallet_kind/funder 不匹配；
 - venue 暂时不可用。
@@ -1760,16 +1810,17 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 处理：
 
 1. 不重复 submit 同一 intent，先查 execution order；
-2. 查 admission trace 和 venue response；
+2. 查 admission trace 的 `venue_metadata` / `venue_funding` 与 client preparation error；
 3. 如 ambiguous，等待 reconciliation；
-4. 如 allowance 问题，按官方流程补 approval；
-5. 需要重试时确认 intent 仍 submittable 且 recommendation 未过期。
+4. 如 allowance 问题，按官方流程独立补 approval；系统不会自动发送 approval；
+5. 如 rule/payload mismatch，等待 PIT/live CLOB facts 收敛并重新生成/授权，不得手工 round 后重放；
+6. 需要重试时确认 intent 仍 submittable 且 recommendation 未过期。
 
 ### 16.3 Reconciliation unresolvable
 
 处理：
 
-1. 切 `report_only_forced` 或 `execution_halted`；
+1. 切 `exit_only` 或 `execution_halted`；
 2. 收集 CLOB status、trades、balance、Data API、on-chain receipt；
 3. 人工判定 truth；
 4. 调 resolve API；
@@ -1784,7 +1835,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 2. 对账 Polymarket UI、CLOB collateral、Data API positions、链上 tx；
 3. 不调整 runtime budget 来掩盖实际资金缺口；
 4. bridge 卡住时按 Polymarket bridge status 和官方支持流程处理；
-5. 资金恢复前不要启用 `auto_execution`。
+5. 资金恢复前不要启用 `policy_automatic`。
 
 ### 16.5 模型或策略异常
 
@@ -1795,7 +1846,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 3. retire 异常 model；factor revision 是不可变内容寻址事实，不执行 publish/retire，而是通过已验证
    model routing rollback 或重新训练切换到不引用异常 revision 的 exact serving contract；
 4. 重新跑 backtest / shadow report；
-5. 用小 budget 在 `semi_auto` 验证后再恢复 auto。
+5. 用小 budget 在 operator-authorized 路径验证后再恢复 `policy_automatic`。
 
 ### 16.6 Feature parity mismatch / latch open
 
@@ -1803,9 +1854,9 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 2. 读 `GET /api/research/feature-integrity/summary`，记录 `blocking_run_id`、`opened_at`、cause window 和 subject；用 `events?parity_run_id=...` 对比 online/replay 证据定位根因。
 3. 保持 ingest/exit/reconciliation/settlement，完成前向修复。PendingMaterialization 未超 deadline 时等 writer watermark，不立即定性为 mismatch。
 4. 运行一个在 latch 打开之后完成、覆盖 causal window 且 subject scope 一致的新 full parity；只有非空 `passed` 才能继续。
-5. `risk_owner` 用该 recovery run 调用 `POST /api/research/feature-integrity/latch/acknowledge`，然后按 §8.1–§8.4 重做 ad-hoc canary → sampled/full parity → schedule → 新入场。
+5. `risk_owner` 用该 recovery run 调用 `POST /api/research/feature-integrity/latch/acknowledge`，然后按 §8.1–§8.4 重做 non-money-moving ad-hoc report rehearsal → sampled/full parity → schedule；新入场仍单独经过 authorization/admission。
 
-详细冷启动与 canary 合同见 §8.1–§8.4。
+详细冷启动与 non-money-moving report rehearsal 合同见 §8.1–§8.4；资金类 governed canary 只属于独立 Operational Activation。
 
 ## 17. 常用 API 速查
 
@@ -1816,7 +1867,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 | 系统状态 | `GET /api/system/status` |
 | 系统健康 | `GET /api/system/health` |
 | runtime controls 快照 | `GET /api/system/runtime-controls` |
-| 切 mode | `POST /api/system/runtime-controls/quant-mode` |
+| 切 entry authorization | `POST /api/system/runtime-controls/entry-authorization-policy` |
 | settlement write policy | `POST /api/system/runtime-controls/settlement-write-policy` |
 | kill switch | `POST /api/system/runtime-controls/kill-switch` |
 | masked deploy config | `GET /api/system/deploy-config` |
@@ -1865,5 +1916,5 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 2. 相关 report / recommendation / intent / order / position id 可追踪；
 3. account snapshot 与预期资金变化一致；
 4. no unexpected pending reconciliation；
-5. risk budget 和 runtime mode 处于预期状态；
+5. risk budget、entry authorization policy、kill switch、account-recovery state 与 settlement write policy 处于预期状态；
 6. 事故或人工操作已记录 reason 和外部 evidence。

@@ -4,7 +4,7 @@
 > **Deployment contract**
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `pre_deployment_behavior`: 允许 clean-break 与唯一 fresh terminal bootstrap rewrite；任何真实数据销毁仍需操作者单独授权。
 > - `post_deployment_behavior`: 本次重构只交付唯一终态 bootstrap；不存在旧版本共存、升级、降级或历史数据转换。
 > - `rollback_and_data_verification`: 仅在 disposable 空数据库执行 fresh-install 验证；任何真实数据库重置需要操作者另行授权。
 
@@ -65,7 +65,7 @@
 
 ## 2. 新 Postgres 表
 
-所有表必须通过新的 immutable SeaORM `MigrationTrait`、dense runtime entity、domain persistence DTO 和 repository trait 增加。DDL 的唯一事实源是 `quant-pivot-migration`；禁止恢复已删除的 `quant_schema`/`idens` 双轨模型，也禁止在 repository 或 runtime 启动路径中手写 DDL。
+所有表都直接进入唯一终态 PostgreSQL v1 fresh-bootstrap snapshot，并同时具有 dense runtime entity、domain persistence DTO 和 repository contract。DDL 的唯一事实源是 deploy-only `quant-pivot-migration` bootstrap；其 `MigrationTrait` 命名不表示存在升级链。禁止恢复已删除的 `quant_schema`/`idens` 双轨模型，也禁止在 repository 或 runtime 启动路径中手写 DDL。
 
 ### 2.1 Market Selection
 
@@ -299,7 +299,6 @@ config revision rollback 由唯一 `ModelRouteGovernanceService` 管理。
 - `report_run_id uuid not null unique`
 - `report_kind qp_report_kind not null`
 - `as_of timestamptz not null`
-- `runtime_mode qp_quant_runtime_mode not null`
 - `decision_policy_snapshot_id uuid not null`
 - `account_snapshot_id uuid not null`
 - `model_serving_generation_id uuid not null`
@@ -394,13 +393,9 @@ contract、候选漏斗和成功/zero-candidate/failure evidence。报告不得�
 
 - `order_intent_id uuid pk`
 - `recommendation_id uuid not null`
-- `runtime_mode qp_quant_runtime_mode not null`
-- `intent_kind qp_order_intent_kind not null`
-- `status qp_publication_status not null`
-- `approval_status qp_approval_status not null`
-- `approved_by uuid null`
-- `approval_reason text null`
-- `approved_at timestamptz null`
+- `status qp_order_intent_status not null`
+- `authorization_kind qp_authorization_kind null`
+- `authorization_evidence_json jsonb null`
 - `entry_order_json jsonb not null`
 - `exit_policy_json jsonb not null`
 - `risk_envelope_hash text not null`
@@ -410,10 +405,11 @@ contract、候选漏斗和成功/zero-candidate/failure evidence。报告不得�
 
 状态：
 
-- `draft`
-- `pending_approval`
-- `approved`
-- `rejected`
+- `pending_authorization`
+- `authorized`
+- `authorization_rejected`
+- `admission_pending`
+- `admission_rejected`
 - `expired`
 - `submitted`
 - `partially_filled`
@@ -625,7 +621,7 @@ contract、候选漏斗和成功/zero-candidate/failure evidence。报告不得�
 | `reconciliation_report` | 旧 trade reconciliation | `quant_execution_reconciliation` 后续新建 |
 | `emergency_snapshot` | 旧 ExecutionFSM emergency | 新 kill switch state |
 | `blacklist_entry` | 旧 market/token blacklist | `quant_market_block` 或 market selection exclusion |
-| `balance_snapshot` | 旧 trading balance | execution mode 下重建为 `quant_account_snapshot` |
+| `balance_snapshot` | 旧 trading balance | 重建为真实 venue-account 读模型 `quant_account_snapshot`，与 entry authorization 正交 |
 | `accounting_period` | 旧 daily/weekly trade accounting | `quant_recommendation_attribution` + analytics |
 
 ### 4.2 保留但改名/改语义
@@ -634,11 +630,11 @@ contract、候选漏斗和成功/zero-candidate/failure evidence。报告不得�
 |---|---|---|
 | `market` | `market` 保留 | Polymarket catalog 权威，字段去 Endgame 假设 |
 | `event` | `event` 保留 | Polymarket event metadata |
-| `report` | 删除或迁移为 `quant_recommendation_report` | 旧 daily/weekly JSON report 不再作为主表 |
+| `report` | 删除；fresh bootstrap 直接创建 `quant_recommendation_report` | 旧 daily/weekly JSON report 不再作为主表 |
 | `decision_policy_snapshot` | 重建 | system-owned format v1；只引用四类 immutable profile artifact ID/hash |
 | `policy_activation` | 重建 | bundle generation、完整 revision vector、audit/outbox 原子闭环 |
 | `operation_log` | 保留 | 扩展 quant actions |
-| `system_runtime_state` | 重建字段 | 删除 `execution_mode`，新增 `quant_runtime_mode` |
+| `quant_runtime_control` | 重建 | `entry_authorization_policy`、独立 settlement write policy、kill switch 与共享 CAS revision |
 | `control_factor_*` | 大部分重命名为 `quant_factor_*` / `quant_model_*` | 不保留旧 control factor 语义 |
 
 ### 4.3 保留原样
@@ -741,7 +737,9 @@ crates/quant-pivot-models/src/domain/
 
 新增枚举：
 
-- `QuantRuntimeMode`: `ReportOnly`, `SemiAuto`, `AutoExecution`
+- `EntryAuthorizationPolicy`: `OperatorApprovalRequired`, `PolicyAutomatic`
+- `AuthorizationKind`: `OperatorApproval`, `ActivePolicy`
+- `ExecutionAuthorityCeiling`: `AnalysisOnly`, `OperatorApproval`, `PolicyAutomatic`
 - `ReportKind`: `TopN`, `ShadowTopN`, `PostRunAudit`
 - `RecommendationStatus`: `Published`, `Revoked`, `Expired`, `IntentCreated`, `Executed`, `Attributed`
 - `OutcomeSide`（recommendation/candidate 结果方向）: `Yes`, `No`
@@ -750,7 +748,7 @@ crates/quant-pivot-models/src/domain/
 - `FillRequirement`: `AllOrNothing`, `AllowPartial`
 - `EntryTriggerState`: `NotRequired`, `Waiting`, `Confirming`, `Ready`, `Expired`
 - `OrderType`: `Fok`, `Fak`, `Gtc`, `Gtd`
-- `OrderIntentStatus`: `Draft`, `PendingApproval`, `Approved`, `ApprovedByPolicy`, `AdmissionPending`, `AdmissionRejected`, `Submitted`, `PartiallyFilled`, `Filled`, `Rejected`, `Cancelled`, `Failed`, `Expired`, `Invalidated`
+- `OrderIntentStatus`: `PendingAuthorization`, `Authorized`, `AdmissionPending`, `AdmissionRejected`, `Submitted`, `PartiallyFilled`, `Filled`, `AuthorizationRejected`, `Cancelled`, `Failed`, `Expired`, `Invalidated`
 - `TradePolicyStatus`: `Draft`, `Validated`, `Published`, `Retired`
 - `ModelVersionDerivationKind`: `Training`, `ReturnCalibration`
 - `DataQualityStatus`: `Fresh`, `Acceptable`, `Degraded`, `Stale`, `Insufficient`
@@ -781,7 +779,7 @@ crates/quant-pivot-models/src/domain/
 ## 9. Schema 验收标准
 
 - `cargo test -p quant-pivot-models schema` 覆盖新增 idens。
-- Postgres migration test 覆盖新表创建、索引、外键、seed。
+- PostgreSQL fresh-bootstrap test 覆盖新表创建、索引、外键、seed。
 - ClickHouse row serialization snapshot 覆盖所有新 fact。
 - DTO tests 覆盖 sensitive stripping、query normalization、status transition request。
 - 删除清单中每个旧 entity 都必须从终态 bootstrap、entity registry、API 与消费者中消失或被明确的终态 owner 取代。
@@ -799,7 +797,6 @@ pub struct RecommendationReport {
     pub report_kind: ReportKind,
     pub as_of: DateTime<Utc>,
     pub horizon_secs: u64,
-    pub runtime_mode: QuantRuntimeMode,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,
@@ -865,9 +862,9 @@ pub struct FeatureEntry {
 pub struct OrderIntent {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
-    pub runtime_mode: QuantRuntimeMode,
     pub status: OrderIntentStatus,
-    pub approval: ApprovalState,
+    pub authorization_kind: Option<AuthorizationKind>,
+    pub authorization_evidence: Option<AuthorizationEvidence>,
     pub entry_order: EntryOrderSpec,
     pub exit_policy: ExitPolicy,
     pub risk_envelope_hash: Hash,
@@ -940,14 +937,11 @@ published -> intent_created
 ### 12.2 OrderIntent
 
 ```text
-draft -> pending_approval
-draft -> approved_by_policy
-pending_approval -> approved
-pending_approval -> rejected
-pending_approval -> expired
-approved -> submitted
-approved_by_policy -> submitted
+create -> pending_authorization | authorized
+pending_authorization -> authorized | authorization_rejected | cancelled | expired
+authorized -> admission_pending
+admission_pending -> submitted | admission_rejected | failed
 submitted -> filled | partially_filled | cancelled | failed
 ```
 
-Repository 必须拒绝非法边，例如 `rejected -> approved`、`expired -> submitted`。
+Repository 必须拒绝非法边，例如 `authorization_rejected -> authorized`、`expired -> submitted`。

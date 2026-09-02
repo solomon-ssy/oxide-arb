@@ -1,7 +1,7 @@
 //! Deterministic report payload fixtures for insta JSON snapshot tests.
 //!
 //! Covers non-empty `TopN`, empty, limit/immediate entry, partial exits,
-//! not-auto-eligible, and revoked report header. Uses [`seeded_uuid`] so snapshots
+//! operator-only authority, and revoked report header. Uses [`seeded_uuid`] so snapshots
 //! stay stable across runs.
 
 use std::{collections::BTreeMap, str::FromStr};
@@ -296,7 +296,7 @@ fn partial_exit_plan() -> ExitPlan {
     }
 }
 
-fn not_auto_eligible() -> ExecutionEligibility {
+fn operator_only_eligibility() -> ExecutionEligibility {
     ExecutionEligibility {
         ceiling: ExecutionAuthorityCeiling::OperatorApproval,
         blockers: vec![IneligibilityReason::AutomationCapExceeded],
@@ -417,17 +417,17 @@ pub fn recommendation_partial_exits() -> QuantRecommendationView {
     view(rec)
 }
 
-/// Recommendation withheld from auto-execution while remaining semi-auto eligible.
+/// Recommendation capped at operator approval with an automatic-authority blocker.
 #[must_use]
-pub fn recommendation_not_auto_eligible() -> QuantRecommendationView {
+pub fn recommendation_operator_only() -> QuantRecommendationView {
     let mut rec = base_recommendation(
         "snapshot-report-topn",
-        "snapshot-rec-not-auto",
+        "snapshot-rec-operator-only",
         1,
         "0xmarketA",
         OutcomeSide::Yes,
         Usd::new(dec!(250)),
     );
-    rec.execution_eligibility = not_auto_eligible();
+    rec.execution_eligibility = operator_only_eligibility();
     view(rec)
 }

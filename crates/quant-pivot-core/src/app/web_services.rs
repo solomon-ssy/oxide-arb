@@ -6,12 +6,12 @@ use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::domain::{
     governance::NewOperationLog,
     ports::{
-        CatalogStatusPort, CommittedPolicyApplyPort, DataQualityPort, ExecutionReadPort,
-        ExecutionRecoveryPort, FeatureIntegrityPort, FeedbackActivationReadPort,
-        FeedbackMutationPort, FeedbackReadPort, MarketLinkageGovernancePort,
-        ModelCalibrationFitPort, OrderIntentPort, PasswordCryptoPort, PolicySnapshotPort,
-        ReconciliationPort, ResearchJobPort, ResearchReadinessPort, TradePolicyPort,
-        TrainingDatasetPort, settlement_control::SettlementControlPort,
+        AccountRecoveryControlPort, CatalogStatusPort, CommittedPolicyApplyPort, DataQualityPort,
+        EconomicFeedbackPort, ExecutionReadPort, ExecutionRecoveryPort, FeatureIntegrityPort,
+        FeedbackActivationReadPort, FeedbackMutationPort, FeedbackReadPort,
+        MarketLinkageGovernancePort, ModelCalibrationFitPort, OrderIntentPort, PasswordCryptoPort,
+        PolicySnapshotPort, ReconciliationPort, ResearchJobPort, ResearchReadinessPort,
+        TradePolicyPort, TrainingDatasetPort, settlement_control::SettlementControlPort,
     },
 };
 use quant_pivot_repository::{
@@ -68,7 +68,7 @@ use crate::{
             training_dataset::CoreTrainingDatasetPort,
         },
         task_id::TaskId,
-        task_registry::AppRunner,
+        task_registry::{AppRunner, ShutdownBudget, ShutdownStage},
     },
     prefetch::feature_window::FeatureWindowProvider,
     service::{
@@ -127,30 +127,39 @@ impl AppContext {
             .ok_or_else(|| InfraError::Misconfigured {
                 detail: "event_rx already taken".into(),
             })?;
-        let ws_sessions = state.ws_sessions.clone();
+        let session_keepalive = state.ws_sessions.clone();
+        let event_sessions = state.ws_sessions.clone();
+        let session_root_shutdown = self.shutdown.clone();
 
-        runner.spawn(TaskId::SessionHub, move |token| session_hub.run(token));
+        runner.spawn(TaskId::SessionHub, move |token| async move {
+            // Keep both hub lanes connected until the dedicated SessionFanout
+            // stage cancels the actor after the broadcaster has drained.
+            session_hub.run(session_root_shutdown, token).await;
+            drop(session_keepalive);
+        });
         runner.spawn(TaskId::FeedbackOutboxWorker, move |token| async move {
             if let Err(error) = feedback_outbox.run(token).await {
                 tracing::error!(%error, "FeedbackOutboxWorker exited with error");
             }
         });
 
-        let web_config = self.config.web.clone();
-        let shutdown = self.shutdown.clone();
-        runner.spawn(TaskId::WebServer, move |token| async move {
-            if let Err(error) = spawn_web_server(state, web_config, token).await {
-                tracing::error!(%error, "web server exited");
-            }
-            shutdown.cancel();
-        });
-
-        self.register_book_update_coalescer(runner, ws_sessions.clone());
+        self.register_book_update_coalescer(runner, state.ws_sessions.clone());
 
         self.register_system_status_broadcaster(runner);
 
+        let web_config = self.config.web.clone();
+        let shutdown = self.shutdown.clone();
+        // Share the stage's finite budget: requests get half, leaving the
+        // remainder for worker cancellation, resource cleanup, and stop ACK.
+        let web_shutdown_grace = ShutdownBudget::execution().stage(ShutdownStage::WsIngress) / 2;
+        runner.spawn_critical(TaskId::WebServer, move |token| async move {
+            let result = spawn_web_server(state, web_config, token, web_shutdown_grace).await;
+            shutdown.cancel();
+            result
+        });
+
         runner.spawn(TaskId::WsBroadcaster, move |token| async move {
-            spawn_ws_broadcaster(event_rx, ws_sessions, token).await;
+            spawn_ws_broadcaster(event_rx, event_sessions, token).await;
         });
 
         runner.spawn(TaskId::OperationLogWriter, move |token| {
@@ -288,6 +297,8 @@ async fn build_app_state(
             ctx.config.market_data.finalized_exchange_history.clone(),
         )),
         quant_reports: ctx.build_quant_report_port(),
+        economic_feedback: Arc::clone(&ctx.report.economic_feedback)
+            as Arc<dyn EconomicFeedbackPort>,
         order_intents,
         entry_conditions: Arc::clone(&repos.entry_condition) as Arc<dyn EntryConditionRepository>,
         account_read: Arc::new(CoreAccountReadPort::new(
@@ -302,6 +313,8 @@ async fn build_app_state(
         settlement_control: execution.settlement_control,
         reconciliation: execution.reconciliation,
         execution_recovery: execution.execution_recovery,
+        account_recovery_control: Arc::clone(&ctx.execution.account_recovery)
+            as Arc<dyn AccountRecoveryControlPort>,
     })
 }
 
@@ -365,6 +378,8 @@ impl AppContext {
                 &self.infra.ch,
             ))) as Arc<dyn ServingEvidenceRepository>,
             feature_repo: Arc::clone(&repos.feature) as Arc<dyn FeatureRepository>,
+            exchange_history_repo: Arc::clone(&repos.exchange_history)
+                as Arc<dyn ExchangeHistoryRepository>,
             runtime_config_repo: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
             quant_fact_read: Arc::clone(&self.infra.quant_fact_read),
             operation_logs: Arc::clone(&repos.operation_log) as Arc<dyn OperationLogRepository>,
@@ -521,6 +536,7 @@ impl AppContext {
             Arc::clone(&bias_table),
             Arc::clone(&self.research.model_run_repo),
             Arc::clone(&runtime_config),
+            Arc::clone(&self.compute),
         ));
         ResearchWebPorts {
             training_datasets: Arc::new(CoreTrainingDatasetPort::from_research(

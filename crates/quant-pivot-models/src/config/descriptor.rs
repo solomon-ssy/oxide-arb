@@ -13,7 +13,7 @@ use super::{
 };
 
 /// The audited leaf count at the clean-break descriptor boundary.
-pub const DEPLOY_CONFIG_EXPECTED_LEAF_COUNT: usize = 333;
+pub const DEPLOY_CONFIG_EXPECTED_LEAF_COUNT: usize = 347;
 
 /// Every `SecretText` descriptor path. New secret fields must update this exhaustive set.
 pub const DEPLOY_SECRET_PATHS: [&str; 14] = [
@@ -474,15 +474,29 @@ impl DeployDescriptorCollector {
     fn variant_name(branch: &Value, index: usize) -> String {
         let object = branch.as_object();
         object
-            .and_then(|schema| schema.get("properties"))
-            .and_then(Value::as_object)
-            .and_then(|properties| {
-                properties.values().find_map(|property| {
-                    property
-                        .as_object()
-                        .and_then(|schema| schema.get("const"))
-                        .and_then(Value::as_str)
-                })
+            .and_then(|schema| schema.get("const"))
+            .and_then(Value::as_str)
+            .or_else(|| {
+                object
+                    .and_then(|schema| schema.get("enum"))
+                    .and_then(Value::as_array)
+                    .and_then(|values| match values.as_slice() {
+                        [value] => value.as_str(),
+                        _ => None,
+                    })
+            })
+            .or_else(|| {
+                object
+                    .and_then(|schema| schema.get("properties"))
+                    .and_then(Value::as_object)
+                    .and_then(|properties| {
+                        properties.values().find_map(|property| {
+                            property
+                                .as_object()
+                                .and_then(|schema| schema.get("const"))
+                                .and_then(Value::as_str)
+                        })
+                    })
             })
             .or_else(|| {
                 object
@@ -661,8 +675,9 @@ impl DeployDescriptorCollector {
     }
 
     fn count_unit(leaf: &str) -> bool {
-        matches!(leaf, "threads" | "max_top_n")
+        matches!(leaf, "threads" | "max_top_n" | "max_concurrent_reads")
             || leaf.contains("concurrency")
+            || leaf.contains("threads_per_")
             || leaf.contains("capacity")
             || matches!(leaf, "batch_size" | "page_size")
             || leaf.ends_with("_batch_size")
@@ -822,6 +837,13 @@ impl DeployDescriptorCollector {
         if let Some(value) = schema.get("const") {
             values.push(Self::scalar(value));
         }
+        if let Some(branches) = Self::branches(schema) {
+            for branch in branches {
+                if let Some(branch) = branch.as_object() {
+                    values.extend(Self::enum_values(branch));
+                }
+            }
+        }
         values.sort();
         values.dedup();
         values
@@ -858,6 +880,9 @@ impl DeployDescriptorCollector {
 
 #[cfg(test)]
 mod tests {
+    use schemars::Schema;
+    use serde_json::json;
+
     use super::{
         DEPLOY_CONFIG_EXPECTED_LEAF_COUNT, DeployConfigDescriptor, DeployFieldUnit, DeployValueKind,
     };
@@ -925,5 +950,30 @@ mod tests {
             kind("cache.domains.*.fail_open"),
             Some(DeployValueKind::Boolean)
         );
+    }
+
+    #[test]
+    fn unit_variants_are_discoverable() {
+        let schema = Schema::try_from(json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "oneOf": [
+                        { "type": "string", "const": "self_managed" },
+                        { "type": "string", "enum": ["provider_managed"] }
+                    ]
+                }
+            },
+            "required": ["mode"]
+        }))
+        .expect("valid unit enum schema");
+        let descriptor = DeployConfigDescriptor::from_schema(&schema);
+        let mode = descriptor
+            .fields
+            .iter()
+            .find(|field| field.toml_path == "mode")
+            .expect("unit enum descriptor");
+        assert_eq!(mode.enum_values, ["provider_managed", "self_managed"]);
+        assert_eq!(mode.variants, ["provider_managed", "self_managed"]);
     }
 }

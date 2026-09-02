@@ -394,10 +394,11 @@ impl PgExecutionAttemptOutcomeRepository {
         let inserted = u64::try_from(rows.len())
             .map_err(|error| queue_invariant(format!("task batch size overflow: {error}")))?;
         let now = primitives::statement_timestamp(transaction).await?;
+        let ready_at = primitives::queue_ready_at(available_through, now);
         for (order_intent_id, _) in rows {
             TaskEntity::insert(TaskActiveModel {
                 order_intent_id: ActiveValue::Set(order_intent_id),
-                ready_at: ActiveValue::Set(available_through),
+                ready_at: ActiveValue::Set(ready_at),
                 status: ActiveValue::Set(OutcomeReconciliationTaskStatus::Pending),
                 attempt_count: ActiveValue::Set(0),
                 claim_owner: ActiveValue::Set(None),

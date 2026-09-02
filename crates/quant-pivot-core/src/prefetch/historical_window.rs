@@ -433,7 +433,7 @@ impl HistoricalWindowLoader {
             ),
             "Weather calibration lookback",
         )?;
-        let weather_from = calibration_from.min(linkage_window.weather_history_from);
+        let weather_from = linkage_window.weather_from(calibration_from);
         let weather_cutoff = end_boundary.cutoff_for(DecisionSource::DomainWeather);
         let (weather_observations, weather_forecasts) = load_weather_facts(
             self.fact_read.as_ref(),
@@ -482,6 +482,17 @@ struct DomainLinkageWindow {
     weather_subject_keys: HashSet<String>,
     weather_history_from: DateTime<Utc>,
     weather_valid_to: DateTime<Utc>,
+    requires_temperature_calibration: bool,
+}
+
+impl DomainLinkageWindow {
+    fn weather_from(&self, calibration_from: DateTime<Utc>) -> DateTime<Utc> {
+        if self.requires_temperature_calibration {
+            calibration_from.min(self.weather_history_from)
+        } else {
+            self.weather_history_from
+        }
+    }
 }
 
 async fn load_domain_linkages(
@@ -500,6 +511,7 @@ async fn load_domain_linkages(
         weather_subject_keys: HashSet::new(),
         weather_history_from: boundary.decision_at(),
         weather_valid_to: boundary.decision_at(),
+        requires_temperature_calibration: false,
     };
     for info in rows {
         let market_id = info.market_id.clone();
@@ -517,6 +529,8 @@ async fn load_domain_linkages(
             }
             if let Some(subject_key) = binding.subject.weather_subject_key() {
                 window.weather_subject_keys.insert(subject_key);
+                window.requires_temperature_calibration |=
+                    matches!(binding.subject, MarketSubject::Weather(_));
                 window.weather_history_from = window
                     .weather_history_from
                     .min(weather_history_start(&binding.subject)?);
@@ -607,9 +621,9 @@ async fn load_crypto_reports(
         .map_err(QuantError::from)?;
     let mut reports: HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>> = HashMap::new();
     for row in rows {
-        let report = CryptoPriceReport::from_clickhouse_row(row).ok_or_else(|| {
+        let report = CryptoPriceReport::try_from_clickhouse_row(&row).map_err(|error| {
             ResearchError::PitResolution {
-                detail: "crypto report contains an invalid persisted timestamp".to_owned(),
+                detail: format!("persisted Crypto price report is invalid: {error}"),
             }
         })?;
         reports
@@ -811,14 +825,17 @@ impl WindowSpec {
                     "historical availability cutoff precedes the replay window: {error}"
                 ))
             })?;
-        let global_lag = availability_delay
+        let availability_delay_secs = availability_delay
             .as_secs()
+            .checked_add(u64::from(availability_delay.subsec_nanos() != 0))
+            .ok_or_else(|| QuantError::config("historical availability lag overflow"))?;
+        let global_lag = availability_delay_secs
             .checked_add(self.knowledge_lag.as_secs())
             .ok_or_else(|| QuantError::config("historical availability lag overflow"))?;
-        let crypto_lag = global_lag
+        let crypto_lag = availability_delay_secs
             .checked_add(self.domain.crypto.availability_lag_secs)
             .ok_or_else(|| QuantError::config("historical Crypto availability lag overflow"))?;
-        let weather_lag = global_lag
+        let weather_lag = availability_delay_secs
             .checked_add(self.domain.weather.availability_lag_secs)
             .ok_or_else(|| QuantError::config("historical Weather availability lag overflow"))?;
         replay_boundary(self.available_by, global_lag, crypto_lag, weather_lag)
@@ -1181,13 +1198,16 @@ fn timestamp_millis(timestamp_ms: i64, field: &'static str) -> QuantResult<DateT
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        collections::{HashMap, HashSet},
+        time::Duration,
+    };
 
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
     use quant_pivot_models::{
         clickhouse::{BookMicrostructureRow, ChSchemaVersion},
         domain::{
-            data_plane::DecisionClock,
+            data_plane::{DecisionClock, DecisionSource},
             market::{MarketMakerRebateEvidence, MarketRegistryInfo, TokenInfo},
         },
         enums::{
@@ -1195,11 +1215,81 @@ mod tests {
             common::{CategorySet, MarketCategory, TickSize},
             market::MarketStatus,
         },
-        types::{EventId, MarketId, TokenId},
+        runtime_config::DomainConfig,
+        types::{EventId, MarketId, ResearchFeatureContract, TokenId},
     };
     use rust_decimal_macros::dec;
 
-    use super::{book_prefetch_start, feature_window, selected_market};
+    use super::{
+        DomainLinkageWindow, WindowSpec, book_prefetch_start, feature_window, selected_market,
+    };
+
+    #[test]
+    fn weather_window_scope() {
+        let decision_at = Utc
+            .with_ymd_and_hms(2026, 8, 21, 0, 0, 0)
+            .single()
+            .expect("decision time");
+        let calibration_from = decision_at - ChronoDuration::days(730);
+        let contract_from = decision_at + ChronoDuration::hours(1);
+        let mut window = DomainLinkageWindow {
+            linkages: HashMap::new(),
+            instruments: HashSet::new(),
+            oracle_instruments: HashSet::new(),
+            weather_subject_keys: HashSet::new(),
+            weather_history_from: contract_from,
+            weather_valid_to: decision_at + ChronoDuration::hours(2),
+            requires_temperature_calibration: false,
+        };
+
+        assert_eq!(window.weather_from(calibration_from), contract_from);
+        window.requires_temperature_calibration = true;
+        assert_eq!(window.weather_from(calibration_from), calibration_from);
+    }
+
+    #[test]
+    fn source_lags_apply_once() {
+        let window_end = Utc
+            .with_ymd_and_hms(2026, 8, 21, 0, 0, 0)
+            .single()
+            .expect("window end");
+        let domain = DomainConfig::default();
+        let mut spec = WindowSpec {
+            window_start: window_end - ChronoDuration::seconds(1),
+            window_end,
+            available_by: window_end,
+            samples: Vec::new(),
+            lookback: Duration::ZERO,
+            knowledge_lag: Duration::from_secs(10),
+            max_horizon_secs: 0,
+            domain: domain.clone(),
+            feature_contract: ResearchFeatureContract::FullL2Weather,
+            execution_history_chunks: Vec::new(),
+            requires_execution_history: false,
+        };
+        let boundary = spec.window_end_boundary().expect("window boundary");
+
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::DomainWeather),
+            window_end
+                - ChronoDuration::seconds(
+                    i64::try_from(domain.weather.availability_lag_secs).expect("Weather lag")
+                ),
+        );
+        spec.available_by = window_end + ChronoDuration::milliseconds(1);
+        let delayed = spec.window_end_boundary().expect("delayed boundary");
+        assert_eq!(
+            delayed.knowledge_cutoff(),
+            spec.available_by - ChronoDuration::seconds(11)
+        );
+        assert_eq!(
+            delayed.cutoff_for(DecisionSource::DomainWeather),
+            spec.available_by
+                - ChronoDuration::seconds(
+                    i64::try_from(domain.weather.availability_lag_secs + 1).expect("Weather lag"),
+                ),
+        );
+    }
 
     fn microstructure_row(token_id: &TokenId, bucket_time: i64) -> BookMicrostructureRow {
         BookMicrostructureRow {

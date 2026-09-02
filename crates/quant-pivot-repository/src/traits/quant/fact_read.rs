@@ -16,21 +16,59 @@ use quant_pivot_models::{
         BookL2LedgerRow, BookLedgerReplayAnchor, BookMicrostructureRow, BookStreamSessionRow,
         CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
         ExchangeEventRow, ExchangeMatchRow, ExecutionParticipantFactRow, ExecutionParticipantRow,
-        MarketExecutionRow, MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow,
-        ReportMarketFunnelRow, WeatherForecastFactRow, WeatherObservationFactRow,
+        MarketExecutionRow, MarketResolutionRow, MidPriceBucketRow, QuantSignalCandidateEventRow,
+        ReportMarketFunnelCountRow, ReportMarketFunnelRow, WeatherForecastFactRow,
+        WeatherObservationFactRow,
     },
     domain::{data_plane::HistorySealChunkRef, quant::AccountChainEventCursor},
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, EvmAddress,
-        MarketId, OrderId, RecommendationReportId, TokenId,
+        MarketId, ModelVersionId, OrderId, RecommendationReportId, TokenId,
     },
 };
 use uuid::Uuid;
+
+/// Exact committed frontier for a bounded Crypto baseline read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CryptoReportFrontierQuery {
+    pub source_id: DomainSourceId,
+    pub instrument_key: DomainInstrumentKey,
+    pub gap_generation: u64,
+    pub committed_source_sequence: u64,
+    pub committed_published_at_ms: i64,
+    pub source_timestamp_ms: i64,
+    pub decision_at_ms: i64,
+}
+
+/// Exact committed source generation and availability window for live folding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CryptoReportsAvailableQuery {
+    pub source_id: DomainSourceId,
+    pub instrument_key: DomainInstrumentKey,
+    pub gap_generation: u64,
+    pub committed_source_sequence: u64,
+    pub committed_published_at_ms: i64,
+    pub available_from_ms: i64,
+    pub available_to_ms: i64,
+    pub decision_at_ms: i64,
+}
 
 /// Read port over persisted quant facts, used to materialize feature windows and
 /// point-in-time historical state.
 #[async_trait::async_trait]
 pub trait QuantFactReadRepository: Send + Sync {
+    /// Frozen-model candidate signals visible within one economic replay window.
+    async fn signal_candidates_between(
+        &self,
+        _token_id: &TokenId,
+        _model_version_id: &ModelVersionId,
+        _from_ms: i64,
+        _to_ms: i64,
+        _available_by_ms: i64,
+    ) -> Result<Vec<QuantSignalCandidateEventRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
     /// Accepted finalized V2 order events involving one configured account.
     async fn account_order_filled_events(
         &self,
@@ -64,9 +102,11 @@ pub trait QuantFactReadRepository: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Verify that every exact sealed chunk revision is still the active
-    /// `ClickHouse` acceptance revision. Production implementations must fail
-    /// closed when this capability is unavailable.
+    /// Verify that every sealed chunk has a positive revision, that the input
+    /// order is block-contiguous across any frontier boundary, and that each
+    /// frontier, inclusive block range, and state revision still matches its
+    /// active `ClickHouse` acceptance exactly. Production implementations must
+    /// fail closed when this capability is unavailable.
     async fn validate_execution_history_chunks(
         &self,
         _history_chunks: Vec<HistorySealChunkRef>,
@@ -124,17 +164,14 @@ pub trait QuantFactReadRepository: Send + Sync {
         Ok(None)
     }
 
-    /// Latest source-native Crypto report applicable at `source_timestamp_ms`
-    /// and visible by `decision_at_ms`. Chainlink uses its signed
-    /// `observations_timestamp`; other sources use `event_time`.
-    async fn crypto_price_report_at(
+    /// Latest source-native Crypto checkpoint group applicable at
+    /// `source_timestamp_ms` and visible by `decision_at_ms`. Multiple rows
+    /// are returned only to expose equal-key hash equivocation fail closed.
+    async fn crypto_price_reports_at(
         &self,
-        _source_id: &DomainSourceId,
-        _instrument_key: &DomainInstrumentKey,
-        _source_timestamp_ms: i64,
-        _decision_at_ms: i64,
-    ) -> Result<Option<CryptoPriceReportRow>, StorageError> {
-        Ok(None)
+        _query: CryptoReportFrontierQuery,
+    ) -> Result<Vec<CryptoPriceReportRow>, StorageError> {
+        Ok(Vec::new())
     }
 
     /// Source-native Crypto facts in `[from_ms, to_ms)`, PIT-visible by the
@@ -150,17 +187,14 @@ pub trait QuantFactReadRepository: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Crypto facts first made visible in `[available_from_ms, available_to_ms)`.
-    /// This availability-ordered reader is the canonical live/replay fold input;
-    /// it includes late corrections whose economic event time predates the
-    /// current evaluator cursor. Exact writer retries are removed explicitly;
-    /// this never relies on a background `ReplacingMergeTree` merge.
+    /// One exact source/instrument generation first made visible in
+    /// `[available_from_ms, available_to_ms)`, bounded by its committed cursor.
+    /// This availability-ordered reader includes late corrections while
+    /// excluding ACK-only rows and other source identities. Exact retries are
+    /// removed explicitly; background merges are never correctness evidence.
     async fn crypto_reports_between(
         &self,
-        _instrument_keys: Vec<DomainInstrumentKey>,
-        _available_from_ms: i64,
-        _available_to_ms: i64,
-        _decision_at_ms: i64,
+        _query: CryptoReportsAvailableQuery,
     ) -> Result<Vec<CryptoPriceReportRow>, StorageError> {
         Ok(Vec::new())
     }

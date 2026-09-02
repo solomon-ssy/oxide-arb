@@ -1,7 +1,7 @@
 //! Process-local wake signal from the intent-approval path to the
 //! authorized-intent dispatcher worker.
 //!
-//! The **durable** work queue is Postgres: `ApprovedByPolicy` intent rows,
+//! The **durable** work queue is Postgres: `Authorized` intent rows,
 //! dequeued under a per-intent `SELECT … FOR UPDATE` claim. This signal only
 //! collapses the approve→submit latency from the poll cadence to near-immediate;
 //! it carries no work itself and is never authoritative. Losing a wake is

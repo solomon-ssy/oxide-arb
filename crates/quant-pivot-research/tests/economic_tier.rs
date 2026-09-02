@@ -5,11 +5,13 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
         market::{book::BookLevel, fee::BuilderFeeAttribution},
+        order::PolymarketOrderRules,
         quant::{
             EntryExecutionEconomics, ExecutableEconomicTier, ScenarioMarketOutcome,
             ScenarioPayoutState,
         },
     },
+    enums::common::TickSize,
     types::{
         Bps, MakerRebateDelayBasis, MakerRebateProgramDayBaseline, MakerRebateValuationEvidence,
         MakerRebateValuationHealth, PortfolioScenarioArtifactId, Price, Shares, Usd,
@@ -22,7 +24,7 @@ use quant_pivot_research::{
     },
     portfolio::{
         EconomicTierFactory, ExecutablePassiveTierSeedFactory, ExecutablePassiveTierSeedInput,
-        ExecutableTierSeed, SealedPortfolioScenarioArtifact,
+        ExecutableTierSeed, SealedPortfolioScenarioArtifact, TierSeedBuild,
     },
 };
 use rust_decimal_macros::dec;
@@ -170,7 +172,7 @@ fn rebate_uses_fill_expectation() -> QuantResult<()> {
         execution_economics: &economics,
         decision_at,
         limit_price: Price::new(dec!(0.5)),
-        requested_shares: Shares::new(dec!(100)),
+        requested_shares: Shares::new(dec!(100.009)),
         cash_budget: Usd::new(dec!(50)),
         good_til_secs: 3_600,
         fill_distribution: PassiveFillDistribution {
@@ -214,12 +216,19 @@ fn rebate_uses_fill_expectation() -> QuantResult<()> {
             },
             evidence_hash: template.lineage_hash,
         },
+        order_rules: PolymarketOrderRules::new(TickSize::Hundredth, Shares::new(dec!(5)))
+            .map_err(|error| QuantError::config(error.to_string()))?,
         source_lineage_hash: template.lineage_hash,
     })?;
+    let TierSeedBuild::Ready(seed) = seed else {
+        return Err(QuantError::config("passive seed unexpectedly unavailable"));
+    };
+    let seed = *seed;
 
     let EntryExecutionEconomics::Passive(entry) = seed.entry_execution else {
         return Err(QuantError::config("passive seed changed route"));
     };
+    assert_eq!(entry.requested_shares, Shares::new(dec!(100)));
     assert_eq!(entry.hard_reserved_cash_usd, Usd::new(dec!(50)));
     assert_eq!(entry.expected_filled_shares, Shares::new(dec!(37.5)));
     assert_eq!(

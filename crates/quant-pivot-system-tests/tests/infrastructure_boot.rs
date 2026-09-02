@@ -13,7 +13,6 @@ async fn fresh_stack_schema_ready() {
 
     assert!(stack.postgres_schema.migration_count > 0);
     assert!(stack.postgres_schema.required_table_count > 0);
-    assert!(stack.clickhouse_schema.current_version > 0);
     assert!(stack.clickhouse_schema.required_object_count > 0);
 
     stack

@@ -1,0 +1,55 @@
+<clickhouse>
+    <!--
+      Single-purpose quant-pivot ClickHouse resource contract.
+
+      Background merges cannot participate in query workload scheduling. Keep
+      their pool bounded and remove high-churn system logs that otherwise create
+      self-amplifying MergeTree work. Query admission and per-query thread caps
+      are enforced independently by the application client.
+    -->
+    <logger>
+        <level>warning</level>
+    </logger>
+
+    <background_pool_size>4</background_pool_size>
+    <background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>
+    <background_schedule_pool_size>8</background_schedule_pool_size>
+    <max_concurrent_queries>64</max_concurrent_queries>
+    <max_thread_pool_size>256</max_thread_pool_size>
+    <merge_tree>
+        <number_of_free_entries_in_pool_to_lower_max_size_of_merge>1</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+        <number_of_free_entries_in_pool_to_execute_mutation>1</number_of_free_entries_in_pool_to_execute_mutation>
+        <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>1</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+    </merge_tree>
+
+    <!-- Live server metrics replace persisted metric/event log tables. -->
+    <prometheus>
+        <endpoint>/metrics</endpoint>
+        <port>9363</port>
+        <metrics>true</metrics>
+        <events>true</events>
+        <asynchronous_metrics>true</asynchronous_metrics>
+        <errors>true</errors>
+        <histograms>true</histograms>
+        <dimensional_metrics>true</dimensional_metrics>
+    </prometheus>
+
+    <!-- Retain sampled query history for governed-query contract evidence. -->
+    <query_log>
+        <flush_interval_milliseconds>30000</flush_interval_milliseconds>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_log>
+
+    <!-- The live endpoint above owns these signals; these tables are not consumed. -->
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <text_log remove="1"/>
+    <trace_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <query_thread_log remove="1"/>
+    <query_views_log remove="1"/>
+    <query_metric_log remove="1"/>
+    <part_log remove="1"/>
+    <background_schedule_pool_log remove="1"/>
+    <asynchronous_insert_log remove="1"/>
+</clickhouse>

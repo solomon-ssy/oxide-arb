@@ -1,6 +1,9 @@
 # quant-pivot 全局组合、Runtime/Deploy Config 与 UI/UX 完整闭环实施计划
 
-> 状态：`IMPLEMENTATION_IN_PROGRESS`
+> **SUPERSEDED**：本文只保留当时的 global-plan 设计/删除盘点，不再定义 current
+> task、执行授权、schema 演进或质量门禁。当前实施状态只认
+> [`../plans/quant-pivot/phase-12/12.1-implementation-ledger.md`](../plans/quant-pivot/phase-12/12.1-implementation-ledger.md)；
+> 当前 Config 合同见 [`../plans/quant-pivot/06-config-deploy-and-ops.md`](../plans/quant-pivot/06-config-deploy-and-ops.md)。
 >
 > 兼容策略：clean break。禁止旧 parser、字段别名、deprecated API、forwarding wrapper、
 > compatibility re-export、双读、双写或 solver fallback。

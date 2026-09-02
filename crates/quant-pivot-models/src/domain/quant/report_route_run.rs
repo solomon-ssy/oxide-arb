@@ -1,6 +1,7 @@
 //! Per-Route readiness, model lineage, and candidate funnel for a global report run.
 
 use crate::{
+    domain::data_plane::HistorySealChunkRef,
     entities::quant_report_route_run,
     runtime_config::BuyModelRoute,
     types::{
@@ -25,6 +26,22 @@ pub enum RouteRunOutcome {
     Failed,
 }
 
+/// Exact finalized-execution source bound to one Route decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "source")]
+pub enum RouteHistoryLineage {
+    /// Live serving consumed one immutable Activation head.
+    Runtime {
+        serving_head_seal_id: HistoryServingHeadSealId,
+        serving_head_seal_hash: ContentHash,
+    },
+    /// Historical materialization consumed an exact accepted chunk set.
+    Materialized {
+        available_by: DateTime<Utc>,
+        chunks: Vec<HistorySealChunkRef>,
+    },
+}
+
 /// Frozen lineage required atomically before any Route-specific model filtering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
@@ -41,8 +58,7 @@ pub struct RouteModelLineage {
     pub serving_contract_digest: ContentHash,
     pub recommendation_contract_hash: ContentHash,
     pub report_universe_plan_hash: ContentHash,
-    pub history_serving_head_seal_id: HistoryServingHeadSealId,
-    pub history_serving_head_seal_hash: ContentHash,
+    pub history: RouteHistoryLineage,
     pub serving_authority: ServingAuthority,
 }
 

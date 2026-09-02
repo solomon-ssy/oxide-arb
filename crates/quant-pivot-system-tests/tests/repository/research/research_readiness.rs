@@ -124,6 +124,45 @@ pub async fn readiness_evidence_scoped_only() {
     );
 }
 
+pub async fn latest_valid_breaks_ties() {
+    let (pool, _container) = setup_pg().await;
+    let repo = PgResearchReadinessEvidenceRepository::new(pool.connection().clone());
+    let observed_at = Utc::now() - Duration::minutes(1);
+    let scope_hash = hash('a');
+    let mut lower = new_evidence(observed_at, scope_hash);
+    lower.evidence_id = Uuid::parse_str("018f0000-0000-7000-8000-000000000001")
+        .expect("valid lower UUIDv7")
+        .into();
+    let mut higher = new_evidence(observed_at, scope_hash);
+    higher.evidence_id = Uuid::parse_str("018f0000-0000-7000-8000-000000000002")
+        .expect("valid higher UUIDv7")
+        .into();
+    let ResearchReadinessEvidencePayload::ShadowLatencyProfile(payload) = &mut higher.payload_json
+    else {
+        panic!("latency fixture must use the shadow-latency payload");
+    };
+    payload.book_age_p50_ms += 1;
+    higher.payload_hash = CanonicalDigest::content_hash_json(&higher.payload_json)
+        .expect("canonical higher payload content hash");
+    let expected = higher.evidence_id;
+
+    repo.append(lower).await.expect("append lower evidence ID");
+    repo.append(higher)
+        .await
+        .expect("append higher evidence ID");
+
+    let current = repo
+        .latest_valid(
+            ResearchReadinessEvidenceKind::ShadowLatencyProfile,
+            &scope_hash,
+            observed_at + Duration::minutes(1),
+        )
+        .await
+        .expect("tied current lookup")
+        .expect("tied current evidence");
+    assert_eq!(current.evidence_id, expected);
+}
+
 pub async fn readiness_evidence_rejects_tampering() {
     let (pool, _container) = setup_pg().await;
     let repo = PgResearchReadinessEvidenceRepository::new(pool.connection().clone());

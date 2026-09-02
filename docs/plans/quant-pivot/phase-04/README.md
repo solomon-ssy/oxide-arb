@@ -29,8 +29,8 @@ flowchart LR
    candidate admission、global plan 和 ranking。
 3. [`04.2-report-builder-composer-publisher-lifecycle.md`](04.2-report-builder-composer-publisher-lifecycle.md)：
    frozen multi-route builder、atomic persistence、publication 和 empty/failure 语义。
-4. [`04.3-scheduler.md`](04.3-scheduler.md)：durable schedule/claim/recovery；调度不得改变报告经济语义。
-5. [`04.4-report-web.md`](04.4-report-web.md)：mixed-route API/WebSocket/UI contract。
+4. [`04.3-report-scheduler.md`](04.3-report-scheduler.md)：durable schedule/claim/recovery；调度不得改变报告经济语义。
+5. [`04.4-report-api-ws-notifications.md`](04.4-report-api-ws-notifications.md)：mixed-route API/WebSocket/UI contract。
 
 唯一 optimizer 规格：[`../phase-05/05.8-portfolio-optimization-highs.md`](../phase-05/05.8-portfolio-optimization-highs.md)。
 
@@ -44,7 +44,7 @@ flowchart LR
 - sizing 只能选择完整 `ExecutableEconomicTier`；无 per-candidate sizing model。
 - 联合 dependence 只能来自 promoted `PortfolioScenarioArtifact`。
 - 组合只接受唯一 HiGHS MILP 的 optimal + exact-verified result。
-- 所有 mode 使用真实 venue account；credential 缺失 fail closed。
+- 所有报告都使用真实 venue account；credential 缺失 fail closed。
 - report、route-run、plan 和 recommendation 一次事务持久化，commit 后才发布副作用。
 
 ## 4. 核心类型

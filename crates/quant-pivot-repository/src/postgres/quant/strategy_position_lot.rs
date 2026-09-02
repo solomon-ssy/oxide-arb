@@ -18,8 +18,9 @@ use quant_pivot_models::{
         api::{PositionListQuery, PositionSummary},
         pagination::{PageWindow, Paginated},
         quant::{
-            CumulativePositionFill, ExitTrainingLotRow, LotExitEventRow, NewStrategyPositionLot,
-            PositionExit, PositionExitReconciliation, PositionFill, StrategyPositionLot,
+            ExitTrainingLotRow, LotExitEventRow, NewStrategyPositionLot, PositionExit,
+            PositionExitReconciliation, PositionFill, PositionFillReconciliation,
+            StrategyPositionLot,
         },
     },
     entities::{
@@ -189,6 +190,21 @@ impl StrategyPositionLotRepository for PgStrategyPositionLotRepository {
     async fn find_open_lots(&self) -> Result<Vec<StrategyPositionLot>, StorageError> {
         Entity::find()
             .filter(Column::State.is_in(OPEN_STATES))
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn find_account_open_lots(
+        &self,
+        execution_account_id: &ExecutionAccountId,
+    ) -> Result<Vec<StrategyPositionLot>, StorageError> {
+        Entity::find()
+            .filter(Column::ExecutionAccountId.eq(*execution_account_id))
+            .filter(Column::State.is_in(OPEN_STATES))
+            .order_by_asc(Column::OpenedAt)
+            .order_by_asc(Column::StrategyPositionLotId)
             .all(&self.db)
             .await
             .map_err(StorageError::from)
@@ -412,14 +428,14 @@ impl PgStrategyPositionLotRepository {
             .map(Into::into)
     }
 
-    /// Advance a per-intent lot to venue-authoritative cumulative fill totals.
-    ///
-    /// The lot lock makes equal totals an idempotent no-op. Any regression is
-    /// rejected because confirmed venue trades are append-only facts.
+    /// Apply only the newly observed entry-fill delta to the current remaining
+    /// lot. The lot lock serializes this receipt with concurrent exit debits, so
+    /// gross cumulative entry shares can never recreate already-sold inventory.
     pub async fn reconcile_fill(
         db: &impl ConnectionTrait,
-        fill: CumulativePositionFill,
+        adjustment: PositionFillReconciliation,
     ) -> Result<StrategyPositionLot, StorageError> {
+        let fill = adjustment.cumulative;
         if !fill.cumulative_shares.is_positive() || fill.cumulative_cost_usd.is_negative() {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_STRATEGY_POSITION_LOT),
@@ -433,6 +449,15 @@ impl PgStrategyPositionLotRepository {
             .await
             .map_err(StorageError::from)?;
         let Some(row) = existing else {
+            if adjustment.shares_delta != fill.cumulative_shares
+                || adjustment.cost_delta_usd != fill.cumulative_cost_usd
+            {
+                return Err(StorageError::state_conflict(
+                    QUANT_STRATEGY_POSITION_LOT,
+                    Some(&fill.order_intent_id),
+                    "entry reconciliation delta expects a position lot that does not exist",
+                ));
+            }
             let average_price = price_from_cost(fill.cumulative_cost_usd, fill.cumulative_shares)?;
             return Self::apply_fill(
                 db,
@@ -468,35 +493,26 @@ impl PgStrategyPositionLotRepository {
                 ),
             ));
         }
-        if matches!(
-            row.state,
-            PositionLedgerState::Closed | PositionLedgerState::Settled
-        ) {
-            return Err(StorageError::state_conflict(
-                QUANT_STRATEGY_POSITION_LOT,
-                Some(&row.strategy_position_lot_id),
-                "cannot reconcile fill into closed position lot",
-            ));
+        if adjustment.shares_delta.is_zero() && adjustment.cost_delta_usd.is_zero() {
+            return Ok(row.into());
         }
-        if fill.cumulative_shares < row.shares || fill.cumulative_cost_usd < row.cost_usd {
-            return Err(StorageError::state_conflict(
-                QUANT_STRATEGY_POSITION_LOT,
-                Some(&row.strategy_position_lot_id),
+        let shares = row.shares + adjustment.shares_delta;
+        let cost_usd = row.cost_usd + adjustment.cost_delta_usd;
+        if !shares.is_positive() || cost_usd.is_negative() {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_STRATEGY_POSITION_LOT),
                 format!(
-                    "cumulative fill regressed: shares {} -> {}, cost {} -> {}",
-                    row.shares, fill.cumulative_shares, row.cost_usd, fill.cumulative_cost_usd
+                    "entry reconciliation delta produces invalid lot for intent {}: shares={shares}, cost={cost_usd}",
+                    fill.order_intent_id
                 ),
             ));
         }
-        if fill.cumulative_shares == row.shares && fill.cumulative_cost_usd == row.cost_usd {
-            return Ok(row.into());
-        }
-        let avg_price = price_from_cost(fill.cumulative_cost_usd, fill.cumulative_shares)?;
+        let avg_price = price_from_cost(cost_usd, shares)?;
         let mut active = row.into_active_model();
         active.state = ActiveValue::Set(PositionLedgerState::Open);
-        active.shares = ActiveValue::Set(fill.cumulative_shares);
+        active.shares = ActiveValue::Set(shares);
         active.avg_price = ActiveValue::Set(avg_price);
-        active.cost_usd = ActiveValue::Set(fill.cumulative_cost_usd);
+        active.cost_usd = ActiveValue::Set(cost_usd);
         active.source = ActiveValue::Set(fill.source);
         active.updated_at = ActiveValue::Set(fill.observed_at);
         active.closed_at = ActiveValue::Set(None);

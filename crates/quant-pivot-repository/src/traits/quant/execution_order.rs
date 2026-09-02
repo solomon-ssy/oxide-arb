@@ -37,7 +37,7 @@ pub trait ExecutionOrderRepository: Send + Sync {
 
     /// Whether any execution order is in the `Ambiguous` state (submitted but
     /// unconfirmed — capital held, venue truth unknown). This is the fail-closed
-    /// gate for new auto-execution entries: truth-unknown in-flight exposure must
+    /// gate for new policy-automatic entries: truth-unknown in-flight exposure must
     /// be reconciled before opening more. Resting `Submitted` (open limit)
     /// orders are *not* blocking.
     async fn has_ambiguous_inflight(&self) -> Result<bool, StorageError>;

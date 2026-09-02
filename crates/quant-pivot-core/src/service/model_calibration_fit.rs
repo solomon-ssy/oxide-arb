@@ -15,16 +15,22 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Duration;
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory, OfflineMemoryLease};
+use quant_pivot_error::{
+    QuantError, QuantResult,
+    research::ResearchError,
+    storage::{StorageError, entity::QUANT_MODEL_RUN},
+};
 use quant_pivot_models::{
     domain::{
         api::{FitModelCalibratorRequest, ModelCalibrationFitPreflightView},
         ports::{
-            ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+            CalibrationRunFinalization, ModelCalibrationFitJobParams, ModelCalibrationFitOutcome,
+            ModelCalibrationFitPort,
         },
         quant::{
             CalibrationArtifactPayload, JobProgressSink, ModelRunInfo, ModelScoreCalibrationCommit,
-            NewCalibrationArtifact,
+            NewCalibrationArtifact, VerifiedModelScoreCalibrationCommit,
         },
         query::TimeWindow,
     },
@@ -50,8 +56,8 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     backtest::ModelCalibrationOutcome,
     model::{
-        IsotonicCalibrator, PlattCalibrator, ProbabilityCalibrator, ReliabilitySample,
-        compute_reliability,
+        CancellationProbe, IsotonicCalibrator, PlattCalibrator, ProbabilityCalibrator,
+        ReliabilitySample, compute_reliability,
     },
     precision::RESEARCH_DECIMAL_SCALE,
     stats::{count_f64, wilson_interval, wilson_z},
@@ -74,6 +80,17 @@ use crate::{
 
 const INSUFFICIENT_CALIBRATION_DOMAIN: &str = "quant-pivot/model-score-calibration-insufficient";
 const INSUFFICIENT_CALIBRATION_VERSION: u32 = 1;
+const CANCELLATION_INTERVAL: usize = 1_024;
+
+fn is_retryable_calibration_error(error: &QuantError) -> bool {
+    match error {
+        QuantError::Research(
+            ResearchError::ArtifactTransport { .. } | ResearchError::Cancelled { .. },
+        ) => true,
+        QuantError::Storage(error) => error.is_transient(),
+        _ => false,
+    }
+}
 
 /// Governed knobs the fit needs from the frozen `model.calibration` config
 /// section, resolved from the pinned runtime-config version at
@@ -106,38 +123,127 @@ struct CalibrationFitSamples<'a> {
     minimum_sample_count: u64,
 }
 
+enum PreparedCalibrationCommit {
+    Insufficient {
+        outcome_hash: ContentHash,
+        sample_count: u64,
+        total_sample_count: u64,
+        minimum_sample_count: u64,
+    },
+    Calibrated {
+        commit: Box<VerifiedModelScoreCalibrationCommit>,
+        content_hash: ContentHash,
+        sample_count: u64,
+        split_hash: ContentHash,
+        fit_window: TimeWindow,
+    },
+}
+
+struct CalibrationPrepareInput {
+    request: FitModelCalibratorRequest,
+    policy: CalibrationFitPolicy,
+    evidence: CalibrationReplayEvidence,
+    downside_source: DownsideSource,
+    cancel: CancellationToken,
+}
+
+impl CalibrationPrepareInput {
+    fn prepare(self) -> QuantResult<(CalibrationReplayEvidence, PreparedCalibrationCommit)> {
+        require_calibration_active(&self.cancel)?;
+        let probe_cancel = self.cancel.clone();
+        let cancellation = CancellationProbe::new(move || probe_cancel.is_cancelled());
+        let samples =
+            CalibrationFitSamples::new(&self.request, &self.policy, &self.evidence, &cancellation)?;
+        require_calibration_active(&self.cancel)?;
+        let prepared = if samples.is_insufficient() {
+            PreparedCalibrationCommit::Insufficient {
+                outcome_hash: samples.insufficient_hash(&self.evidence, self.request.method)?,
+                sample_count: samples.sample_count,
+                total_sample_count: samples.total_sample_count,
+                minimum_sample_count: samples.minimum_sample_count,
+            }
+        } else {
+            samples.validate_downside_support(self.downside_source, &cancellation)?;
+            require_calibration_active(&self.cancel)?;
+            let payload = samples.fit_payload(
+                self.request.method,
+                &self.policy,
+                &self.evidence.fit_contract,
+                &cancellation,
+            )?;
+            require_calibration_active(&self.cancel)?;
+            let sample_count_i64 = i64::try_from(samples.sample_count).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!("calibration sample count exceeds Postgres bigint: {error}"),
+                }
+            })?;
+            let content_hash =
+                model_score_content_hash(&self.evidence.fit_window, &samples.split_hash, &payload)?;
+            let commit =
+                VerifiedModelScoreCalibrationCommit::try_from(ModelScoreCalibrationCommit {
+                    model_run_id: self.evidence.model_run_id,
+                    artifact: NewCalibrationArtifact {
+                        artifact_id: CalibrationArtifactId::from_v7(),
+                        kind: CalibrationKind::ModelScore,
+                        content_hash,
+                        calibration_split_hash: samples.split_hash,
+                        fit_window_start: self.evidence.fit_window.from,
+                        fit_window_end: self.evidence.fit_window.to,
+                        sample_count: sample_count_i64,
+                        payload: CalibrationArtifactPayload::ModelScore(Box::new(payload)),
+                        active: false,
+                    },
+                })
+                .map_err(|detail| ResearchError::InvalidModelArtifact {
+                    detail: format!("prepared model-score calibration commit is invalid: {detail}"),
+                })?;
+            PreparedCalibrationCommit::Calibrated {
+                commit: Box::new(commit),
+                content_hash,
+                sample_count: samples.sample_count,
+                split_hash: samples.split_hash,
+                fit_window: self.evidence.fit_window,
+            }
+        };
+        Ok((self.evidence, prepared))
+    }
+}
+
 impl<'a> CalibrationFitSamples<'a> {
     fn new(
         request: &FitModelCalibratorRequest,
         policy: &CalibrationFitPolicy,
         evidence: &'a CalibrationReplayEvidence,
+        cancellation: &CancellationProbe,
     ) -> QuantResult<Self> {
         let split_payout = PayoutRatio::try_new(Decimal::new(5, 1)).map_err(|error| {
             ResearchError::ValidationMethodology {
                 detail: format!("canonical split payout is invalid: {error}"),
             }
         })?;
-        if let Some(sample) = evidence.samples.iter().find(|sample| {
-            sample.token_payout_ratio != PayoutRatio::ZERO
+        let mut binary = Vec::with_capacity(evidence.samples.len());
+        for (index, sample) in evidence.samples.iter().enumerate() {
+            if index % CANCELLATION_INTERVAL == 0 {
+                cancellation.check("model calibration population scan")?;
+            }
+            if sample.token_payout_ratio != PayoutRatio::ZERO
                 && sample.token_payout_ratio != PayoutRatio::ONE
                 && sample.token_payout_ratio != split_payout
-        }) {
-            return Err(ResearchError::ValidationMethodology {
-                detail: format!(
-                    "model-score calibration only accepts canonical payout ratios 0, 0.5, or 1; got {}",
-                    sample.token_payout_ratio
-                ),
+            {
+                return Err(ResearchError::ValidationMethodology {
+                    detail: format!(
+                        "model-score calibration only accepts canonical payout ratios 0, 0.5, or 1; got {}",
+                        sample.token_payout_ratio
+                    ),
+                }
+                .into());
             }
-            .into());
+            if sample.token_payout_ratio == PayoutRatio::ZERO
+                || sample.token_payout_ratio == PayoutRatio::ONE
+            {
+                binary.push(sample);
+            }
         }
-        let binary = evidence
-            .samples
-            .iter()
-            .filter(|sample| {
-                sample.token_payout_ratio == PayoutRatio::ZERO
-                    || sample.token_payout_ratio == PayoutRatio::ONE
-            })
-            .collect::<Vec<_>>();
         let minimum = match request.method {
             CalibrationMethod::Isotonic => policy.min_samples_isotonic,
             CalibrationMethod::Platt => 10,
@@ -159,6 +265,7 @@ impl<'a> CalibrationFitSamples<'a> {
             u64::try_from(minimum).map_err(|error| ResearchError::DatasetBuild {
                 detail: format!("calibration sample floor exceeds u64: {error}"),
             })?;
+        cancellation.check("model calibration split hash")?;
         let split_hash = calibration_split_hash(
             &evidence.fit_window,
             evidence.samples.iter().map(|sample| {
@@ -169,6 +276,7 @@ impl<'a> CalibrationFitSamples<'a> {
                 )
             }),
         )?;
+        cancellation.check("model calibration population completion")?;
         Ok(Self {
             binary,
             split_sample_count,
@@ -183,23 +291,29 @@ impl<'a> CalibrationFitSamples<'a> {
         self.sample_count < self.minimum_sample_count
     }
 
-    fn validate_downside_support(&self, downside_source: DownsideSource) -> QuantResult<()> {
+    fn validate_downside_support(
+        &self,
+        downside_source: DownsideSource,
+        cancellation: &CancellationProbe,
+    ) -> QuantResult<()> {
         match downside_source {
             DownsideSource::MfeMae => {
-                let missing = self
-                    .binary
-                    .iter()
-                    .filter(|sample| sample.max_adverse_excursion_bps.is_none())
-                    .count();
-                let positive = self
-                    .binary
-                    .iter()
-                    .filter(|sample| {
-                        sample
-                            .max_adverse_excursion_bps
-                            .is_some_and(|value| value > Decimal::ZERO)
-                    })
-                    .count();
+                let mut missing = 0_usize;
+                let mut positive = 0_usize;
+                for (index, sample) in self.binary.iter().enumerate() {
+                    if index % CANCELLATION_INTERVAL == 0 {
+                        cancellation.check("model calibration downside scan")?;
+                    }
+                    if sample.max_adverse_excursion_bps.is_none() {
+                        missing += 1;
+                    }
+                    if sample
+                        .max_adverse_excursion_bps
+                        .is_some_and(|value| value > Decimal::ZERO)
+                    {
+                        positive += 1;
+                    }
+                }
                 if missing > 0 || positive > 0 {
                     return Err(ResearchError::ValidationMethodology {
                         detail: format!(
@@ -240,35 +354,39 @@ impl<'a> CalibrationFitSamples<'a> {
         method: CalibrationMethod,
         policy: &CalibrationFitPolicy,
         fit_contract: &ModelScoreCalibrationFitContract,
+        cancellation: &CancellationProbe,
     ) -> QuantResult<ModelScoreCalibrationPayload> {
-        let scores = self
-            .binary
-            .iter()
-            .map(|sample| sample.composite_score.inner())
-            .collect::<Vec<_>>();
-        let outcomes = self
-            .binary
-            .iter()
-            .map(|sample| sample.token_payout_ratio == PayoutRatio::ONE)
-            .collect::<Vec<_>>();
-        let mapping = match method {
-            CalibrationMethod::Isotonic => {
-                IsotonicCalibrator::new(policy.min_samples_isotonic).fit(&scores, &outcomes)?
+        let mut scores = Vec::with_capacity(self.binary.len());
+        let mut outcomes = Vec::with_capacity(self.binary.len());
+        for (index, sample) in self.binary.iter().enumerate() {
+            if index % CANCELLATION_INTERVAL == 0 {
+                cancellation.check("model calibration fit projection")?;
             }
-            CalibrationMethod::Platt => PlattCalibrator.fit(&scores, &outcomes)?,
+            scores.push(sample.composite_score.inner());
+            outcomes.push(sample.token_payout_ratio == PayoutRatio::ONE);
+        }
+        let mapping = match method {
+            CalibrationMethod::Isotonic => IsotonicCalibrator::new(policy.min_samples_isotonic)
+                .fit(&scores, &outcomes, cancellation)?,
+            CalibrationMethod::Platt => PlattCalibrator.fit(&scores, &outcomes, cancellation)?,
         };
-        let reliability_samples = self
-            .binary
-            .iter()
-            .zip(&outcomes)
-            .map(|(sample, &won)| ReliabilitySample {
+        let mut reliability_samples = Vec::with_capacity(self.binary.len());
+        for (index, (sample, &won)) in self.binary.iter().zip(&outcomes).enumerate() {
+            if index % CANCELLATION_INTERVAL == 0 {
+                cancellation.check("model calibration reliability projection")?;
+            }
+            reliability_samples.push(ReliabilitySample {
                 score: sample.composite_score.inner(),
                 won,
                 max_adverse_excursion_bps: sample.max_adverse_excursion_bps,
-            })
-            .collect::<Vec<_>>();
-        let reliability =
-            compute_reliability(&mapping, &reliability_samples, policy.ci_confidence)?;
+            });
+        }
+        let reliability = compute_reliability(
+            &mapping,
+            &reliability_samples,
+            policy.ci_confidence,
+            cancellation,
+        )?;
         let split_payout_rate = self.split_payout_rate(policy.ci_confidence)?;
         let payload = ModelScoreCalibrationPayload {
             format_version: MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
@@ -386,6 +504,7 @@ pub struct ModelCalibrationFitService {
     calibration_repo: Arc<dyn CalibrationArtifactRepository>,
     model_run_repo: Arc<dyn ModelRunRepository>,
     runtime_config_repo: Arc<dyn PolicyRepository>,
+    compute: Arc<ComputeExecutor>,
 }
 
 impl ModelCalibrationFitService {
@@ -397,6 +516,7 @@ impl ModelCalibrationFitService {
         calibration_repo: Arc<dyn CalibrationArtifactRepository>,
         model_run_repo: Arc<dyn ModelRunRepository>,
         runtime_config_repo: Arc<dyn PolicyRepository>,
+        compute: Arc<ComputeExecutor>,
     ) -> Self {
         Self {
             backtest_port,
@@ -405,7 +525,87 @@ impl ModelCalibrationFitService {
             calibration_repo,
             model_run_repo,
             runtime_config_repo,
+            compute,
         }
+    }
+
+    async fn finalize_run_error(
+        &self,
+        model_run_id: &ModelRunId,
+        error: &QuantError,
+    ) -> QuantResult<()> {
+        if self
+            .model_run_repo
+            .find_by_id(model_run_id)
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        match self
+            .model_run_repo
+            .fail(
+                model_run_id,
+                ModelRunErrorCode::CalibrationFailed,
+                error.to_string(),
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(finalizer) if finalizer.is_transient() => Err(finalizer.into()),
+            Err(finalizer) => Err(ResearchError::ModelRunFinalization {
+                primary: error.to_string(),
+                finalizer: finalizer.to_string(),
+            }
+            .into()),
+        }
+    }
+
+    fn commit_winner(run: &ModelRunInfo) -> QuantResult<CalibrationRunFinalization> {
+        if run.run_kind != ModelRunKind::Calibration
+            || run.status != ModelRunStatus::Succeeded
+            || run.model_version_id.is_none()
+            || run.output_hash.is_none()
+            || run.error_code.is_some()
+            || run.error_message.is_some()
+            || run
+                .finished_at
+                .is_none_or(|finished_at| finished_at < run.started_at)
+        {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_MODEL_RUN),
+                format!(
+                    "calibration run {} is not an exact succeeded commit winner",
+                    run.model_run_id
+                ),
+            )
+            .into());
+        }
+        Ok(CalibrationRunFinalization::CommitWon)
+    }
+
+    fn is_cancelled_run(run: &ModelRunInfo) -> bool {
+        run.run_kind == ModelRunKind::Calibration
+            && run.status == ModelRunStatus::Cancelled
+            && run.model_version_id.is_some()
+            && run.output_hash.is_none()
+            && run.error_code == Some(ModelRunErrorCode::CancelledByOperator)
+            && run.error_message.is_some()
+            && run
+                .finished_at
+                .is_some_and(|finished_at| finished_at >= run.started_at)
+    }
+
+    fn is_failed_run(run: &ModelRunInfo) -> bool {
+        run.run_kind == ModelRunKind::Calibration
+            && run.status == ModelRunStatus::Failed
+            && run.model_version_id.is_some()
+            && run.output_hash.is_none()
+            && run.error_code == Some(ModelRunErrorCode::CalibrationFailed)
+            && run.error_message.is_some()
+            && run
+                .finished_at
+                .is_some_and(|finished_at| finished_at >= run.started_at)
     }
 
     /// Load the governed `model.calibration` policy from the pinned runtime-
@@ -589,6 +789,31 @@ impl ModelCalibrationFitService {
     }
 }
 
+#[cfg(test)]
+async fn run_calibration_kernel<T, F>(
+    compute: &ComputeExecutor,
+    cancel: &CancellationToken,
+    work: F,
+) -> QuantResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> QuantResult<T> + Send + 'static,
+{
+    compute
+        .run_offline_cancellable(OfflineMemory::try_gib(8)?, cancel, work)
+        .await
+}
+
+fn require_calibration_active(cancel: &CancellationToken) -> QuantResult<()> {
+    if cancel.is_cancelled() {
+        return Err(ResearchError::Cancelled {
+            detail: "model calibration cancelled at a cooperative boundary".to_owned(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl ModelCalibrationFitPort for ModelCalibrationFitService {
     async fn fit(
@@ -607,29 +832,158 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
         let policy = self.frozen_policy(&decision_policy_snapshot_id).await?;
         self.validate_split(&request.model_version_id, &request, &policy)
             .await?;
-        let evidence = Box::pin(self.harvest_calibration_samples(
-            model_run_id,
-            &request,
-            &decision_policy_snapshot_id,
-            Arc::clone(&progress),
-            cancel,
-        ))
-        .await?;
-        let persisted =
-            Box::pin(self.fit_and_persist(&request, &policy, &evidence, downside_source)).await;
+        let memory_lease = self
+            .compute
+            .acquire_offline_memory_cancellable(OfflineMemory::try_gib(10)?, &cancel)
+            .await?;
+        let persisted = async {
+            let evidence = Box::pin(self.harvest_calibration_samples(
+                model_run_id,
+                &request,
+                &decision_policy_snapshot_id,
+                Arc::clone(&progress),
+                cancel.clone(),
+                &memory_lease,
+            ))
+            .await?;
+            Box::pin(self.fit_and_persist(
+                request,
+                policy,
+                evidence,
+                downside_source,
+                &cancel,
+                &memory_lease,
+            ))
+            .await
+        }
+        .await;
         match persisted {
             Ok(outcome) => Ok(outcome),
+            Err(error) if is_retryable_calibration_error(&error) => Err(error),
             Err(error) => {
-                let _ = self
-                    .model_run_repo
-                    .fail(
-                        &evidence.model_run_id,
-                        ModelRunErrorCode::CalibrationFailed,
-                        error.to_string(),
-                    )
-                    .await;
+                self.finalize_run_error(&model_run_id, &error).await?;
                 Err(error)
             }
+        }
+    }
+
+    async fn cancel_run(
+        &self,
+        model_run_id: &ModelRunId,
+        reason: String,
+    ) -> QuantResult<CalibrationRunFinalization> {
+        let Some(current) = self.model_run_repo.find_by_id(model_run_id).await? else {
+            return Ok(CalibrationRunFinalization::Terminalized);
+        };
+        match current.status {
+            ModelRunStatus::Succeeded => return Self::commit_winner(&current),
+            ModelRunStatus::Cancelled if Self::is_cancelled_run(&current) => {
+                return Ok(CalibrationRunFinalization::Terminalized);
+            }
+            ModelRunStatus::Running => {}
+            status => {
+                return Err(StorageError::state_conflict(
+                    QUANT_MODEL_RUN,
+                    Some(model_run_id),
+                    format!("operator cancellation cannot finalize calibration run from {status}"),
+                )
+                .into());
+            }
+        }
+        match self.model_run_repo.cancel(model_run_id, reason).await {
+            Ok(terminal) if Self::is_cancelled_run(&terminal) => {
+                Ok(CalibrationRunFinalization::Terminalized)
+            }
+            Ok(terminal) => Err(StorageError::invariant_violation(
+                Some(QUANT_MODEL_RUN),
+                format!(
+                    "operator cancellation returned non-canonical calibration terminal {}",
+                    terminal.status
+                ),
+            )
+            .into()),
+            Err(StorageError::StateConflict { .. }) => {
+                let terminal = self
+                    .model_run_repo
+                    .find_by_id(model_run_id)
+                    .await?
+                    .ok_or_else(|| StorageError::not_found(QUANT_MODEL_RUN, model_run_id))?;
+                match terminal.status {
+                    ModelRunStatus::Succeeded => Self::commit_winner(&terminal),
+                    ModelRunStatus::Cancelled if Self::is_cancelled_run(&terminal) => {
+                        Ok(CalibrationRunFinalization::Terminalized)
+                    }
+                    status => Err(StorageError::state_conflict(
+                        QUANT_MODEL_RUN,
+                        Some(model_run_id),
+                        format!("operator cancellation lost to calibration terminal {status}"),
+                    )
+                    .into()),
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn fail_run(
+        &self,
+        model_run_id: &ModelRunId,
+        reason: String,
+    ) -> QuantResult<CalibrationRunFinalization> {
+        let Some(current) = self.model_run_repo.find_by_id(model_run_id).await? else {
+            return Ok(CalibrationRunFinalization::Terminalized);
+        };
+        match current.status {
+            ModelRunStatus::Succeeded => return Self::commit_winner(&current),
+            ModelRunStatus::Failed if Self::is_failed_run(&current) => {
+                return Ok(CalibrationRunFinalization::Terminalized);
+            }
+            ModelRunStatus::Running => {}
+            status => {
+                return Err(StorageError::state_conflict(
+                    QUANT_MODEL_RUN,
+                    Some(model_run_id),
+                    format!("retry exhaustion cannot finalize calibration run from {status}"),
+                )
+                .into());
+            }
+        }
+        match self
+            .model_run_repo
+            .fail(model_run_id, ModelRunErrorCode::CalibrationFailed, reason)
+            .await
+        {
+            Ok(terminal) if Self::is_failed_run(&terminal) => {
+                Ok(CalibrationRunFinalization::Terminalized)
+            }
+            Ok(terminal) => Err(StorageError::invariant_violation(
+                Some(QUANT_MODEL_RUN),
+                format!(
+                    "retry exhaustion returned non-canonical calibration terminal {}",
+                    terminal.status
+                ),
+            )
+            .into()),
+            Err(StorageError::StateConflict { .. }) => {
+                let terminal = self
+                    .model_run_repo
+                    .find_by_id(model_run_id)
+                    .await?
+                    .ok_or_else(|| StorageError::not_found(QUANT_MODEL_RUN, model_run_id))?;
+                match terminal.status {
+                    ModelRunStatus::Succeeded => Self::commit_winner(&terminal),
+                    ModelRunStatus::Failed if Self::is_failed_run(&terminal) => {
+                        Ok(CalibrationRunFinalization::Terminalized)
+                    }
+                    status => Err(StorageError::state_conflict(
+                        QUANT_MODEL_RUN,
+                        Some(model_run_id),
+                        format!("retry exhaustion lost to calibration terminal {status}"),
+                    )
+                    .into()),
+                }
+            }
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -746,6 +1100,7 @@ impl ModelCalibrationFitService {
         decision_policy_snapshot_id: &DecisionPolicySnapshotId,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
+        memory_lease: &OfflineMemoryLease,
     ) -> QuantResult<CalibrationReplayEvidence> {
         // Reuse the PIT backtest replay engine to harvest (score, outcome, MAE)
         // triples — the same computation graph the live plane scores, never a
@@ -763,6 +1118,7 @@ impl ModelCalibrationFitService {
             },
             progress,
             cancel,
+            memory_lease,
         ))
         .await?;
         Ok(evidence)
@@ -770,107 +1126,273 @@ impl ModelCalibrationFitService {
 
     async fn fit_and_persist(
         &self,
-        request: &FitModelCalibratorRequest,
-        policy: &CalibrationFitPolicy,
-        evidence: &CalibrationReplayEvidence,
+        request: FitModelCalibratorRequest,
+        policy: CalibrationFitPolicy,
+        evidence: CalibrationReplayEvidence,
         downside_source: DownsideSource,
+        cancel: &CancellationToken,
+        memory_lease: &OfflineMemoryLease,
     ) -> QuantResult<ModelCalibrationFitOutcome> {
-        let samples = CalibrationFitSamples::new(request, policy, evidence)?;
-        if samples.is_insufficient() {
-            return self.commit_insufficient(request, evidence, &samples).await;
-        }
-        samples.validate_downside_support(downside_source)?;
-        self.commit_calibrated(request, policy, evidence, &samples)
-            .await
-    }
-
-    async fn commit_insufficient(
-        &self,
-        request: &FitModelCalibratorRequest,
-        evidence: &CalibrationReplayEvidence,
-        samples: &CalibrationFitSamples<'_>,
-    ) -> QuantResult<ModelCalibrationFitOutcome> {
-        let outcome_hash = samples.insufficient_hash(evidence, request.method)?;
-        let terminal = self
-            .model_run_repo
-            .succeed_exact(
-                &evidence.model_run_id,
-                outcome_hash,
-                Some(request.model_version_id),
-            )
+        let preparation = CalibrationPrepareInput {
+            request: request.clone(),
+            policy,
+            evidence,
+            downside_source,
+            cancel: cancel.clone(),
+        };
+        let (evidence, prepared) = self
+            .compute
+            .run_leased_cancellable(memory_lease, cancel, move || preparation.prepare())
             .await?;
-        CalibrationRunExpectation::new(request, evidence, outcome_hash).validate(&terminal)?;
-        Ok(ModelCalibrationFitOutcome::Insufficient {
-            sample_count: samples.sample_count,
-            total_sample_count: samples.total_sample_count,
-            minimum_sample_count: samples.minimum_sample_count,
-            outcome_hash,
-        })
+        let outcome = match prepared {
+            PreparedCalibrationCommit::Insufficient {
+                outcome_hash,
+                sample_count,
+                total_sample_count,
+                minimum_sample_count,
+            } => {
+                // The gate is the commit-intent boundary. Cancellation observed
+                // before it prevents the write; after it the atomic terminal
+                // transition and non-cancellable readback must finish.
+                require_calibration_active(cancel)?;
+                let terminal = self
+                    .model_run_repo
+                    .succeed_exact(
+                        &evidence.model_run_id,
+                        outcome_hash,
+                        Some(request.model_version_id),
+                    )
+                    .await?;
+                self.compute
+                    .run_offline_with_lease(memory_lease, move || {
+                        CalibrationRunExpectation::new(&request, &evidence, outcome_hash)
+                            .validate(&terminal)?;
+                        Ok(ModelCalibrationFitOutcome::Insufficient {
+                            sample_count,
+                            total_sample_count,
+                            minimum_sample_count,
+                            outcome_hash,
+                        })
+                    })
+                    .await
+            }
+            PreparedCalibrationCommit::Calibrated {
+                commit,
+                content_hash,
+                sample_count,
+                split_hash,
+                fit_window,
+            } => {
+                let sample_count_i64 = commit.artifact().sample_count;
+                // Keep this check immediately adjacent to the irreversible
+                // repository transaction; once admitted, readback completes
+                // independently of later cancellation.
+                require_calibration_active(cancel)?;
+                let committed = self
+                    .calibration_repo
+                    .commit_model_score(*commit)
+                    .await
+                    .map_err(QuantError::from)?;
+                self.compute.run_offline_with_lease(memory_lease, move || {
+                    let created = committed.artifact();
+                    let terminal = committed.model_run();
+                    // This recomputes the canonical digest from the complete
+                    // persisted payload. Matching the prepared content hash
+                    // therefore proves exact readback without retaining a
+                    // second multi-million-knot payload across the DB await.
+                    created.verify_model_score().map_err(|detail| {
+                        ResearchError::InvalidModelArtifact {
+                            detail: format!(
+                                "persisted model-score calibration artifact failed readback verification: {detail}"
+                            ),
+                        }
+                    })?;
+                    let identity_matches = created.kind == CalibrationKind::ModelScore
+                        && created.content_hash == content_hash;
+                    let evidence_matches = created.calibration_split_hash == split_hash
+                        && created.fit_window_start == fit_window.from
+                        && created.fit_window_end == fit_window.to
+                        && created.sample_count == sample_count_i64;
+                    if !identity_matches || !evidence_matches {
+                        return Err(ResearchError::InvalidModelArtifact {
+                            detail: format!(
+                                "persisted model-score calibration artifact {} differs from its exact producer preimage",
+                                created.artifact_id
+                            ),
+                        }
+                        .into());
+                    }
+                    CalibrationRunExpectation::new(&request, &evidence, content_hash)
+                        .validate(terminal)?;
+                    Ok(ModelCalibrationFitOutcome::Calibrated {
+                        artifact_id: created.artifact_id,
+                        sample_count,
+                    })
+                })
+                .await
+            }
+        }?;
+        Ok(outcome)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::Duration,
+    };
+
+    use chrono::Utc;
+    use quant_pivot_compute::ComputeExecutor;
+    use quant_pivot_error::{
+        QuantError, QuantResult, research::ResearchError, storage::StorageError,
+    };
+    use quant_pivot_models::{
+        domain::{ports::CalibrationRunFinalization, quant::ModelRunInfo},
+        enums::quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
+        types::{ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId},
+    };
+    use quant_pivot_research::model::CancellationProbe;
+    use tokio::{sync::oneshot, time::timeout};
+    use tokio_util::sync::CancellationToken;
+
+    use super::{
+        ModelCalibrationFitService, is_retryable_calibration_error, require_calibration_active,
+        run_calibration_kernel,
+    };
+
+    fn committed_run() -> ModelRunInfo {
+        let now = Utc::now();
+        ModelRunInfo {
+            model_run_id: ModelRunId::from_v7(),
+            run_kind: ModelRunKind::Calibration,
+            model_version_id: Some(ModelVersionId::from_v7()),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            market_selection_id: None,
+            window_start: now,
+            window_end: now,
+            status: ModelRunStatus::Succeeded,
+            input_hash: ContentHash::from_bytes([0x31; 32]),
+            output_hash: Some(ContentHash::from_bytes([0x32; 32])),
+            error_code: None,
+            error_message: None,
+            started_at: now,
+            finished_at: Some(now),
+        }
     }
 
-    async fn commit_calibrated(
-        &self,
-        request: &FitModelCalibratorRequest,
-        policy: &CalibrationFitPolicy,
-        evidence: &CalibrationReplayEvidence,
-        samples: &CalibrationFitSamples<'_>,
-    ) -> QuantResult<ModelCalibrationFitOutcome> {
-        let payload = samples.fit_payload(request.method, policy, &evidence.fit_contract)?;
-        let sample_count_i64 =
-            i64::try_from(samples.sample_count).map_err(|error| ResearchError::DatasetBuild {
-                detail: format!("calibration sample count exceeds Postgres bigint: {error}"),
-            })?;
-        // Self-contained hash (fit_window + split_hash + the full,
-        // provenance-carrying payload) — recomputable by the repository and
-        // loader from the persisted row alone.
-        let content_hash =
-            model_score_content_hash(&evidence.fit_window, &samples.split_hash, &payload)?;
+    #[test]
+    fn terminal_race_is_typed() {
+        let run = committed_run();
+        assert_eq!(
+            ModelCalibrationFitService::commit_winner(&run).expect("committed calibration"),
+            CalibrationRunFinalization::CommitWon
+        );
+        let mut cancelled = run;
+        cancelled.status = ModelRunStatus::Cancelled;
+        cancelled.output_hash = None;
+        cancelled.error_code = Some(ModelRunErrorCode::CancelledByOperator);
+        cancelled.error_message = Some("operator cancellation".to_owned());
+        assert!(ModelCalibrationFitService::is_cancelled_run(&cancelled));
+        cancelled.status = ModelRunStatus::Failed;
+        cancelled.error_code = Some(ModelRunErrorCode::CalibrationFailed);
+        assert!(ModelCalibrationFitService::is_failed_run(&cancelled));
+    }
 
-        let artifact_id = CalibrationArtifactId::from_v7();
-        let artifact_payload = CalibrationArtifactPayload::ModelScore(Box::new(payload));
-        let committed = self
-            .calibration_repo
-            .commit_model_score(ModelScoreCalibrationCommit {
-                model_run_id: evidence.model_run_id,
-                artifact: NewCalibrationArtifact {
-                    artifact_id,
-                    kind: CalibrationKind::ModelScore,
-                    content_hash,
-                    calibration_split_hash: samples.split_hash,
-                    fit_window_start: evidence.fit_window.from,
-                    fit_window_end: evidence.fit_window.to,
-                    sample_count: sample_count_i64,
-                    payload: artifact_payload.clone(),
-                    active: false,
-                },
-            })
-            .await
-            .map_err(QuantError::from)?;
-        let created = committed.artifact();
-        let terminal = committed.model_run();
+    #[test]
+    fn transient_errors_stay_running() {
+        let cancelled = QuantError::from(ResearchError::Cancelled {
+            detail: "operator cancellation".to_owned(),
+        });
+        let transport = QuantError::from(ResearchError::ArtifactTransport {
+            uri: "s3://artifacts/calibration".to_owned(),
+            detail: "connection reset".to_owned(),
+        });
+        let storage = QuantError::from(StorageError::Connection("connection reset".to_owned()));
+        let deterministic = QuantError::from(ResearchError::ArtifactHashMismatch {
+            expected: "expected".to_owned(),
+            actual: "actual".to_owned(),
+        });
+        assert!(is_retryable_calibration_error(&cancelled));
+        assert!(is_retryable_calibration_error(&transport));
+        assert!(is_retryable_calibration_error(&storage));
+        assert!(!is_retryable_calibration_error(&deterministic));
+    }
 
-        let identity_matches = created.kind == CalibrationKind::ModelScore
-            && created.content_hash == content_hash
-            && !created.active;
-        let evidence_matches = created.calibration_split_hash == samples.split_hash
-            && created.fit_window_start == evidence.fit_window.from
-            && created.fit_window_end == evidence.fit_window.to
-            && created.sample_count == sample_count_i64
-            && created.payload == artifact_payload;
-        if !identity_matches || !evidence_matches {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: format!(
-                    "persisted model-score calibration artifact {} differs from its exact \
-                     producer preimage",
-                    created.artifact_id
-                ),
-            }
-            .into());
-        }
-        CalibrationRunExpectation::new(request, evidence, content_hash).validate(terminal)?;
-        Ok(ModelCalibrationFitOutcome::Calibrated {
-            artifact_id: created.artifact_id,
-            sample_count: samples.sample_count,
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn kernel_is_offline() -> QuantResult<()> {
+        let compute = ComputeExecutor::new()?;
+        let cancel = CancellationToken::new();
+        let thread_name = run_calibration_kernel(&compute, &cancel, || {
+            Ok(thread::current().name().unwrap_or_default().to_owned())
         })
+        .await?;
+        assert!(thread_name.starts_with("quant-offline-"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_kernel_never_starts() -> QuantResult<()> {
+        let compute = ComputeExecutor::new()?;
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = run_calibration_kernel(&compute, &cancel, || -> QuantResult<()> {
+            panic!("cancelled calibration kernel must not start")
+        })
+        .await;
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn running_kernel_observes_cancel() -> QuantResult<()> {
+        let compute = Arc::new(ComputeExecutor::new()?);
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let probe_cancel = cancel.clone();
+        let worker_compute = Arc::clone(&compute);
+        let (started_tx, started_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            run_calibration_kernel(
+                &worker_compute,
+                &worker_cancel,
+                move || -> QuantResult<()> {
+                    let _ = started_tx.send(());
+                    let cancellation = CancellationProbe::new(move || probe_cancel.is_cancelled());
+                    loop {
+                        cancellation.check("test calibration kernel")?;
+                        thread::yield_now();
+                    }
+                },
+            )
+            .await
+        });
+        started_rx.await.expect("calibration kernel must start");
+        cancel.cancel();
+        let result = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("running calibration kernel must stop within the bounded checkpoint interval")
+            .expect("calibration kernel task must join");
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_wins_commit_gate() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let committed = AtomicBool::new(false);
+        if require_calibration_active(&cancel).is_ok() {
+            committed.store(true, Ordering::Relaxed);
+        }
+        assert!(
+            !committed.load(Ordering::Relaxed),
+            "cancellation observed before the irreversible boundary must prevent the write"
+        );
     }
 }

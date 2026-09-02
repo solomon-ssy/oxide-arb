@@ -13,14 +13,10 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenDataQualityRecord {
     /// Exact immutable feature vector whose state this row summarizes.
-    ///
-    /// This binding is required for report-scoped parity. Looking a vector up
-    /// by market and decision time is ambiguous when two report rounds execute
-    /// concurrently and must never be used as serving evidence. `None` is
-    /// accepted only while decoding pre-v10 audit history; every new report
-    /// commit rejects it and replay reports it as legacy-unbound.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub feature_vector_id: Option<FeatureVectorId>,
+    /// Looking a vector up by market and decision time is ambiguous when two
+    /// report rounds execute concurrently, so every fresh-boot row carries the
+    /// immutable identifier directly.
+    pub feature_vector_id: FeatureVectorId,
     pub token_id: TokenId,
     pub market_id: MarketId,
     pub status: DataQualityStatus,

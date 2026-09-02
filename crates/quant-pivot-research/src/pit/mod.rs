@@ -25,11 +25,12 @@ use quant_pivot_models::{
             fee::{MarketFeeSchedule, MarketMakerRebateEvidence},
             registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
         },
+        order::PolymarketOrderRules,
     },
     enums::{catalog::CatalogTimestampQuality, market::MarketStatus},
     types::{
-        CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, MarketId,
-        TokenId,
+        CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ClobMarketInfoVersion,
+        ContentHash, MarketId, TokenId,
     },
 };
 use serde::Serialize;
@@ -110,6 +111,8 @@ pub struct MarketContextAt {
     pub created_at: Option<DateTime<Utc>>,
     /// Fee schedule resolved from the independent append-only CLOB market-info ledger.
     pub fee_schedule: Option<MarketFeeSchedule>,
+    /// Order-grid and minimum-size rules from that same CLOB observation.
+    pub order_rules: Option<PolymarketOrderRules>,
     /// Gamma-sourced maker incentive truth from the same catalog revision.
     pub maker_rebate_evidence: MarketMakerRebateEvidence,
 }
@@ -153,6 +156,47 @@ pub struct ResolvedMarketSnapshot {
     /// Source-effective and availability clocks of the linked event revision.
     pub event_effective_at: DateTime<Utc>,
     pub event_available_at: DateTime<Utc>,
+}
+
+impl ResolvedMarketSnapshot {
+    /// Attach one exact PIT CLOB observation to the resolved catalog snapshot.
+    pub fn apply_market_info(&mut self, market_info: &ClobMarketInfoVersion) -> QuantResult<()> {
+        if self.market.market_id != market_info.market_id {
+            return Err(ResearchError::PitResolution {
+                detail: format!(
+                    "CLOB order rules for market {} cannot attach to market {}",
+                    market_info.market_id, self.market.market_id
+                ),
+            }
+            .into());
+        }
+        if self.market.neg_risk != market_info.neg_risk
+            || self.market.tick_size != market_info.tick_size
+        {
+            return Err(ResearchError::PitResolution {
+                detail: format!(
+                    "catalog/CLOB order-rule mismatch for market {}: catalog tick={} neg_risk={}, CLOB tick={} neg_risk={}",
+                    self.market.market_id,
+                    self.market.tick_size,
+                    self.market.neg_risk,
+                    market_info.tick_size,
+                    market_info.neg_risk
+                ),
+            }
+            .into());
+        }
+        self.context.fee_schedule = Some(market_info.fee_schedule());
+        self.context.order_rules = Some(
+            PolymarketOrderRules::new(market_info.tick_size, market_info.minimum_order_size)
+                .map_err(|error| ResearchError::PitResolution {
+                    detail: format!(
+                        "invalid CLOB order rules for market {}: {error}",
+                        market_info.market_id
+                    ),
+                })?,
+        );
+        Ok(())
+    }
 }
 
 /// Decode and validate one repository snapshot into the canonical PIT catalog
@@ -278,6 +322,7 @@ fn resolve_market_catalog(
         end_date: market.end_date,
         created_at: snapshot.market.source_created_at,
         fee_schedule: None,
+        order_rules: None,
         maker_rebate_evidence,
     };
     Ok(ResolvedMarketSnapshot {

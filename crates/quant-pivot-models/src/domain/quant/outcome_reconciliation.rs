@@ -8,10 +8,12 @@ use thiserror::Error;
 
 use super::{
     ExecutionAttemptOutcomeInfo, ExecutionOrderInfo, NewExecutionAttemptOutcome, OrderIntentInfo,
-    RecommendationResolutionOutcomeInfo, ReconciliationInfo, StrategyPositionLot,
-    settlement::SettlementRedeemLotInfo,
+    RecommendationEconomicOutcomeInfo, RecommendationInfo, RecommendationReportInfo,
+    RecommendationResolutionOutcomeInfo, ReconciliationInfo, ReportRouteRunInfo,
+    StrategyPositionLot, TradePolicyArtifactInfo, settlement::SettlementRedeemLotInfo,
 };
 use crate::{
+    domain::data_plane::DecisionBoundary,
     enums::{
         common::Side,
         execution::{
@@ -22,8 +24,8 @@ use crate::{
     hashing::CanonicalDigest,
     types::{
         AccountChainExecutionId, ContentHash, ExecutionOrderId, MarketId, OrderIntentId, Price,
-        RecommendationId, ReconciliationId, SchemaVersion, SettlementRedeemLotId, Shares,
-        StrategyPositionLotId, TokenId, Usd,
+        RecommendationId, ReconciliationId, ResearchProfileSpec, SchemaVersion,
+        SettlementRedeemLotId, ShadowLatencyProfileV1, Shares, StrategyPositionLotId, TokenId, Usd,
     },
 };
 
@@ -118,6 +120,58 @@ pub struct RecommendationResolutionReconciliationCandidate {
 pub struct ResolutionOutcomeTaskClaim {
     pub candidate: RecommendationResolutionReconciliationCandidate,
     pub attempt_count: i32,
+}
+
+/// One published recommendation whose executable economic horizon is due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EconomicOutcomeTaskClaim {
+    pub recommendation_id: RecommendationId,
+    pub horizon_at: DateTime<Utc>,
+    /// Frozen replay decision instant; early terminal visibility never changes the profile horizon.
+    pub replay_until: DateTime<Utc>,
+    /// Exact canonical resolution projection permitting an early replay.
+    pub resolution_outcome_hash: Option<ContentHash>,
+    pub source_cutoff_at: DateTime<Utc>,
+    /// This attempt's database-clamped source visibility, never the caller's future clock.
+    pub source_available_until: DateTime<Utc>,
+    pub attempt_count: i32,
+}
+
+/// Immutable `PostgreSQL` lineage needed to replay one published recommendation.
+#[derive(Debug, Clone)]
+pub struct EconomicOutcomeReplayContext {
+    pub recommendation: RecommendationInfo,
+    pub report: RecommendationReportInfo,
+    pub route_run: ReportRouteRunInfo,
+    pub profile_spec: ResearchProfileSpec,
+    pub trade_policy: TradePolicyArtifactInfo,
+    pub latency_profile: ShadowLatencyProfileV1,
+    pub decision_boundary: DecisionBoundary,
+    pub resolution_outcome: Option<RecommendationResolutionOutcomeInfo>,
+}
+
+/// A horizon replay may wait for source facts only until its frozen cutoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EconomicOutcomeDeferredReason {
+    SourceIncompleteBeforeCutoff,
+    ComputeCapacityUnavailable,
+}
+
+/// Result of one recommendation-economic-outcome reconciliation attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EconomicOutcomeReconciliationResult {
+    Inserted(RecommendationEconomicOutcomeInfo),
+    AlreadyPresent(RecommendationEconomicOutcomeInfo),
+    Deferred(EconomicOutcomeDeferredReason),
+    ClaimLost,
+}
+
+/// Fenced outcome of deferring a leased economic replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EconomicOutcomeTaskSettlement {
+    Retried,
+    ClaimLost,
 }
 
 /// One actually submitted terminal intent missing its immutable execution outcome.
@@ -404,7 +458,7 @@ impl ExecutionAttemptSourceGraph {
                 requested_shares: entry.shares,
                 filled_shares,
                 entry_avg_price: None,
-                entry_fee_usd: None,
+                entry_fee_usd: Some(Usd::ZERO),
                 entry_filled_at: None,
                 position_terminal_state: None,
                 exit_reason: None,
@@ -679,8 +733,8 @@ fn validate_order_identity(
     if order.side != expected_side
         || order.prepared_order_json.side != expected_side
         || order.prepared_order_json.token_id != order.token_id
-        || order.prepared_order_json.expected_filled_shares != order.shares
-        || order.prepared_order_json.worst_price != order.price
+        || order.prepared_order_json.limit_price != order.price
+        || order.prepared_order_json.requested_shares != order.shares
     {
         return Err(ExecutionAttemptReconciliationError::IdentityMismatch {
             detail: "execution order differs from its prepared venue order",

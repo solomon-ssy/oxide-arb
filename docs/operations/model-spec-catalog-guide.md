@@ -145,7 +145,7 @@ POST /api/research/model-route-bootstraps
 请求不能提交 route、profile、model family、path set、backtest、gate hash 或 parity hash。服务端使用
 PostgreSQL clock 和当前 durable policy/runtime state 重算全部证据。
 
-Bootstrap 只在 `ReportOnly`、目标 route 为空、candidate 未被其他 route 引用时成立。事务原子写入：
+Bootstrap 只在 kill switch=`ExitOnly`、账户 recovery seal healthy、目标 route 为空且 candidate 未被其他 route 引用时成立。事务原子写入：
 
 - 新 ModelRouting revision；
 - approval 与完整 policy snapshot；
@@ -158,7 +158,7 @@ Bootstrap 只在 `ReportOnly`、目标 route 为空、candidate 未被其他 rou
 返回 conflict。
 
 成功 receipt 必须展示 route、before/after generation、model、activation/audit/outbox IDs、
-transaction hash、server timestamp 和 actor lineage。该动作不会改变 execution mode、capital、
+transaction hash、server timestamp 和 actor lineage。该动作不会改变 `EntryAuthorizationPolicy`、capital、
 signing authority 或 funder authority。
 
 ## 6. 后续 retraining 与 Champion 变更
@@ -191,8 +191,8 @@ Permit request 只包含：
 }
 ```
 
-TTL 范围为 5–60 分钟，默认 30 分钟，按 PostgreSQL clock。candidate、route、runtime mode、base
-revision、manifest 和 aggregate gate hash 全由服务端推导。
+TTL 范围为 5–60 分钟，默认 30 分钟，按 PostgreSQL clock。candidate、route、当前 entry-authorization policy、
+runtime-control state、manifest 和 aggregate gate hash 全由服务端推导；request 只携带 permit/cycle 与显式 CAS revision。
 
 Activation request 只包含 permit/cycle/CAS 和操作者意图：
 
@@ -255,7 +255,7 @@ ModelRouting 中与 serving pointer 无关的阈值仍按正常 Config governanc
 - 不得手工填 `active_exit_model_version_id`；
 - 不得借 generic Config mutation 绕过；
 - opportunistic Sell 保持不可激活；
-- ReportOnly 的 Buy 报告不因此获得任何执行、资金或签名权限。
+- Buy 报告不因 bootstrap 自动获得 entry、资金或签名权限；recommendation ceiling 与当前 authorization policy 仍独立准入。
 
 ## 10. 已删除接口
 
@@ -296,4 +296,4 @@ Runner 首次 inference 后 best-effort 把模型改为 Shadow 的行为也已�
 - CandidateReady→permit→activation 覆盖 expiry/revoke/stale/conflict；
 - bootstrap、promotion、rollback 最终都由同一 durable policy generation 决定 serving truth；
 - UI 显示 receipt、actor lineage、route diff 与 rollback 深链；
-- execution mode、capital、signing/funder authority 在 route change 前后保持不变。
+- `EntryAuthorizationPolicy`、capital、signing/funder authority 在 route change 前后保持不变。

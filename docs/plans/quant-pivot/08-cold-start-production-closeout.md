@@ -4,9 +4,9 @@
 > **Deployment contract**
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
+> - `pre_deployment_behavior`: 允许 clean-break 与唯一 fresh terminal bootstrap rewrite；任何真实数据销毁仍需操作者单独授权。
+> - `post_deployment_behavior`: 本次实现只交付唯一 fresh terminal bootstrap；不设计 upgrade/downgrade 或 data/schema/version migration。
+> - `rollback_and_data_verification`: 只在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置必须另行授权。
 
 This document is the execution contract for closing the remaining cold-start,
 schema, governance, deterministic-evidence, authentication, and operator-UI
@@ -14,7 +14,7 @@ gaps discovered during the 2026-07-16 implementation audit.
 
 ## Required Outcomes
 
-- PostgreSQL uses an audited SeaORM migration crate, an exact normalized schema
+- PostgreSQL uses an audited SeaORM fresh-bootstrap crate, an exact normalized schema
   manifest, one configured identity, and a runtime binary with no DDL entrypoint.
 - SeaORM 2 dense entities and PostgreSQL native enums own typed persistence;
   duplicate hand-maintained DDL models are removed.
@@ -75,78 +75,45 @@ Protected browser behavior, multi-viewport layout, reduced-motion behavior,
 keyboard access, accessibility scanning, and light/dark visual snapshots are
 part of the automated closeout gate rather than deferred evidence.
 
-## PostgreSQL Migration Contract
+## PostgreSQL Fresh-Boot Contract
 
 `quant-pivot-migration` is the only PostgreSQL DDL owner and is linked only by
-deploy/test tooling. The application runtime can verify schema and migration
-state but cannot apply, roll back, or synchronize schema.
+deploy/test tooling. Its crate name follows SeaORM terminology; the current
+project contract contains exactly one entry, `m00000000_000001_bootstrap`, and
+does not define an upgrade chain. The application runtime can verify the exact
+schema identity but cannot apply, roll back, synchronize, or evolve schema.
 
-- Migrations implement SeaORM `MigrationTrait` and are registered in strict
-  chronological order by one `MigratorTrait` implementation.
-- The pre-production patch chain is represented by four immutable schema-first
-  migrations instead of one generated SQL dump: a frozen SeaORM 2 dense-entity
-  snapshot creates native enums/tables/columns/primary keys/defaults; typed
-  relational specs add CHECK/UNIQUE/FK invariants; typed index specs add exact
-  btree/GIN/unique/partial indexes; and typed trigger bindings add WORM and
-  `updated_at` behavior.
-- The dense entities under `snapshots/v1` are a migration time capsule, not the
-  runtime persistence model and not a second evolving schema owner. Never edit
-  an applied snapshot. A future table or column change gets a new, narrowly
-  named migration and, only when needed, a new versioned support module.
-- Every migration has a tested `down` implementation for disposable-database
-  `fresh`/`refresh` verification. Production recovery remains a new forward
-  migration or a database restore; operators do not roll back durable business
-  data by invoking `down`.
-- SeaQuery owns ordinary DDL. PostgreSQL syntax that SeaQuery 1.0 cannot model
-  (table-level CHECK/UNIQUE additions and triggers/functions) is isolated in
-  immutable `migrations/support/v1.rs`. Its API accepts typed specs, quotes all
-  identifiers, validates static definitions, rejects statement separators, and
-  is included in every dependent migration checksum. Raw SQL is forbidden in
-  migration modules and repositories.
-- SeaORM's `seaql_migrations(version, applied_at)` ledger is necessary but not
-  sufficient because it has no source checksum. Every migration therefore
-  writes the same-transaction `schema_migration_audit` row containing a
-  domain-separated BLAKE3 checksum over length-prefixed migration source,
-  frozen entity snapshot, and versioned support artifacts, their total byte
-  length, and the pinned migration engine version.
-- Deploy apply holds the canonical session-scoped lifecycle lease and invokes the
-  native `Migrator::up(..., None)` once. SeaORM 2.0's `exec_up_with` opens,
-  records, and commits a separate PostgreSQL transaction for each pending
-  migration, so enum-label additions and later uses remain separated without
-  repeated ledger discovery or a custom migration loop.
-- `plan` is read-only and must not create `seaql_migrations`. `apply` uses the
-  same configured PostgreSQL identity as runtime and Fresh Boot, but remains an
-  explicit CLI operation under the lifecycle lease. Runtime verification requires an
-  exact native-ledger/checksum-ledger/manifest match and rejects the legacy
-  `_sqlx_migrations` object.
-- After adding or intentionally changing an unapplied migration artifact,
-  regenerate only the compiled artifact ledger with
-  `cargo run -p quant-pivot-xtask -- postgres-schema migration-manifest` and
-  review `schema/postgres/migrations.json`. This command never connects to a
-  database or applies DDL; CI rejects an unreviewed artifact checksum change.
-- The application binary exposes only schema verification. Schema ownership,
-  DDL and ledger mutation remain reachable solely through migration/Fresh Boot
-  commands; those commands share the configured identity and canonical lease.
-- SeaORM `schema-sync` is disabled in production. The stable `SchemaBuilder`
-  `apply` API is used only by the frozen initial snapshot. Its experimental
-  discovery/sync API cannot own constraints, partial indexes, triggers,
-  functions, grants, or destructive production evolution.
-- Catalog seeds are not schema migrations. Each seed has its own immutable
-  version/checksum and performs data write plus seed-ledger write in one
-  transaction; startup only hydrates and verifies applied seed artifacts.
+- One `MigratorTrait` implementation registers exactly the single bootstrap.
+- The dense entities under `snapshots/v1`, typed relational/index/WORM specs,
+  native enums, tables, constraints, functions, and grants together define the
+  sole fresh terminal schema. Before first production use, a structural change
+  replaces this bootstrap and its checked manifests directly.
+- There is no historical-row converter, compatibility view, dual reader/writer,
+  `down` recovery path, future enum-extension chain, data rewrite, or versioned
+  support-module branch.
+- SeaQuery owns ordinary DDL. PostgreSQL syntax it cannot model is isolated in
+  the bootstrap support module, whose typed specs quote identifiers, validate
+  static definitions, and reject statement separators. Repositories and runtime
+  startup never own ad-hoc DDL.
+- SeaORM's `seaql_migrations` row and the same-transaction
+  `schema_migration_audit` row are checksum evidence for that one bootstrap;
+  they do not authorize another version. Runtime verification requires exact
+  native-ledger/checksum-ledger/manifest membership and rejects unknown history,
+  including `_sqlx_migrations`.
+- `plan` is read-only. Deploy `apply` is an explicit CLI operation under the
+  canonical schema-mutation lease and is used only for a new empty database or
+  exact idempotent verification of the same bootstrap.
+- After intentionally changing the pre-deployment bootstrap, regenerate and
+  review `schema/postgres/migrations.json`; it must still contain only the one
+  bootstrap identity. CI rejects unreviewed checksum or schema drift.
+- SeaORM `schema-sync` is disabled. The stable `SchemaBuilder::apply` path is
+  restricted to the fresh bootstrap; experimental discovery/sync cannot own
+  constraints, indexes, triggers, functions, grants, or lifecycle evolution.
+- Catalog seeds are independent fresh-boot data artifacts with their own exact
+  checksums and atomic seed-ledger writes; they are not an upgrade mechanism.
 
-For a future PostgreSQL enum extension, the enum-label migration must be its
-own committed migration. A following migration may then use the new label in a
-constraint, index predicate, or data rewrite. Both migrations must include all
-execution artifacts in their checksum specification and pass clean-database,
-upgrade, checksum-tamper, and runtime-no-DDL tests before release.
-
-This contract follows SeaORM's official guidance to use a separate migration
-crate, schema-first immutable migrations, `up`/`down`, and frozen entity
-snapshots when `SchemaBuilder` is embedded in a migration. References:
-[setting up migration](https://www.sea-ql.org/SeaORM/docs/migration/setting-up-migration/),
-[writing migration](https://www.sea-ql.org/SeaORM/docs/migration/writing-migration/),
-[running migration](https://www.sea-ql.org/SeaORM/docs/migration/running-migration/),
+SeaORM remains the implementation framework for the one schema owner:
+[setting up migration](https://www.sea-ql.org/SeaORM/docs/migration/setting-up-migration/)
 and [entity-first schema](https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-first/).
 
 ## Implementation Record (2026-07-19)
@@ -155,10 +122,11 @@ and [entity-first schema](https://www.sea-ql.org/SeaORM/docs/generate-entity/ent
 
 - The workspace is pinned to Rust 1.97.1, SeaORM 2.0.0, and SQLx 0.9.0.
   The dependency graph contains one SeaORM/SQLx generation.
-- `quant-pivot-migration` owns exactly one PostgreSQL boot migration. A
-  disposable PostgreSQL 16 clean boot reports 93 tables, 1,213 columns, 273
-  indexes, and 340 constraints. ClickHouse likewise owns one boot manifest at
-  system schema version 1. Application runtime code has no DDL path.
+- `quant-pivot-migration` owns exactly one PostgreSQL boot migration. Its
+  disposable PostgreSQL 16 shape must equal the checked-in manifest byte for
+  byte; the gate derives current table/column/index/constraint counts instead
+  of freezing drift-prone prose totals. ClickHouse likewise owns one boot
+  manifest at system schema version 1. Application runtime code has no DDL path.
 - Governed configuration consists of six independently revisioned schema-1
   resources. Activation is guarded by a database-authoritative bundle
   generation, full revision vector, candidate hash, approval, preflight token,
@@ -175,7 +143,7 @@ and [entity-first schema](https://www.sea-ql.org/SeaORM/docs/generate-entity/ent
   expressions the ORM cannot represent.
 - Production seal acquires the shared lifecycle lease and rechecks live
   PostgreSQL, ClickHouse, active policy bundle, clean compile-time build
-  identity, and content-addressed WORM evidence. Migration and reset mutations
+  identity, and content-addressed WORM evidence. Bootstrap and reset mutations
   fail closed after a frozen baseline.
 - The Config API, generated TypeScript contract, and UI share the same resource
   registry. The UI covers validation, approval, activation, rollback, stale
@@ -194,36 +162,34 @@ untracked deploy TOML. No old secret value may be read, copied, or reused.
 The explicitly authorized pre-production destructive scope is limited to PostgreSQL database
 `quant_pivot`, ClickHouse database `quant_pivot`, and Redis keys matching the
 validated non-empty `qp:` namespace. No runtime lifecycle state or production
-freeze exists; after first deployment, schema evolution uses normal forward
-migrations, backups, and explicit rollback.
+  freeze exists. This implementation defines no post-deployment schema evolution,
+  upgrade, downgrade, or historical-data conversion path.
 ### Automated verification
 
-CI and local closeout use the same command inventory through
-`scripts/check-production-gates.sh`, split into `rust-static`, `ui`, `network`,
-`docker`, and `protected-e2e`. The following gates are required after material
-closeout changes before promotion; only the results recorded by the final run
-may be treated as passing evidence:
+The canonical CI inventory is owned directly by [`.github/workflows/ci.yml`](../../../.github/workflows/ci.yml):
+`secret-scan`, `rust-static`, `rust-unit-contract`, `system`, `ui`, and `protected-e2e`.
+Fixed-runner performance is separately owned by
+[`.github/workflows/performance.yml`](../../../.github/workflows/performance.yml). There is no root
+gate script and no `cargo test-docker`/`cargo test-network` alias. Only commands actually run and
+recorded by the current ledger may be treated as passing evidence:
 
 - `cargo fmt --all --check`;
 - `cargo clippy --workspace --all-targets -- -D warnings`;
-- `cargo test --workspace`;
-- two consecutive `cargo test-docker` passes (all registered PostgreSQL, Redis,
-  ClickHouse, core, and web/auth/WS suites);
-- `cargo test-network` (Gamma and Data API Wiremock suites);
-- all architecture, import-style, boundary, error, dead-semantics,
-  ClickHouse-correctness, training-serving, and UI semantic-color lints;
+- `cargo xtask architecture audit-functions` and `cargo xtask architecture check`;
+- `cargo test --workspace` or the CI-owned `cargo nextest run --workspace --profile ci` partition;
+- `cargo nextest run -p quant-pivot-system-tests --profile system` against shared disposable
+  PostgreSQL/Redis/ClickHouse infrastructure;
+- `cargo xtask production-stack feedback-closure --runs 1 --retain-artifacts` for the explicitly
+  non-operational Phase 12 closure boundary;
+- `cargo xtask performance run --profile full --output target/performance-evidence` on the fixed runner;
 - `cargo machete --with-metadata` and `cargo +nightly udeps --workspace --all-targets`;
-- UI lint, typecheck, 494 unit tests, production build, Knip, circular checks,
-  production bundle forbidden-pattern scan, and dashboard gzip-budget check;
-- protected login/dashboard, refresh restoration, deep-link, real 404,
-  reduced-motion, keyboard/accessibility, and responsive light/dark visual
-  behavior at desktop, tablet, and mobile viewports.
+- UI generated-contract checks, lint, dependency/circular checks, typecheck, deterministic unit tests,
+  production build and the Playwright projects named by current CI. Historical test counts are not a gate.
 
-The current closeout is tracked only in the Execution Ledger and immutable local
+The current closeout is tracked only in the Phase 12 Execution Ledger and immutable local
 acceptance manifests referenced by it. A check is passing evidence only when its
 exact command, result, timestamp and evidence hash are recorded there. The CI
-workflow invokes the same five command groups; local evidence never implies a
-remote CI run or hosted artifact.
+workflow remains the remote owner; local evidence never implies a remote CI run or hosted artifact.
 
 ### Explicitly deferred or externally blocked
 
@@ -246,8 +212,8 @@ remote CI run or hosted artifact.
   unwind table limit; release artifacts are not affected by this debug-only
   evidence run.
 
-The implementation is **not production-complete** until the disposable W9
-rehearsal, operator-authorized W10 local acceptance, soak, real ClickHouse Cloud,
-deploy-file, WORM restore, retention/capacity, 33/93/100-day profile proofs,
-and the 200-day research-retention artifact
-are archived.
+The implementation evidence is not closed until the Phase 12 W7-04 disposable
+production rehearsal and W7-05 fixed point are archived. Operational activation
+remains a separate, explicitly authorized activity and still requires soak,
+real ClickHouse Cloud, deploy-file, WORM restore, retention/capacity,
+33/93/100-day profile proofs, and the 200-day research-retention artifact.

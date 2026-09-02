@@ -4,15 +4,19 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use quant_pivot_compute::ComputeExecutor;
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
+use quant_pivot_error::{
+    QuantError, QuantResult,
+    research::ResearchError,
+    storage::{StorageError, entity::QUANT_MODEL_RUN},
+};
 use quant_pivot_models::{
     domain::{
         api::{ModelTrainJobParams, TrainModelRequest, TrainedModelView},
         governance::DecisionPolicySnapshotInfo,
-        ports::ModelTrainingPort,
-        quant::{JobProgressSink, ModelVersionInfo},
+        ports::{ModelTrainingPort, TrainingRunFinalization},
+        quant::{JobProgressSink, ModelRunInfo, ModelVersionInfo},
     },
-    enums::quant::{ModelRunKind, ModelRunStatus},
+    enums::quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
     types::{
         DecisionPolicySnapshotId, ModelRunId, ModelVersionId, TrainingDatasetId,
         model_lineage::ModelVersionDerivation,
@@ -29,7 +33,7 @@ use crate::{
     app::bundles::ResearchBundle,
     service::{
         frozen_model_parity::FrozenModelParityService,
-        model_serving_preimage::ModelServingPreimageService,
+        model_serving_preimage::{ModelPreimageReadContext, ModelServingPreimageService},
         model_training::{
             ModelTrainerConfig, ModelTrainerService, ModelTrainerServiceDeps, TrainModelInput,
         },
@@ -221,6 +225,62 @@ impl CoreModelTrainingPort {
         }
         Ok(())
     }
+
+    fn commit_winner(run: &ModelRunInfo) -> QuantResult<TrainingRunFinalization> {
+        let Some(model_version_id) = run.model_version_id else {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_MODEL_RUN),
+                format!(
+                    "succeeded training run {} has no committed model version",
+                    run.model_run_id
+                ),
+            )
+            .into());
+        };
+        if run.run_kind != ModelRunKind::Training
+            || run.status != ModelRunStatus::Succeeded
+            || run.output_hash.is_none()
+            || run.error_code.is_some()
+            || run.error_message.is_some()
+            || run
+                .finished_at
+                .is_none_or(|finished_at| finished_at < run.started_at)
+        {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_MODEL_RUN),
+                format!(
+                    "training run {} is not an exact succeeded commit winner",
+                    run.model_run_id
+                ),
+            )
+            .into());
+        }
+        Ok(TrainingRunFinalization::CommitWon { model_version_id })
+    }
+
+    fn is_cancelled_run(run: &ModelRunInfo) -> bool {
+        run.run_kind == ModelRunKind::Training
+            && run.status == ModelRunStatus::Cancelled
+            && run.model_version_id.is_none()
+            && run.output_hash.is_none()
+            && run.error_code == Some(ModelRunErrorCode::CancelledByOperator)
+            && run.error_message.is_some()
+            && run
+                .finished_at
+                .is_some_and(|finished_at| finished_at >= run.started_at)
+    }
+
+    fn is_failed_run(run: &ModelRunInfo) -> bool {
+        run.run_kind == ModelRunKind::Training
+            && run.status == ModelRunStatus::Failed
+            && run.model_version_id.is_none()
+            && run.output_hash.is_none()
+            && run.error_code == Some(ModelRunErrorCode::TrainingFailed)
+            && run.error_message.is_some()
+            && run
+                .finished_at
+                .is_some_and(|finished_at| finished_at >= run.started_at)
+    }
 }
 
 #[async_trait]
@@ -246,7 +306,9 @@ impl ModelTrainingPort for CoreModelTrainingPort {
             retry.verify_request(&request)?;
             self.require_retry_run(model_run_id, &existing, retry.training_dataset_id)
                 .await?;
-            self.serving_preimages.load(&existing).await?;
+            let context = ModelPreimageReadContext::new(&cancel, None);
+            self.serving_preimages.load(&existing, &context).await?;
+            drop(context);
             self.frozen_model_parity
                 .verify_and_record(
                     &existing,
@@ -325,6 +387,128 @@ impl ModelTrainingPort for CoreModelTrainingPort {
         Ok(view)
     }
 
+    async fn cancel_run(
+        &self,
+        model_run_id: &ModelRunId,
+        reason: String,
+    ) -> QuantResult<TrainingRunFinalization> {
+        let Some(current) = self.model_run_repo.find_by_id(model_run_id).await? else {
+            return Ok(TrainingRunFinalization::Terminalized);
+        };
+        match current.status {
+            ModelRunStatus::Succeeded => return Self::commit_winner(&current),
+            ModelRunStatus::Cancelled if Self::is_cancelled_run(&current) => {
+                return Ok(TrainingRunFinalization::Terminalized);
+            }
+            ModelRunStatus::Running => {}
+            status => {
+                return Err(StorageError::state_conflict(
+                    QUANT_MODEL_RUN,
+                    Some(model_run_id),
+                    format!("operator cancellation cannot finalize model run from {status}"),
+                )
+                .into());
+            }
+        }
+        match self.model_run_repo.cancel(model_run_id, reason).await {
+            Ok(terminal) if Self::is_cancelled_run(&terminal) => {
+                Ok(TrainingRunFinalization::Terminalized)
+            }
+            Ok(terminal) => Err(StorageError::invariant_violation(
+                Some(QUANT_MODEL_RUN),
+                format!(
+                    "operator cancellation returned a non-canonical {} terminal for {}",
+                    terminal.status, terminal.model_run_id
+                ),
+            )
+            .into()),
+            Err(StorageError::StateConflict { .. }) => {
+                let terminal = self
+                    .model_run_repo
+                    .find_by_id(model_run_id)
+                    .await?
+                    .ok_or_else(|| StorageError::not_found(QUANT_MODEL_RUN, model_run_id))?;
+                match terminal.status {
+                    ModelRunStatus::Succeeded => Self::commit_winner(&terminal),
+                    ModelRunStatus::Cancelled if Self::is_cancelled_run(&terminal) => {
+                        Ok(TrainingRunFinalization::Terminalized)
+                    }
+                    status => Err(StorageError::state_conflict(
+                        QUANT_MODEL_RUN,
+                        Some(model_run_id),
+                        format!(
+                            "operator cancellation lost to unexpected terminal status {status}"
+                        ),
+                    )
+                    .into()),
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn fail_run(
+        &self,
+        model_run_id: &ModelRunId,
+        reason: String,
+    ) -> QuantResult<TrainingRunFinalization> {
+        let Some(current) = self.model_run_repo.find_by_id(model_run_id).await? else {
+            return Ok(TrainingRunFinalization::Terminalized);
+        };
+        match current.status {
+            ModelRunStatus::Succeeded => return Self::commit_winner(&current),
+            ModelRunStatus::Failed if Self::is_failed_run(&current) => {
+                return Ok(TrainingRunFinalization::Terminalized);
+            }
+            ModelRunStatus::Running => {}
+            status => {
+                return Err(StorageError::state_conflict(
+                    QUANT_MODEL_RUN,
+                    Some(model_run_id),
+                    format!("retry exhaustion cannot finalize model run from {status}"),
+                )
+                .into());
+            }
+        }
+        match self
+            .model_run_repo
+            .fail(model_run_id, ModelRunErrorCode::TrainingFailed, reason)
+            .await
+        {
+            Ok(terminal) if Self::is_failed_run(&terminal) => {
+                Ok(TrainingRunFinalization::Terminalized)
+            }
+            Ok(terminal) => Err(StorageError::invariant_violation(
+                Some(QUANT_MODEL_RUN),
+                format!(
+                    "retry exhaustion returned a non-canonical {} terminal for {}",
+                    terminal.status, terminal.model_run_id
+                ),
+            )
+            .into()),
+            Err(StorageError::StateConflict { .. }) => {
+                let terminal = self
+                    .model_run_repo
+                    .find_by_id(model_run_id)
+                    .await?
+                    .ok_or_else(|| StorageError::not_found(QUANT_MODEL_RUN, model_run_id))?;
+                match terminal.status {
+                    ModelRunStatus::Succeeded => Self::commit_winner(&terminal),
+                    ModelRunStatus::Failed if Self::is_failed_run(&terminal) => {
+                        Ok(TrainingRunFinalization::Terminalized)
+                    }
+                    status => Err(StorageError::state_conflict(
+                        QUANT_MODEL_RUN,
+                        Some(model_run_id),
+                        format!("retry exhaustion lost to unexpected terminal status {status}"),
+                    )
+                    .into()),
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn find_version(
         &self,
         model_version_id: &ModelVersionId,
@@ -338,13 +522,37 @@ impl ModelTrainingPort for CoreModelTrainingPort {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{Duration, Utc};
     use quant_pivot_error::{QuantError, research::ResearchError};
     use quant_pivot_models::{
-        domain::api::TrainModelRequest,
-        types::{ModelVersionId, TrainingDatasetId},
+        domain::{api::TrainModelRequest, ports::TrainingRunFinalization, quant::ModelRunInfo},
+        enums::quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
+        types::{
+            ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId, TrainingDatasetId,
+        },
     };
 
-    use super::ModelTrainingRetryIdentity;
+    use super::{CoreModelTrainingPort, ModelTrainingRetryIdentity};
+
+    fn committed_run() -> ModelRunInfo {
+        let now = Utc::now();
+        ModelRunInfo {
+            model_run_id: ModelRunId::from_v7(),
+            run_kind: ModelRunKind::Training,
+            model_version_id: Some(ModelVersionId::from_v7()),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            market_selection_id: None,
+            window_start: now,
+            window_end: now,
+            status: ModelRunStatus::Succeeded,
+            input_hash: ContentHash::from_bytes([0x11; 32]),
+            output_hash: Some(ContentHash::from_bytes([0x22; 32])),
+            error_code: None,
+            error_message: None,
+            started_at: now,
+            finished_at: Some(now),
+        }
+    }
 
     #[test]
     fn retry_rejects_dataset_drift() {
@@ -373,5 +581,45 @@ mod tests {
             ),
             "retry drift must remain a typed DatasetBuild error: {error}"
         );
+    }
+
+    #[test]
+    fn commit_winner_is_typed() {
+        let run = committed_run();
+        let model_version_id = run.model_version_id.expect("committed version");
+        assert_eq!(
+            CoreModelTrainingPort::commit_winner(&run).expect("exact commit winner"),
+            TrainingRunFinalization::CommitWon { model_version_id }
+        );
+
+        let mut incomplete = run;
+        incomplete.output_hash = None;
+        assert!(CoreModelTrainingPort::commit_winner(&incomplete).is_err());
+        incomplete.output_hash = Some(ContentHash::from_bytes([0x22; 32]));
+        incomplete.finished_at = Some(incomplete.started_at - Duration::seconds(1));
+        assert!(CoreModelTrainingPort::commit_winner(&incomplete).is_err());
+    }
+
+    #[test]
+    fn terminal_shapes_are_exact() {
+        let mut cancelled = committed_run();
+        cancelled.status = ModelRunStatus::Cancelled;
+        cancelled.model_version_id = None;
+        cancelled.output_hash = None;
+        cancelled.error_code = Some(ModelRunErrorCode::CancelledByOperator);
+        cancelled.error_message = Some("operator cancel".to_owned());
+        assert!(CoreModelTrainingPort::is_cancelled_run(&cancelled));
+        cancelled.output_hash = Some(ContentHash::from_bytes([0x33; 32]));
+        assert!(!CoreModelTrainingPort::is_cancelled_run(&cancelled));
+
+        let mut failed = committed_run();
+        failed.status = ModelRunStatus::Failed;
+        failed.model_version_id = None;
+        failed.output_hash = None;
+        failed.error_code = Some(ModelRunErrorCode::TrainingFailed);
+        failed.error_message = Some("retry exhausted".to_owned());
+        assert!(CoreModelTrainingPort::is_failed_run(&failed));
+        failed.finished_at = None;
+        assert!(!CoreModelTrainingPort::is_failed_run(&failed));
     }
 }

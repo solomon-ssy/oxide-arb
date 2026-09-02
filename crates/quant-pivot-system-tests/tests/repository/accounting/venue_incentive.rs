@@ -294,6 +294,18 @@ pub async fn wallet_credit_is_cash() {
         )
         .await
         .expect("persist taker wallet credit scan");
+    repository
+        .record_scan(
+            failed_scan(
+                account_id,
+                VenueIncentiveKind::MakerRebate,
+                observed_at.date_naive(),
+                available_at + Duration::minutes(10),
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("persist failed wallet scan without a response digest");
 
     assert_eq!(
         repository
@@ -463,6 +475,27 @@ fn successful_scan(
         response_digest: Some(content_hash(hash_seed)),
         response_count,
         error_code: None,
+    }
+}
+
+fn failed_scan(
+    execution_account_id: ExecutionAccountId,
+    kind: VenueIncentiveKind,
+    program_date: NaiveDate,
+    completed_at: DateTime<Utc>,
+) -> NewVenueIncentiveReconciliationScan {
+    NewVenueIncentiveReconciliationScan {
+        venue_incentive_reconciliation_scan_id: VenueIncentiveReconciliationScanId::from_v7(),
+        execution_account_id,
+        kind,
+        stage: VenueIncentiveStage::WalletCredited,
+        program_date,
+        started_at: completed_at - Duration::seconds(1),
+        completed_at,
+        status: VenueIncentiveReconciliationScanStatus::Failed,
+        response_digest: None,
+        response_count: 0,
+        error_code: Some("fixture_upstream_unavailable".to_owned()),
     }
 }
 

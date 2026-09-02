@@ -1,30 +1,34 @@
-//! Durable per-exchange account pause submission.
+//! Durable per-exchange account pause-state operation.
 
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::quant_account_recovery_incident;
 use crate::{
-    enums::{execution::AccountPauseSubmissionState, settlement::SettlementSubmissionKind},
+    enums::{
+        execution::{AccountPauseOperationKind, AccountPauseOperationState},
+        settlement::SettlementSubmissionKind,
+    },
     types::{
-        AccountPauseSubmissionId, AccountRecoveryIncidentId, ContentHash, EvmAddress, EvmBlockHash,
+        AccountPauseOperationId, AccountRecoveryIncidentId, ContentHash, EvmAddress, EvmBlockHash,
         EvmCalldataHash, EvmTransactionHash, EvmUint256, RelayerTransactionId,
     },
 };
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "quant_account_pause_submission")]
+#[sea_orm(table_name = "quant_account_pause_operation")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub account_pause_submission_id: AccountPauseSubmissionId,
+    pub account_pause_operation_id: AccountPauseOperationId,
     pub recovery_incident_id: AccountRecoveryIncidentId,
     pub exchange_address: EvmAddress,
-    pub state: AccountPauseSubmissionState,
-    pub kind: SettlementSubmissionKind,
+    pub operation_kind: AccountPauseOperationKind,
+    pub state: AccountPauseOperationState,
+    pub submission_kind: SettlementSubmissionKind,
     pub requested_block: i64,
-    pub interval_blocks: i64,
-    pub effective_block: i64,
+    pub interval_blocks: Option<i64>,
+    pub effective_block: Option<i64>,
     pub prepared_block_number: i64,
     pub prepared_block_hash: EvmBlockHash,
     pub prepared_nonce: EvmUint256,

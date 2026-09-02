@@ -1,6 +1,6 @@
 //! Durability-aware `ClickHouse` writer for token-level book facts.
 
-use std::{sync::Arc, time::Duration};
+use std::{mem::size_of, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use quant_pivot_models::{
@@ -9,8 +9,12 @@ use quant_pivot_models::{
         BookStreamSessionRow, ChBps, ChDecimal64, ChDigest, ChPrice, ChSchemaVersion, ChShares,
         ChUsd,
     },
+    config::{
+        CLICKHOUSE_CANONICAL_PUBLICATION_TIMEOUT_MS, CLICKHOUSE_DURABLE_ACK_TIMEOUT_MS,
+        CLICKHOUSE_DURABLE_ADMISSION_TIMEOUT_MS,
+    },
     domain::{
-        data_plane::pipeline::{BookSnapshotCmd, IngressTrace, PriceDeltaCmd},
+        data_plane::pipeline::{BookSnapshotCmd, IngressTrace, PriceDeltaCmd, StreamSessionTicket},
         market::book::BookSnapshot,
     },
     enums::{
@@ -24,13 +28,27 @@ use quant_pivot_models::{
         Bps, ContentHash, EvmTransactionHash, MarketId, PartitionId, Price, Shares, TokenId, Usd,
     },
 };
-use quant_pivot_storage::write::{DurableWriteError, DurableWriter};
+use quant_pivot_storage::write::{
+    DurableWriteError, DurableWriteReceipt, DurableWriteTimeouts, DurableWriter,
+};
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use super::ledger_persistence::{LedgerPersistenceHandle, PartitionLedgerClient};
 
-pub(crate) const CANONICAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const CANONICAL_WRITE_TIMEOUT: Duration =
+    Duration::from_millis(CLICKHOUSE_CANONICAL_PUBLICATION_TIMEOUT_MS);
+pub(crate) const DURABLE_FACT_ACK_TIMEOUT: Duration =
+    Duration::from_millis(CLICKHOUSE_DURABLE_ACK_TIMEOUT_MS);
+// Derived feature/session facts do not authorize hot-path publication. They
+// retain the 250ms admission bound but may wait through the absolute 12-second
+// durability ceiling before invalidating state. Reusing the two-second
+// canonical publication quarantine here turns a recoverable ClickHouse ACK
+// tail into a false WebSocket session failure and a gap-ledger cascade.
+const DURABLE_FACT_TIMEOUTS: DurableWriteTimeouts = DurableWriteTimeouts::new(
+    Duration::from_millis(CLICKHOUSE_DURABLE_ADMISSION_TIMEOUT_MS),
+    DURABLE_FACT_ACK_TIMEOUT,
+);
 const L2_SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(2);
 
 pub struct BookFactWriter {
@@ -42,7 +60,23 @@ pub struct BookFactWriter {
 /// Partition-owned one-second telemetry accumulator for one token.
 #[derive(Default)]
 pub(crate) struct MicrostructureAccumulator {
-    pending: Option<BookMicrostructureRow>,
+    pending: Option<SessionMicrostructureRow>,
+}
+
+/// One completed telemetry bucket bound to the physical stream that produced it.
+pub(crate) struct SessionMicrostructureRow {
+    pub row: BookMicrostructureRow,
+    pub session: StreamSessionTicket,
+}
+
+struct MicrostructureObservation<'a> {
+    token_id: &'a TokenId,
+    market_id: Option<MarketId>,
+    snapshot: &'a BookSnapshot,
+    session: StreamSessionTicket,
+    event_type: ChBookEventType,
+    delete_count: u64,
+    now_ms: i64,
 }
 
 pub(crate) struct MarketWsTradeFact<'a> {
@@ -139,13 +173,23 @@ impl BookFactWriter {
         seal_ledger_row(row)
     }
 
-    pub(crate) async fn write_microstructure_rows(
+    pub(crate) async fn enqueue_microstructure_rows(
         &self,
         rows: Vec<BookMicrostructureRow>,
-    ) -> Result<(), DurableWriteError> {
+    ) -> Result<DurableWriteReceipt, DurableWriteError> {
         self.microstructure_1s
-            .write_batch_async_timeout(rows, CANONICAL_WRITE_TIMEOUT)
+            .enqueue_batch(rows, DURABLE_FACT_TIMEOUTS)
             .await
+    }
+
+    #[must_use]
+    pub(crate) fn microstructure_item_limit(&self) -> usize {
+        self.microstructure_1s.item_limit()
+    }
+
+    #[must_use]
+    pub(crate) fn microstructure_byte_limit(&self) -> Option<usize> {
+        self.microstructure_1s.byte_limit()
     }
 
     pub(crate) fn tick_size_ledger_row(
@@ -193,7 +237,7 @@ impl BookFactWriter {
         subscription_token_hash: ContentHash,
         subscription_token_count: u32,
         opened_at_ms: i64,
-    ) -> bool {
+    ) -> Result<(), DurableWriteError> {
         self.write_stream_session(BookStreamSessionRow {
             stream_session_id,
             shard_id,
@@ -211,15 +255,18 @@ impl BookFactWriter {
         .await
     }
 
-    pub async fn write_stream_session_close(&self, row: BookStreamSessionRow) -> bool {
+    pub async fn write_stream_session_close(
+        &self,
+        row: BookStreamSessionRow,
+    ) -> Result<(), DurableWriteError> {
         self.write_stream_session(row).await
     }
 
-    async fn write_stream_session(&self, row: BookStreamSessionRow) -> bool {
-        self.sessions
-            .write_async_timeout(row, CANONICAL_WRITE_TIMEOUT)
-            .await
-            .is_ok()
+    async fn write_stream_session(
+        &self,
+        row: BookStreamSessionRow,
+    ) -> Result<(), DurableWriteError> {
+        self.sessions.write_async(row, DURABLE_FACT_TIMEOUTS).await
     }
 
     pub(crate) fn gap_ledger_row(
@@ -250,41 +297,53 @@ impl MicrostructureAccumulator {
         token_id: &TokenId,
         market_id: Option<MarketId>,
         snapshot: &BookSnapshot,
+        session: StreamSessionTicket,
         event_type: ChBookEventType,
         delete_count: u64,
-    ) -> Option<BookMicrostructureRow> {
+    ) -> Option<SessionMicrostructureRow> {
         let now_ms = Utc::now().timestamp_millis();
-        self.observe_at(
+        self.observe_at(MicrostructureObservation {
             token_id,
             market_id,
             snapshot,
+            session,
             event_type,
             delete_count,
             now_ms,
-        )
+        })
     }
 
     fn observe_at(
         &mut self,
-        token_id: &TokenId,
-        market_id: Option<MarketId>,
-        snapshot: &BookSnapshot,
-        event_type: ChBookEventType,
-        delete_count: u64,
-        now_ms: i64,
-    ) -> Option<BookMicrostructureRow> {
-        let second_observation = microstructure_row(
+        observation: MicrostructureObservation<'_>,
+    ) -> Option<SessionMicrostructureRow> {
+        let MicrostructureObservation {
             token_id,
             market_id,
             snapshot,
+            session,
             event_type,
             delete_count,
-            bucket_ms(now_ms, BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS),
             now_ms,
-        );
+        } = observation;
+        let second_observation = SessionMicrostructureRow {
+            row: microstructure_row(
+                token_id,
+                market_id,
+                snapshot,
+                event_type,
+                delete_count,
+                bucket_ms(now_ms, BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS),
+                now_ms,
+            ),
+            session,
+        };
         match self.pending.as_mut() {
-            Some(current) if current.bucket_time == second_observation.bucket_time => {
-                merge_microstructure_row(current, second_observation);
+            Some(current)
+                if current.session == session
+                    && current.row.bucket_time == second_observation.row.bucket_time =>
+            {
+                merge_microstructure_row(&mut current.row, second_observation.row);
                 None
             }
             Some(_) => self.pending.replace(second_observation),
@@ -295,13 +354,14 @@ impl MicrostructureAccumulator {
         }
     }
 
-    pub(crate) const fn flush(&mut self) -> Option<BookMicrostructureRow> {
+    pub(crate) const fn flush(&mut self) -> Option<SessionMicrostructureRow> {
         self.pending.take()
     }
 
-    pub(crate) fn flush_elapsed(&mut self, now_ms: i64) -> Option<BookMicrostructureRow> {
+    pub(crate) fn flush_elapsed(&mut self, now_ms: i64) -> Option<SessionMicrostructureRow> {
         if self.pending.as_ref().is_some_and(|row| {
-            row.bucket_time
+            row.row
+                .bucket_time
                 .saturating_add(BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS)
                 <= now_ms
         }) {
@@ -310,6 +370,33 @@ impl MicrostructureAccumulator {
             None
         }
     }
+
+    pub(crate) fn discard_session(&mut self, session: StreamSessionTicket) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.session == session)
+        {
+            self.pending = None;
+        }
+    }
+}
+
+/// Conservative resident bytes for one queued microstructure row.
+#[must_use]
+pub(crate) fn microstructure_row_weight(row: &BookMicrostructureRow) -> usize {
+    microstructure_identity_weight(&row.token_id, row.market_id.as_ref())
+}
+
+/// Conservative resident bytes before a row is materialized.
+#[must_use]
+pub(crate) fn microstructure_identity_weight(
+    token_id: &TokenId,
+    market_id: Option<&MarketId>,
+) -> usize {
+    size_of::<BookMicrostructureRow>()
+        .saturating_add(token_id.as_str().len())
+        .saturating_add(market_id.map_or(0, |market_id| market_id.as_str().len()))
 }
 
 fn base_ledger_row(
@@ -621,6 +708,11 @@ mod tests {
         BookSnapshot::new(Arc::from(bids), Arc::from(asks), 0, 0)
     }
 
+    fn session(epoch: u64) -> StreamSessionTicket {
+        StreamSessionTicket::new(Uuid::from_u128(u128::from(epoch)), epoch)
+            .expect("valid accumulator session")
+    }
+
     #[test]
     fn imbalance_share_not_biased() {
         // Low-mid book with EQUAL shares per side. The old full-book USD formula
@@ -656,26 +748,52 @@ mod tests {
 
         assert!(
             accumulator
-                .observe_at(&token_id, None, &snap, ChBookEventType::Snapshot, 0, 1_000)
+                .observe_at(MicrostructureObservation {
+                    token_id: &token_id,
+                    market_id: None,
+                    snapshot: &snap,
+                    session: session(1),
+                    event_type: ChBookEventType::Snapshot,
+                    delete_count: 0,
+                    now_ms: 1_000,
+                })
                 .is_none()
         );
         assert!(
             accumulator
-                .observe_at(&token_id, None, &snap, ChBookEventType::Delta, 2, 1_999)
+                .observe_at(MicrostructureObservation {
+                    token_id: &token_id,
+                    market_id: None,
+                    snapshot: &snap,
+                    session: session(1),
+                    event_type: ChBookEventType::Delta,
+                    delete_count: 2,
+                    now_ms: 1_999,
+                })
                 .is_none()
         );
         let rolled = accumulator
-            .observe_at(&token_id, None, &snap, ChBookEventType::Delta, 1, 2_000)
+            .observe_at(MicrostructureObservation {
+                token_id: &token_id,
+                market_id: None,
+                snapshot: &snap,
+                session: session(1),
+                event_type: ChBookEventType::Delta,
+                delete_count: 1,
+                now_ms: 2_000,
+            })
             .expect("completed one-second bucket");
-        assert_eq!(rolled.bucket_time, 1_000);
-        assert_eq!(rolled.update_count, 2);
-        assert_eq!(rolled.snapshot_count, 1);
-        assert_eq!(rolled.delta_count, 1);
-        assert_eq!(rolled.delete_count, 2);
+        assert_eq!(rolled.session, session(1));
+        assert_eq!(rolled.row.bucket_time, 1_000);
+        assert_eq!(rolled.row.update_count, 2);
+        assert_eq!(rolled.row.snapshot_count, 1);
+        assert_eq!(rolled.row.delta_count, 1);
+        assert_eq!(rolled.row.delete_count, 2);
 
         let pending = accumulator.flush().expect("current bucket");
-        assert_eq!(pending.bucket_time, 2_000);
-        assert_eq!(pending.update_count, 1);
+        assert_eq!(pending.session, session(1));
+        assert_eq!(pending.row.bucket_time, 2_000);
+        assert_eq!(pending.row.update_count, 1);
         assert!(accumulator.flush().is_none());
     }
 
@@ -686,7 +804,15 @@ mod tests {
         let mut accumulator = MicrostructureAccumulator::default();
         assert!(
             accumulator
-                .observe_at(&token_id, None, &snap, ChBookEventType::Snapshot, 0, 1_500)
+                .observe_at(MicrostructureObservation {
+                    token_id: &token_id,
+                    market_id: None,
+                    snapshot: &snap,
+                    session: session(1),
+                    event_type: ChBookEventType::Snapshot,
+                    delete_count: 0,
+                    now_ms: 1_500,
+                })
                 .is_none()
         );
         assert!(accumulator.flush_elapsed(1_999).is_none());
@@ -694,9 +820,47 @@ mod tests {
             accumulator
                 .flush_elapsed(2_000)
                 .expect("elapsed bucket")
+                .row
                 .bucket_time,
             1_000
         );
+    }
+
+    #[test]
+    fn accumulator_separates_sessions() {
+        let token_id = TokenId::new("token");
+        let snap = snapshot(&[level(40, 10)], &[level(60, 10)]);
+        let mut accumulator = MicrostructureAccumulator::default();
+        assert!(
+            accumulator
+                .observe_at(MicrostructureObservation {
+                    token_id: &token_id,
+                    market_id: None,
+                    snapshot: &snap,
+                    session: session(1),
+                    event_type: ChBookEventType::Snapshot,
+                    delete_count: 0,
+                    now_ms: 1_500,
+                })
+                .is_none()
+        );
+
+        let prior = accumulator
+            .observe_at(MicrostructureObservation {
+                token_id: &token_id,
+                market_id: None,
+                snapshot: &snap,
+                session: session(2),
+                event_type: ChBookEventType::Snapshot,
+                delete_count: 0,
+                now_ms: 1_600,
+            })
+            .expect("session switch flushes the prior bucket");
+        assert_eq!(prior.session, session(1));
+        assert_eq!(prior.row.update_count, 1);
+        let current = accumulator.flush().expect("successor session bucket");
+        assert_eq!(current.session, session(2));
+        assert_eq!(current.row.update_count, 1);
     }
 
     #[test]

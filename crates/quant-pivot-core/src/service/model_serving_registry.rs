@@ -30,7 +30,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::service::{
     factor_pipeline::FactorExecutionPlane,
-    model_serving_preimage::{ModelServingPreimageService, VerifiedModelServingPreimage},
+    model_serving_preimage::{
+        ModelPreimageReadContext, ModelServingPreimageService, VerifiedModelServingPreimage,
+    },
 };
 
 /// One completely loaded Buy-side runtime and its immutable contract plane.
@@ -222,11 +224,13 @@ impl ModelServingPlaneLoader for VerifiedModelServingPlaneLoader {
         &self,
         version: ModelVersionInfo,
     ) -> Result<Arc<LoadedModelServingRuntime>, ResearchError> {
+        let context = ModelPreimageReadContext::default();
         let source = self
             .preimages
-            .load_runtime(&version)
+            .load_runtime(&version, &context)
             .await
             .map_err(|error| load_failure_for(&version, "preimage_graph", &error))?;
+        drop(context);
         let runtime = source
             .buy_runtime()
             .map_err(|error| load_failure_for(&version, "runtime_build", &error))?;

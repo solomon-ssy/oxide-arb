@@ -4,17 +4,26 @@
   "description": "Schema-only envelope used to generate frontend wire types and boundary validators.\n\nHTTP handlers never serialize this envelope. Every field points at the real\nrequest or response DTO used by the handler so the SPA cannot maintain a\nparallel operator contract.",
   "type": "object",
   "properties": {
+    "account_recovery_incident_response": {
+      "$ref": "#/$defs/AccountRecoveryIncidentView"
+    },
     "account_snapshot_response": {
       "$ref": "#/$defs/AccountSnapshotView"
     },
     "create_intent_request": {
       "$ref": "#/$defs/CreateIntentRequest"
     },
+    "economic_health_response": {
+      "$ref": "#/$defs/RouteEconomicHealthView"
+    },
     "equity_snapshot_response": {
       "$ref": "#/$defs/EquitySnapshotView"
     },
     "execution_confirmation_response": {
       "$ref": "#/$defs/OrderIntentView"
+    },
+    "finalize_account_recovery_request": {
+      "$ref": "#/$defs/FinalizeAccountRecoveryRequest"
     },
     "incentive_event_response": {
       "$ref": "#/$defs/VenueIncentiveEventView"
@@ -25,8 +34,17 @@
     "live_account_response": {
       "$ref": "#/$defs/LiveAccountView"
     },
+    "recommendation_economic_outcome_response": {
+      "$ref": "#/$defs/RecommendationEconomicOutcomeView"
+    },
+    "recommendation_execution_comparison_response": {
+      "$ref": "#/$defs/RecommendationExecutionComparisonView"
+    },
     "recommendation_response": {
       "$ref": "#/$defs/QuantRecommendationView"
+    },
+    "reconcile_account_recovery_request": {
+      "$ref": "#/$defs/ReconcileAccountRecoveryRequest"
     },
     "report_detail_response": {
       "$ref": "#/$defs/QuantReportDetailView"
@@ -34,8 +52,17 @@
     "report_diff_response": {
       "$ref": "#/$defs/ReportDiffView"
     },
+    "report_funnel_market_response": {
+      "$ref": "#/$defs/ReportFunnelMarketView"
+    },
+    "report_funnel_response": {
+      "$ref": "#/$defs/QuantReportFunnelView"
+    },
     "report_list_row_response": {
       "$ref": "#/$defs/QuantReportView"
+    },
+    "seal_account_recovery_request": {
+      "$ref": "#/$defs/SealAccountRecoveryRequest"
     }
   },
   "additionalProperties": false,
@@ -44,15 +71,965 @@
     "report_list_row_response",
     "report_detail_response",
     "report_diff_response",
+    "report_funnel_response",
+    "report_funnel_market_response",
     "create_intent_request",
     "execution_confirmation_response",
     "account_snapshot_response",
     "live_account_response",
     "equity_snapshot_response",
     "incentive_reconciliation_response",
-    "incentive_event_response"
+    "incentive_event_response",
+    "recommendation_economic_outcome_response",
+    "recommendation_execution_comparison_response",
+    "economic_health_response",
+    "account_recovery_incident_response",
+    "reconcile_account_recovery_request",
+    "seal_account_recovery_request",
+    "finalize_account_recovery_request"
   ],
   "$defs": {
+    "AccountChainExecutionRole": {
+      "description": "Whether the account-owned order was resting, active, or self-matched.",
+      "type": "string",
+      "enum": [
+        "maker",
+        "taker",
+        "self_match"
+      ]
+    },
+    "AccountCleanFunderBlockerEvidence": {
+      "type": "object",
+      "properties": {
+        "account_chain_execution_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "evidence_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "role": {
+          "$ref": "#/$defs/AccountChainExecutionRole"
+        }
+      },
+      "required": [
+        "account_chain_execution_id",
+        "role",
+        "evidence_hash"
+      ]
+    },
+    "AccountPauseOperationKind": {
+      "type": "string",
+      "enum": [
+        "pause",
+        "unpause"
+      ]
+    },
+    "AccountPauseOperationState": {
+      "type": "string",
+      "enum": [
+        "prepared",
+        "dispatched",
+        "ambiguous",
+        "confirmed",
+        "failed"
+      ]
+    },
+    "AccountPauseOperationView": {
+      "type": "object",
+      "properties": {
+        "account_pause_operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "confirmation_block_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "confirmation_block_number": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "confirmed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "dispatched_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "effective_block": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "exchange_address": {
+          "type": "string"
+        },
+        "failure_detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_kind": {
+          "$ref": "#/$defs/AccountPauseOperationKind"
+        },
+        "requested_block": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "state": {
+          "$ref": "#/$defs/AccountPauseOperationState"
+        },
+        "submission_kind": {
+          "$ref": "#/$defs/SettlementSubmissionKind"
+        },
+        "transaction_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "account_pause_operation_id",
+        "exchange_address",
+        "operation_kind",
+        "state",
+        "submission_kind",
+        "requested_block",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "AccountRecoveryAssessment": {
+      "description": "Deterministic assessment persisted as the account recovery manifest payload.",
+      "type": "object",
+      "properties": {
+        "allocations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AccountRecoveryLotAllocation"
+          }
+        },
+        "created_lots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AccountRecoveryCreatedLot"
+          }
+        },
+        "evidence_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "mismatches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AccountRecoveryMismatch"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "allocations",
+        "created_lots",
+        "mismatches",
+        "evidence_hash"
+      ]
+    },
+    "AccountRecoveryAssessmentInput": {
+      "description": "Fully materialized, source-independent input to deterministic recovery assessment.",
+      "type": "object",
+      "properties": {
+        "chain_collateral_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "chain_positions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AccountRecoveryTokenBalance"
+          }
+        },
+        "chain_snapshot_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "clean_funder_blocker": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountCleanFunderBlockerEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "clob_collateral_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "clob_snapshot_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "data_api_positions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AccountRecoveryTokenBalance"
+          }
+        },
+        "data_api_snapshot_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "execution_account_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "explicit_sell_allocations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AccountRecoverySellAllocation"
+          }
+        },
+        "finalized_block_hash": {
+          "type": "string"
+        },
+        "finalized_block_number": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "incident_executions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AccountRecoveryExecutionDelta"
+          }
+        },
+        "invalid_execution_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "open_lots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AccountRecoveryLotBalance"
+          }
+        },
+        "open_order_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pause_confirmed": {
+          "type": "boolean"
+        },
+        "pending_settlement_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "recovery_incident_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "reserved_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "settlement_snapshot_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "unmapped_token_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "venue_snapshot_stable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "recovery_incident_id",
+        "execution_account_id",
+        "observed_at",
+        "finalized_block_number",
+        "finalized_block_hash",
+        "clob_snapshot_hash",
+        "data_api_snapshot_hash",
+        "chain_snapshot_hash",
+        "settlement_snapshot_hash",
+        "pause_confirmed",
+        "venue_snapshot_stable",
+        "clob_collateral_usd",
+        "chain_collateral_usd",
+        "reserved_usd",
+        "open_order_ids",
+        "unmapped_token_ids",
+        "invalid_execution_ids",
+        "data_api_positions",
+        "chain_positions",
+        "open_lots",
+        "incident_executions",
+        "explicit_sell_allocations",
+        "pending_settlement_count"
+      ]
+    },
+    "AccountRecoveryCreatedLot": {
+      "description": "Remaining shares from one incident BUY that must become a recovery-origin lot.",
+      "type": "object",
+      "properties": {
+        "account_chain_execution_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "acquired_cost_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "acquired_shares": {
+          "$ref": "#/$defs/Shares"
+        },
+        "closed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "realized_pnl_delta_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "remaining_cost_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "remaining_shares": {
+          "$ref": "#/$defs/Shares"
+        },
+        "strategy_position_lot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "token_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "strategy_position_lot_id",
+        "account_chain_execution_id",
+        "token_id",
+        "acquired_shares",
+        "remaining_shares",
+        "acquired_cost_usd",
+        "remaining_cost_usd",
+        "realized_pnl_delta_usd"
+      ]
+    },
+    "AccountRecoveryExecutionDelta": {
+      "description": "Finalized incident execution needed to explain a position delta.",
+      "type": "object",
+      "properties": {
+        "account_chain_execution_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "available_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "exact_fee_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "principal_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "shares_delta": {
+          "type": "string"
+        },
+        "token_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "account_chain_execution_id",
+        "token_id",
+        "shares_delta",
+        "principal_usd",
+        "exact_fee_usd",
+        "available_at"
+      ]
+    },
+    "AccountRecoveryIncidentInfo": {
+      "type": "object",
+      "properties": {
+        "account_recovery_incident_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "execution_account_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "$ref": "#/$defs/AccountRecoveryIncidentKind"
+        },
+        "opened_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "seal_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "sealed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "sealed_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "status": {
+          "$ref": "#/$defs/AccountRecoveryIncidentStatus"
+        },
+        "trigger_chain_execution_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "account_recovery_incident_id",
+        "execution_account_id",
+        "kind",
+        "status",
+        "reason",
+        "opened_at",
+        "revision",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "AccountRecoveryIncidentKind": {
+      "type": "string",
+      "enum": [
+        "unknown_external_execution",
+        "break_glass_restart",
+        "opening_inventory",
+        "account_mismatch"
+      ]
+    },
+    "AccountRecoveryIncidentStatus": {
+      "type": "string",
+      "enum": [
+        "open",
+        "reconciling",
+        "sealed"
+      ]
+    },
+    "AccountRecoveryIncidentView": {
+      "type": "object",
+      "properties": {
+        "incident": {
+          "$ref": "#/$defs/AccountRecoveryIncidentInfo"
+        },
+        "latest_manifest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountRecoveryManifestView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pause_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AccountPauseOperationView"
+          }
+        }
+      },
+      "required": [
+        "incident",
+        "pause_operations"
+      ]
+    },
+    "AccountRecoveryLotAllocation": {
+      "description": "Deterministic post-recovery quantity assigned to one existing lot.",
+      "type": "object",
+      "properties": {
+        "after_cost_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "after_shares": {
+          "$ref": "#/$defs/Shares"
+        },
+        "before_cost_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "before_shares": {
+          "$ref": "#/$defs/Shares"
+        },
+        "closed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "realized_pnl_delta_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "strategy_position_lot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "token_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "strategy_position_lot_id",
+        "token_id",
+        "before_shares",
+        "after_shares",
+        "before_cost_usd",
+        "after_cost_usd",
+        "realized_pnl_delta_usd"
+      ]
+    },
+    "AccountRecoveryLotBalance": {
+      "description": "Open internal lot state before incident execution allocation.",
+      "type": "object",
+      "properties": {
+        "cost_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "opened_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "shares": {
+          "$ref": "#/$defs/Shares"
+        },
+        "strategy_position_lot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "token_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "strategy_position_lot_id",
+        "token_id",
+        "shares",
+        "cost_usd",
+        "opened_at"
+      ]
+    },
+    "AccountRecoveryManifestView": {
+      "type": "object",
+      "properties": {
+        "account_recovery_manifest_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "assessment": {
+          "$ref": "#/$defs/AccountRecoveryAssessment"
+        },
+        "attempt_no": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "converged": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "evidence_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "finalized_block_hash": {
+          "type": "string"
+        },
+        "finalized_block_number": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "input": {
+          "$ref": "#/$defs/AccountRecoveryAssessmentInput"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "account_recovery_manifest_id",
+        "attempt_no",
+        "observed_at",
+        "finalized_block_number",
+        "finalized_block_hash",
+        "converged",
+        "input",
+        "assessment",
+        "evidence_hash",
+        "created_at"
+      ]
+    },
+    "AccountRecoveryMismatch": {
+      "description": "Typed reason an account recovery manifest cannot be sealed.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pause_incomplete"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "venue_snapshot_unstable"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "open_orders_present"
+            },
+            "order_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "order_ids"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "reserved_capital_present"
+            },
+            "reserved_usd": {
+              "$ref": "#/$defs/Usd"
+            }
+          },
+          "required": [
+            "kind",
+            "reserved_usd"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "chain_usd": {
+              "$ref": "#/$defs/Usd"
+            },
+            "clob_usd": {
+              "$ref": "#/$defs/Usd"
+            },
+            "kind": {
+              "type": "string",
+              "const": "collateral_mismatch"
+            }
+          },
+          "required": [
+            "kind",
+            "clob_usd",
+            "chain_usd"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "chain_shares": {
+              "$ref": "#/$defs/Shares"
+            },
+            "data_api_shares": {
+              "$ref": "#/$defs/Shares"
+            },
+            "kind": {
+              "type": "string",
+              "const": "position_source_mismatch"
+            },
+            "token_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "token_id",
+            "data_api_shares",
+            "chain_shares"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expected_shares": {
+              "$ref": "#/$defs/Shares"
+            },
+            "kind": {
+              "type": "string",
+              "const": "position_ledger_mismatch"
+            },
+            "token_id": {
+              "type": "string"
+            },
+            "venue_shares": {
+              "$ref": "#/$defs/Shares"
+            }
+          },
+          "required": [
+            "kind",
+            "token_id",
+            "expected_shares",
+            "venue_shares"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "token_metadata_missing"
+            },
+            "token_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "token_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "account_chain_execution_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "type": "string",
+              "const": "incident_execution_incomplete"
+            }
+          },
+          "required": [
+            "kind",
+            "account_chain_execution_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "account_chain_execution_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "candidate_lot_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "lot_allocation_required"
+            },
+            "sold_shares": {
+              "$ref": "#/$defs/Shares"
+            },
+            "token_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "account_chain_execution_id",
+            "token_id",
+            "sold_shares",
+            "candidate_lot_ids"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "account_chain_execution_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "type": "string",
+              "const": "lot_allocation_invalid"
+            }
+          },
+          "required": [
+            "kind",
+            "account_chain_execution_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "pending_settlement"
+            }
+          },
+          "required": [
+            "kind",
+            "count"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "account_chain_execution_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "type": "string",
+              "const": "clean_funder_required"
+            },
+            "role": {
+              "$ref": "#/$defs/AccountChainExecutionRole"
+            }
+          },
+          "required": [
+            "kind",
+            "account_chain_execution_id",
+            "role"
+          ]
+        }
+      ]
+    },
+    "AccountRecoverySellAllocation": {
+      "description": "Operator-owned allocation for one ambiguous external SELL across open lots.",
+      "type": "object",
+      "properties": {
+        "account_chain_execution_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "shares": {
+          "$ref": "#/$defs/Shares"
+        },
+        "strategy_position_lot_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "account_chain_execution_id",
+        "strategy_position_lot_id",
+        "shares"
+      ]
+    },
+    "AccountRecoveryTokenBalance": {
+      "description": "One venue or finalized-chain token balance used by account recovery.",
+      "type": "object",
+      "properties": {
+        "shares": {
+          "$ref": "#/$defs/Shares"
+        },
+        "token_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "token_id",
+        "shares"
+      ]
+    },
     "AccountSnapshotView": {
       "description": "Persisted decision-time venue account snapshot (immutable audit evidence).",
       "type": "object",
@@ -123,19 +1100,76 @@
         }
       ]
     },
-    "ApprovalStatus": {
-      "description": "Human or policy approval state attached to an order intent.",
+    "AuthorizationEvidence": {
+      "description": "Immutable provenance that granted an intent permission to submit.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "authorized_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "kind": {
+              "type": "string",
+              "const": "operator_approval"
+            },
+            "operator_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "operator_id",
+            "reason",
+            "authorized_at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "authorized_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "decision_policy_snapshot_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "type": "string",
+              "const": "active_policy"
+            },
+            "policy_hash": {
+              "type": "string",
+              "pattern": "^blake3:[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "decision_policy_snapshot_id",
+            "policy_hash",
+            "authorized_at"
+          ]
+        }
+      ]
+    },
+    "AuthorizationKind": {
+      "description": "Immutable source from which an entry intent may receive authority.",
       "type": "string",
       "enum": [
-        "not_required",
-        "pending",
-        "approved",
-        "rejected",
-        "expired"
+        "operator_approval",
+        "active_policy"
       ]
     },
     "BootstrapExitGuidance": {
-      "description": "Honest report-only exit guidance for an L2-free bootstrap model.\n\nThis intentionally contains no synthetic take-profit, stop-loss, trailing,\nor opportunistic-exit thresholds. It is not accepted by execution paths.",
+      "description": "Honest analysis-only exit guidance for an L2-free bootstrap model.\n\nThis intentionally contains no synthetic take-profit, stop-loss, trailing,\nor opportunistic-exit thresholds. It is not accepted by execution paths.",
       "type": "object",
       "properties": {
         "guidance": {
@@ -395,6 +1429,17 @@
         "reason"
       ]
     },
+    "DataQualityStatus": {
+      "description": "Point-in-time data quality classification.",
+      "type": "string",
+      "enum": [
+        "fresh",
+        "acceptable",
+        "degraded",
+        "stale",
+        "insufficient"
+      ]
+    },
     "DataQualitySummary": {
       "description": "Counts of candidates by data-quality classification.",
       "type": "object",
@@ -438,33 +1483,52 @@
         "insufficient_count"
       ]
     },
+    "EconomicExitEvidenceKind": {
+      "type": "string",
+      "enum": [
+        "none",
+        "policy_fill",
+        "full_bid_ladder",
+        "resolution_payout"
+      ]
+    },
+    "EconomicOutcomeCensorReason": {
+      "type": "string",
+      "enum": [
+        "source_unavailable",
+        "source_late",
+        "book_unavailable",
+        "book_stale",
+        "fee_unavailable",
+        "passive_trade_coverage_unavailable",
+        "replay_gap",
+        "contract_mismatch"
+      ]
+    },
     "EligibilitySummary": {
       "description": "Execution-eligibility roll-up across published recommendations.",
       "type": "object",
       "properties": {
-        "eligible_auto_execution": {
-          "description": "Eligible under auto-execution.",
+        "analysis_only": {
           "type": "integer",
           "format": "uint32",
           "minimum": 0
         },
-        "eligible_report_only": {
-          "description": "Eligible under report-only.",
+        "operator_approval": {
           "type": "integer",
           "format": "uint32",
           "minimum": 0
         },
-        "eligible_semi_auto": {
-          "description": "Eligible under semi-auto.",
+        "policy_automatic": {
           "type": "integer",
           "format": "uint32",
           "minimum": 0
         }
       },
       "required": [
-        "eligible_report_only",
-        "eligible_semi_auto",
-        "eligible_auto_execution"
+        "analysis_only",
+        "operator_approval",
+        "policy_automatic"
       ]
     },
     "EmptyReportReason": {
@@ -1200,41 +2264,155 @@
         "lineage_hash"
       ]
     },
-    "ExecutionEligibility": {
-      "description": "Per-recommendation execution eligibility across runtime modes.\n\nComputed and persisted with the recommendation. The create-intent and\nadmission flow consumes it. `eligible_modes` always contains\n[`QuantRuntimeMode::ReportOnly`] (a report is the report-only artifact).",
-      "type": "object",
-      "properties": {
-        "approval_required": {
-          "description": "Whether human approval is required.",
-          "type": "boolean"
-        },
-        "auto_policy_id": {
-          "description": "Auto-execution policy id, when applicable.",
-          "type": [
-            "string",
-            "null"
+    "ExecutionAuthorityCeiling": {
+      "description": "Maximum entry authority frozen on a recommendation or governance scope.",
+      "type": "string",
+      "enum": [
+        "analysis_only",
+        "operator_approval",
+        "policy_automatic"
+      ]
+    },
+    "ExecutionComparisonEvaluationView": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "actual_entry_latency_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "actual_entry_price": {
+              "$ref": "#/$defs/Price"
+            },
+            "actual_fee_usd": {
+              "$ref": "#/$defs/Usd"
+            },
+            "actual_fill_ratio": {
+              "type": "string"
+            },
+            "actual_net_return_bps": {
+              "$ref": "#/$defs/Bps"
+            },
+            "actual_vs_planned_price_bps": {
+              "$ref": "#/$defs/Bps"
+            },
+            "fee_delta_usd": {
+              "type": "string"
+            },
+            "fill_ratio_delta": {
+              "type": "string"
+            },
+            "latency_delta_ms": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "planned_entry_latency_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "planned_entry_price": {
+              "$ref": "#/$defs/Price"
+            },
+            "planned_fee_usd": {
+              "$ref": "#/$defs/Usd"
+            },
+            "planned_fill_ratio": {
+              "type": "string"
+            },
+            "planned_net_return_bps": {
+              "$ref": "#/$defs/Bps"
+            },
+            "policy_missed_return_bps": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Bps"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "return_delta_bps": {
+              "$ref": "#/$defs/Bps"
+            },
+            "status": {
+              "type": "string",
+              "const": "evaluated"
+            }
+          },
+          "required": [
+            "status",
+            "planned_entry_latency_ms",
+            "actual_entry_latency_ms",
+            "latency_delta_ms",
+            "planned_entry_price",
+            "actual_entry_price",
+            "actual_vs_planned_price_bps",
+            "planned_fill_ratio",
+            "actual_fill_ratio",
+            "fill_ratio_delta",
+            "planned_fee_usd",
+            "actual_fee_usd",
+            "fee_delta_usd",
+            "planned_net_return_bps",
+            "actual_net_return_bps",
+            "return_delta_bps"
           ]
         },
-        "eligible_modes": {
-          "description": "Runtime modes in which this recommendation is eligible for execution.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/QuantRuntimeMode"
-          }
-        },
-        "ineligibility_reasons": {
-          "description": "Reasons the recommendation is ineligible (empty when fully eligible).",
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/ExecutionComparisonNotEvaluableReasonView"
+            },
+            "status": {
+              "type": "string",
+              "const": "not_evaluable"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ]
+        }
+      ]
+    },
+    "ExecutionComparisonNotEvaluableReasonView": {
+      "type": "string",
+      "enum": [
+        "planned_entry_unavailable",
+        "planned_economics_censored",
+        "actual_baseline_unavailable",
+        "identity_mismatch"
+      ]
+    },
+    "ExecutionEligibility": {
+      "description": "Per-recommendation execution authority ceiling and immutable blockers.",
+      "type": "object",
+      "properties": {
+        "blockers": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/IneligibilityReason"
           }
+        },
+        "ceiling": {
+          "$ref": "#/$defs/ExecutionAuthorityCeiling"
+        },
+        "policy_binding": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
-        "eligible_modes",
-        "ineligibility_reasons",
-        "approval_required"
+        "ceiling",
+        "blockers"
       ]
     },
     "ExitMonitorObservationView": {
@@ -1710,7 +2888,7 @@
       ]
     },
     "ExposureBreakdown": {
-      "description": "Net USD exposure aggregated by market, event, and category.\n\nThe planner uses this as the starting point for `exposure_after` projections\nand cap-room checks. Built from [`PositionSnapshot`]s via\n[`ExposureBreakdown::from_positions`].",
+      "description": "Net USD exposure aggregated by market, event, and category.\n\nThe planner uses this as the starting point for `exposure_after` projections\nand cap-room checks. Built from [`VenuePositionSnapshot`]s via\n[`ExposureBreakdown::from_positions`].",
       "type": "object",
       "properties": {
         "per_category": {
@@ -1970,6 +3148,26 @@
         "allow_partial"
       ]
     },
+    "FinalizeAccountRecoveryRequest": {
+      "type": "object",
+      "properties": {
+        "expected_revision": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 1024,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "expected_revision",
+        "reason"
+      ]
+    },
     "FrozenMakerRebateSchedule": {
       "description": "Decision-time maker-rebate terms carried into the executable order.\n\nThis projection deliberately retains the independent Gamma identities and\ncurve terms needed to account for a later authenticated maker fill. It is\nnever reconstructed from a process-current catalog after the decision.",
       "type": "object",
@@ -2183,15 +3381,10 @@
       ]
     },
     "IneligibilityReason": {
-      "description": "Why a recommendation is ineligible for execution in a given mode.",
+      "description": "Why a recommendation cannot receive its maximum execution authority.",
       "oneOf": [
         {
-          "description": "The runtime mode is report-only.",
-          "type": "string",
-          "const": "report_only_mode"
-        },
-        {
-          "description": "The report-level order-count or USD automation cap was exhausted.",
+          "description": "The report-level policy-automatic order-count or USD cap was exhausted.",
           "type": "string",
           "const": "automation_cap_exceeded"
         }
@@ -2575,6 +3768,23 @@
         "delisted"
       ]
     },
+    "MissingFeatureDiagnostic": {
+      "description": "One required feature rejected by the governed data-quality policy.",
+      "type": "object",
+      "properties": {
+        "feature_name": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/NullReason"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "feature_name",
+        "reason"
+      ]
+    },
     "NextScaleOutProjection": {
       "description": "Exact next cumulative scale-out projection shared by monitor and read APIs.",
       "type": "object",
@@ -2617,6 +3827,23 @@
           "type": "string",
           "const": "frozen_reference_quantile"
         }
+      ]
+    },
+    "NullReason": {
+      "description": "Why a feature value is absent. Missing values are never silently zero.",
+      "type": "string",
+      "enum": [
+        "source_unavailable",
+        "stale_beyond_policy",
+        "out_of_valid_range",
+        "insufficient_history",
+        "not_applicable",
+        "leg_book_missing",
+        "finalized_execution_unavailable",
+        "insufficient_execution_history",
+        "insufficient_role_coverage",
+        "domain_source_unavailable",
+        "linkage_unresolved"
       ]
     },
     "OpportunisticExitPolicy": {
@@ -2684,26 +3911,18 @@
         }
       ]
     },
-    "OrderIntentKind": {
-      "type": "string",
-      "enum": [
-        "buy"
-      ]
-    },
     "OrderIntentStatus": {
       "description": "Governed execution-intent lifecycle state.",
       "type": "string",
       "enum": [
-        "draft",
-        "pending_approval",
-        "approved",
-        "approved_by_policy",
+        "pending_authorization",
+        "authorized",
         "admission_pending",
         "admission_rejected",
         "submitted",
         "partially_filled",
         "filled",
-        "rejected",
+        "authorization_rejected",
         "cancelled",
         "failed",
         "expired",
@@ -2720,28 +3939,25 @@
             "null"
           ]
         },
-        "approval_reason": {
-          "type": [
-            "string",
-            "null"
+        "authorization_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationEvidence"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
-        "approval_status": {
-          "$ref": "#/$defs/ApprovalStatus"
-        },
-        "approved_at": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "date-time"
-        },
-        "approved_by": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "uuid"
+        "authorization_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizationKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "condition_instance_id": {
           "type": "string",
@@ -2799,9 +4015,6 @@
           "type": "string",
           "format": "date-time"
         },
-        "intent_kind": {
-          "$ref": "#/$defs/OrderIntentKind"
-        },
         "last_signal_recheck_at": {
           "type": [
             "string",
@@ -2844,19 +4057,6 @@
             }
           ]
         },
-        "policy_hash": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^blake3:[0-9a-f]{64}$"
-        },
-        "policy_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "recommendation_id": {
           "type": "string",
           "format": "uuid"
@@ -2864,9 +4064,6 @@
         "risk_envelope_hash": {
           "type": "string",
           "pattern": "^blake3:[0-9a-f]{64}$"
-        },
-        "runtime_mode": {
-          "$ref": "#/$defs/QuantRuntimeMode"
         },
         "scale_out_state": {
           "$ref": "#/$defs/ScaleOutState"
@@ -2888,12 +4085,9 @@
       "required": [
         "order_intent_id",
         "recommendation_id",
-        "runtime_mode",
         "decision_policy_snapshot_id",
         "model_version_id",
-        "intent_kind",
         "status",
-        "approval_status",
         "condition_instance_id",
         "entry_order",
         "exit_policy",
@@ -3026,6 +4220,10 @@
         "partial_fill",
         "full_fill"
       ]
+    },
+    "PayoutRatio": {
+      "description": "Redemption value of one resolved outcome token, in collateral units.\n\nUnlike the historical unconstrained [`Probability`] and [`Price`] wrappers,\nthis type validates every untrusted boundary. A corrupt database value or\nwire payload outside the closed interval `0..=1` is rejected rather than\nbecoming a training label. Split resolutions such as `0.5` are preserved.",
+      "type": "string"
     },
     "PendingScaleOut": {
       "description": "One in-flight cumulative scale-out target.",
@@ -3409,9 +4607,6 @@
             }
           ]
         },
-        "runtime_mode": {
-          "$ref": "#/$defs/QuantRuntimeMode"
-        },
         "scenario_artifact_hash": {
           "type": [
             "string",
@@ -3469,7 +4664,6 @@
         "report_run_id",
         "report_kind",
         "decision_at",
-        "runtime_mode",
         "top_n",
         "status",
         "account_source",
@@ -3482,6 +4676,41 @@
         "represented_routes",
         "summary",
         "created_at"
+      ]
+    },
+    "QuantReportFunnelView": {
+      "type": "object",
+      "properties": {
+        "catalog_visible_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "conserved": {
+          "type": "boolean"
+        },
+        "published_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "recommendation_report_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReportFunnelStageView"
+          }
+        }
+      },
+      "required": [
+        "recommendation_report_id",
+        "catalog_visible_count",
+        "published_count",
+        "conserved",
+        "stages"
       ]
     },
     "QuantReportView": {
@@ -3555,9 +4784,6 @@
           ],
           "format": "date-time"
         },
-        "runtime_mode": {
-          "$ref": "#/$defs/QuantRuntimeMode"
-        },
         "scenario_artifact_id": {
           "type": [
             "string",
@@ -3608,7 +4834,6 @@
         "represented_routes",
         "report_kind",
         "status",
-        "runtime_mode",
         "decision_at",
         "top_n",
         "account_source",
@@ -3616,15 +4841,6 @@
         "published_recommendation_count",
         "total_hard_reserved_cash_usd",
         "created_at"
-      ]
-    },
-    "QuantRuntimeMode": {
-      "description": "Governed runtime mode for report generation and optional execution.",
-      "type": "string",
-      "enum": [
-        "report_only",
-        "semi_auto",
-        "auto_execution"
       ]
     },
     "RecommendationChangedFieldView": {
@@ -3738,6 +4954,344 @@
         "factor_breakdown"
       ]
     },
+    "RecommendationEconomicAmounts": {
+      "type": "object",
+      "properties": {
+        "entry_cost_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "entry_filled_shares": {
+          "$ref": "#/$defs/Shares"
+        },
+        "execution_fee_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "exit_proceeds_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "exited_shares": {
+          "$ref": "#/$defs/Shares"
+        },
+        "expected_maker_rebate_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "net_pnl_usd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Usd"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "net_return_bps": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolution_payout_usd": {
+          "$ref": "#/$defs/Usd"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "entry_filled_shares",
+        "exited_shares",
+        "entry_cost_usd",
+        "exit_proceeds_usd",
+        "resolution_payout_usd",
+        "execution_fee_usd",
+        "expected_maker_rebate_usd"
+      ]
+    },
+    "RecommendationEconomicEvidence": {
+      "type": "object",
+      "properties": {
+        "exit_evidence_kind": {
+          "$ref": "#/$defs/EconomicExitEvidenceKind"
+        },
+        "fee_covered": {
+          "type": "boolean"
+        },
+        "full_l2_covered": {
+          "type": "boolean"
+        },
+        "passive_trade_covered": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "replay_input_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "replay_output_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "exit_evidence_kind",
+        "full_l2_covered",
+        "fee_covered",
+        "replay_input_hash",
+        "replay_output_hash"
+      ]
+    },
+    "RecommendationEconomicOutcomePayload": {
+      "type": "object",
+      "properties": {
+        "amounts": {
+          "$ref": "#/$defs/RecommendationEconomicAmounts"
+        },
+        "detail": {
+          "$ref": "#/$defs/RecommendationEconomicStateDetail"
+        },
+        "evidence": {
+          "$ref": "#/$defs/RecommendationEconomicEvidence"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "detail",
+        "amounts",
+        "evidence"
+      ]
+    },
+    "RecommendationEconomicOutcomeState": {
+      "type": "string",
+      "enum": [
+        "entry_not_triggered",
+        "entry_unfilled",
+        "policy_exited",
+        "horizon_liquidated",
+        "resolved_before_horizon",
+        "censored"
+      ]
+    },
+    "RecommendationEconomicOutcomeView": {
+      "type": "object",
+      "properties": {
+        "available_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "decision_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "decision_policy_snapshot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "economic_tier_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "evidence_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "horizon_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "model_version_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "payload": {
+          "$ref": "#/$defs/RecommendationEconomicOutcomePayload"
+        },
+        "recommendation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "recommendation_report_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "replay_kernel_version": {
+          "type": "string"
+        },
+        "report_route_run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "research_profile_artifact_id": {
+          "type": "string",
+          "pattern": "^rpa:[a-z0-9_]+:[1-9][0-9]*:blake3:[0-9a-f]{64}$"
+        },
+        "source_available_until": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "state": {
+          "$ref": "#/$defs/RecommendationEconomicOutcomeState"
+        },
+        "trade_policy_artifact_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "recommendation_id",
+        "recommendation_report_id",
+        "report_route_run_id",
+        "decision_policy_snapshot_id",
+        "economic_tier_id",
+        "model_version_id",
+        "trade_policy_artifact_id",
+        "research_profile_artifact_id",
+        "state",
+        "decision_at",
+        "horizon_at",
+        "source_available_until",
+        "replay_kernel_version",
+        "payload",
+        "evidence_hash",
+        "available_at",
+        "created_at"
+      ]
+    },
+    "RecommendationEconomicStateDetail": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "entry_not_triggered"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "entry_unfilled"
+            },
+            "triggered_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "kind",
+            "triggered_at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "entered_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "exit_reason": {
+              "$ref": "#/$defs/ExitReason"
+            },
+            "exited_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "kind": {
+              "type": "string",
+              "const": "policy_exited"
+            }
+          },
+          "required": [
+            "kind",
+            "entered_at",
+            "exited_at",
+            "exit_reason"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "entered_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "kind": {
+              "type": "string",
+              "const": "horizon_liquidated"
+            },
+            "liquidated_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "kind",
+            "entered_at",
+            "liquidated_at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "entered_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "kind": {
+              "type": "string",
+              "const": "resolved_before_horizon"
+            },
+            "payout_ratio": {
+              "$ref": "#/$defs/PayoutRatio"
+            },
+            "resolved_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "kind",
+            "resolved_at",
+            "payout_ratio"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "censored_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "kind": {
+              "type": "string",
+              "const": "censored"
+            },
+            "reason": {
+              "$ref": "#/$defs/EconomicOutcomeCensorReason"
+            }
+          },
+          "required": [
+            "kind",
+            "censored_at",
+            "reason"
+          ]
+        }
+      ]
+    },
     "RecommendationEconomics": {
       "description": "Economic values displayed and ranked after global optimization.",
       "type": "object",
@@ -3773,6 +5327,42 @@
         "cvar_contribution_usd",
         "capital_occupancy_usd_hours",
         "marginal_portfolio_value_usd"
+      ]
+    },
+    "RecommendationExecutionComparisonView": {
+      "type": "object",
+      "properties": {
+        "comparison_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "economic_outcome_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "evaluation": {
+          "$ref": "#/$defs/ExecutionComparisonEvaluationView"
+        },
+        "policy_counterfactual_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "recommendation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "trajectory_artifact_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "recommendation_id",
+        "economic_outcome_hash",
+        "trajectory_artifact_hash",
+        "policy_counterfactual_hash",
+        "evaluation",
+        "comparison_hash"
       ]
     },
     "RecommendationExitPlan": {
@@ -3961,6 +5551,33 @@
         "risk_envelope"
       ]
     },
+    "ReconcileAccountRecoveryRequest": {
+      "type": "object",
+      "properties": {
+        "expected_revision": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 1024,
+          "minLength": 1
+        },
+        "sell_allocations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AccountRecoverySellAllocation"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "expected_revision",
+        "sell_allocations",
+        "reason"
+      ]
+    },
     "RedeemPolicy": {
       "description": "Whether a resolved hold-to-resolution lot is redeemed by the system or\nleft for an operator.",
       "oneOf": [
@@ -4133,6 +5750,354 @@
         "funnel_row_count",
         "funnel_row_chain_hash",
         "attempt_count"
+      ]
+    },
+    "ReportFunnelDiagnostics": {
+      "description": "Closed, reason-specific diagnostics for one terminal report-funnel row.\n\nThis document crosses the `ClickHouse` boundary as canonical JSON text, but\nits schema is fully owned by this system. `None` is explicit so callers do\nnot overload `{}` with several incompatible meanings.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "features": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "missing_model_features"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "features"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "feature_data_quality"
+            },
+            "missing_required": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MissingFeatureDiagnostic"
+              }
+            },
+            "status": {
+              "$ref": "#/$defs/DataQualityStatus"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "status",
+            "missing_required"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "planner_rejection"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "detail"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "economic_tier_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "type": "string",
+              "const": "profit_probability_floor"
+            },
+            "lower_profit_probability_bps": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "maximum_probability_interval_width_bps": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "minimum_profit_probability_bps": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "nominal_expected_net_usd": {
+              "$ref": "#/$defs/Usd"
+            },
+            "nominal_profit_probability_bps": {
+              "$ref": "#/$defs/Bps"
+            },
+            "probability_interval_width_bps": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "robust_expected_net_usd": {
+              "$ref": "#/$defs/Usd"
+            },
+            "scenario_artifact_hash": {
+              "type": "string",
+              "pattern": "^blake3:[0-9a-f]{64}$"
+            },
+            "scenario_artifact_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "economic_tier_id",
+            "scenario_artifact_id",
+            "scenario_artifact_hash",
+            "nominal_profit_probability_bps",
+            "lower_profit_probability_bps",
+            "minimum_profit_probability_bps",
+            "probability_interval_width_bps",
+            "maximum_probability_interval_width_bps",
+            "nominal_expected_net_usd",
+            "robust_expected_net_usd"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "insufficient_live_depth"
+            },
+            "limit_price": {
+              "$ref": "#/$defs/Price"
+            },
+            "required_usd": {
+              "$ref": "#/$defs/Usd"
+            },
+            "visible_usd": {
+              "$ref": "#/$defs/Usd"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "visible_usd",
+            "required_usd",
+            "limit_price"
+          ]
+        }
+      ]
+    },
+    "ReportFunnelMarketView": {
+      "type": "object",
+      "properties": {
+        "decision_policy_snapshot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "feature_vector_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "market_id": {
+          "type": "string"
+        },
+        "market_selection_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "model_run_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "model_version_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "primary_reason": {
+          "$ref": "#/$defs/ReportFunnelReason"
+        },
+        "primary_token_id": {
+          "type": "string"
+        },
+        "recommendation_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "recommendation_report_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "report_route_run_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "route": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuyModelRoute"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "row_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "secondary_diagnostics": {
+          "$ref": "#/$defs/ReportFunnelDiagnostics"
+        },
+        "signal_candidate_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "terminal_stage": {
+          "$ref": "#/$defs/ReportFunnelStage"
+        }
+      },
+      "required": [
+        "recommendation_report_id",
+        "market_selection_id",
+        "decision_policy_snapshot_id",
+        "market_id",
+        "event_id",
+        "primary_token_id",
+        "terminal_stage",
+        "primary_reason",
+        "secondary_diagnostics",
+        "row_hash"
+      ]
+    },
+    "ReportFunnelReason": {
+      "type": "string",
+      "enum": [
+        "not_open",
+        "category_disabled",
+        "route_not_activated",
+        "resolution_ambiguous",
+        "manually_blocked",
+        "insufficient_liquidity",
+        "spread_too_wide",
+        "stale_book",
+        "ingest_lag_exceeded",
+        "model_feature_unavailable",
+        "feature_data_quality_rejected",
+        "missing_model_output",
+        "score_below_floor",
+        "low_confidence",
+        "no_positive_signal",
+        "executable_entry_unavailable",
+        "execution_economics_unavailable",
+        "insufficient_live_depth",
+        "scenario_exit_capacity_insufficient",
+        "nominal_expected_net_below_floor",
+        "robust_expected_net_below_floor",
+        "profit_probability_below_floor",
+        "probability_interval_too_wide",
+        "liquidity_buffer_insufficient",
+        "single_recommendation_exposure_exceeded",
+        "existing_structural_conflict",
+        "not_selected_by_global_optimum",
+        "published"
+      ]
+    },
+    "ReportFunnelStage": {
+      "type": "string",
+      "enum": [
+        "catalog_visible",
+        "business_eligible",
+        "executable_data_eligible",
+        "feature_ready",
+        "model_scored",
+        "model_gate_passed",
+        "policy_ready",
+        "sizing_eligible",
+        "portfolio_funded",
+        "published"
+      ]
+    },
+    "ReportFunnelStageView": {
+      "type": "object",
+      "properties": {
+        "excluded_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "input_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "stage": {
+          "$ref": "#/$defs/ReportFunnelStage"
+        }
+      },
+      "required": [
+        "stage",
+        "input_count",
+        "output_count",
+        "excluded_count"
       ]
     },
     "ReportKind": {
@@ -4563,10 +6528,6 @@
       "description": "Hard risk bounds consumed by execution admission (not natural language).",
       "type": "object",
       "properties": {
-        "auto_execution_allowed": {
-          "description": "Whether auto-execution is permitted by this envelope.",
-          "type": "boolean"
-        },
         "cvar_contribution_usd": {
           "description": "This recommendation's exact contribution to portfolio `CVaR`.",
           "$ref": "#/$defs/Usd"
@@ -4612,10 +6573,6 @@
           "description": "Governed portfolio `CVaR` cap used by the exact solve.",
           "$ref": "#/$defs/Usd"
         },
-        "requires_approval": {
-          "description": "Whether human approval is required before execution.",
-          "type": "boolean"
-        },
         "risk_notes": {
           "description": "Free-form risk notes for the report.",
           "type": "array",
@@ -4635,10 +6592,142 @@
         "cvar_contribution_usd",
         "portfolio_cvar_cap_usd",
         "maximum_scenario_loss_cap_usd",
-        "requires_approval",
-        "auto_execution_allowed",
         "risk_notes",
         "envelope_hash"
+      ]
+    },
+    "RouteEconomicHealthEvidenceDocument": {
+      "type": "object",
+      "properties": {
+        "methodology_version": {
+          "type": "string"
+        },
+        "observation_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "uniqueness_weight_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "observation_hash",
+        "methodology_version"
+      ]
+    },
+    "RouteEconomicHealthState": {
+      "type": "string",
+      "enum": [
+        "insufficient_evidence",
+        "healthy",
+        "degraded",
+        "data_incomplete"
+      ]
+    },
+    "RouteEconomicHealthView": {
+      "type": "object",
+      "properties": {
+        "assessed_through": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "available_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "due_observation_count": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "effective_sample_size": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence": {
+          "$ref": "#/$defs/RouteEconomicHealthEvidenceDocument"
+        },
+        "evidence_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "feedback_policy_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "lower_confidence_return_bps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bps"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "research_profile_artifact_id": {
+          "type": "string",
+          "pattern": "^rpa:[a-z0-9_]+:[1-9][0-9]*:blake3:[0-9a-f]{64}$"
+        },
+        "route": {
+          "$ref": "#/$defs/BuyModelRoute"
+        },
+        "route_identity_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "state": {
+          "$ref": "#/$defs/RouteEconomicHealthState"
+        },
+        "usable_observation_count": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "weighted_mean_return_bps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bps"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "window_start": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "route",
+        "state",
+        "route_identity_hash",
+        "research_profile_artifact_id",
+        "feedback_policy_hash",
+        "assessed_through",
+        "due_observation_count",
+        "usable_observation_count",
+        "coverage",
+        "evidence",
+        "evidence_hash",
+        "available_at",
+        "created_at"
       ]
     },
     "ScaleOutState": {
@@ -4926,6 +7015,40 @@
         "capital_occupancy",
         "discounted_net_usd",
         "risk_net_usd"
+      ]
+    },
+    "SealAccountRecoveryRequest": {
+      "type": "object",
+      "properties": {
+        "account_recovery_manifest_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 1024,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "expected_revision",
+        "account_recovery_manifest_id",
+        "reason"
+      ]
+    },
+    "SettlementSubmissionKind": {
+      "description": "Transport and identity domain of a chain submission.",
+      "type": "string",
+      "enum": [
+        "direct_eoa",
+        "relayer",
+        "externally_observed"
       ]
     },
     "Shares": {
@@ -5290,6 +7413,13 @@
           "type": "string",
           "format": "date-time"
         },
+        "clob_trade_observation_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
         "created_at": {
           "type": "string",
           "format": "date-time"
@@ -5297,13 +7427,6 @@
         "evidence_hash": {
           "type": "string",
           "pattern": "^blake3:[0-9a-f]{64}$"
-        },
-        "execution_fill_id": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "uuid"
         },
         "kind": {
           "$ref": "#/$defs/VenueIncentiveKind"

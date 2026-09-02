@@ -10,9 +10,9 @@ Primary onboarding guide for AI agents and contributors. Active architecture liv
 2. Writes ClickHouse facts and data-quality signals (Phase 2+).
 3. Builds features, factors, and models (Phase 3+).
 4. Produces periodic **RecommendationReport** (TopN) as the primary artifact (Phase 4+).
-5. Optionally executes via **OrderIntent** under `semi_auto` or `auto_execution` (Phase 5+).
+5. Optionally executes via **OrderIntent** with operator approval or an active-policy authorization.
 
-Default mode: **`QuantRuntimeMode::ReportOnly`** — the report is the final artifact (human places orders manually); the system never signs/submits orders. **`ReportOnly` is NOT dry-run**: report sizing is built on the **real venue account** (CLOB collateral + Data API positions), so a private key (for reads / L2 read credentials) and a `funder` address are required to generate reports. Private keys are used for **signing/submitting** orders only in `SemiAuto`/`AutoExecution`. Account truth is **credential-gated, not mode-gated**; missing credentials → report generation fails closed (no simulation/no configured-budget fallback).
+Reports are always production-sized from the **real venue account** (CLOB collateral + Data API positions); there is no simulated account truth or configured-budget fallback. The safe entry default is `EntryAuthorizationPolicy::OperatorApprovalRequired`. `PolicyAutomatic` is a governed capability upgrade that requires fresh Route economic health and the full execution preflight. Missing account credentials fail closed.
 
 ## 2. Hard Boundaries
 
@@ -20,7 +20,7 @@ Default mode: **`QuantRuntimeMode::ReportOnly`** — the report is the final art
 |------|--------|
 | Platform | Polymarket only — no `VenueId`, no multi-exchange |
 | Primary artifact | `RecommendationReport` / `Recommendation` — not `ScoredOpportunity` |
-| Runtime modes | `ReportOnly`, `SemiAuto`, `AutoExecution` — **no** DryRun/Paper/Live |
+| Entry authority | `OperatorApprovalRequired` or `PolicyAutomatic`; report generation, kill switch and settlement writes are independent owners |
 | Compatibility | Zero compatibility shim, forwarding re-export, legacy parser, or dual write |
 | Money | `rust_decimal` newtypes — never `f64` for prices/USD/shares |
 
@@ -48,15 +48,20 @@ quant-pivot/
 
 **Phase 0 deleted:** `quant-pivot-algorithm`, old `quant-pivot-risk`, `quant-pivot-control`.
 
-## 4. Phase 0 Runtime (Current)
+## 4. Current Runtime Composition
 
 `AppContext` bundles:
 
 - **InfraBundle** — DB pools, Redis, ClickHouse, metrics, alerts
-- **DataBundle** — BookStore, MarketRegistry, DataPipeline (ingest only)
-- **GovernanceBundle** — RuntimeConfigStore, RuntimeModeHandle
+- **DataBundle** — BookStore, MarketRegistry, DataPipeline and canonical source ingestion
+- **GovernanceBundle** — RuntimeConfigStore, RuntimeControlHandle
+- **ResearchBundle** — feature/factor/model, parity, feedback and governed promotion
+- **AccountBundle** — real venue account truth, equity and recovery state
+- **ReportBundle** — global portfolio reports and economic-feedback ownership
+- **ExecutionBundle** — intent, admission, entry/exit, reconciliation and settlement workers
 
-No detection funnel, no FOK execution hot path, no post-trade relay.
+Entry authorization, kill switch, and settlement-write policy remain independent
+fail-closed authorities; no global runtime-mode axis exists.
 
 ## 4.1 Performance architecture invariants
 
@@ -180,7 +185,7 @@ HTTP status mapping stays in **`quant-pivot-web/src/error.rs`**.
 |-----------|--------|
 | `ReportError` | Report pipeline invariants / contract violations |
 | `InfraError` | Bootstrap, metrics, channels, web server runtime |
-| `ControlError` | Runtime mode / config apply / book subscriptions |
+| `ControlError` | Governed runtime controls / config apply / book subscriptions |
 | `QueryError` | Inbound API time-window validation |
 
 `QuantError` has no catch-all string variant. Every platform failure must enter through a
@@ -205,7 +210,7 @@ Idempotent writes (e.g. attribution final insert) return repository **outcome en
 | Forbidden | Instead |
 |-----------|---------|
 | `EndgameDetector`, `ScoredOpportunity`, `OpportunityPipeline` | quant report pipeline types |
-| `ExecutionMode::DryRun/Paper/Live` | `QuantRuntimeMode` |
+| Any global runtime/execution mode axis | `EntryAuthorizationPolicy` + kill switch + independent settlement write policy |
 | `pub use` compatibility re-exports | explicit module paths |
 | bare `Json` / `serde_json::Value` persistence | relation/typed columns, or canonical `FromJsonQueryResult` document |
 | Split same-root imports with the same visibility/attributes | one tree: `use std::{cmp::Ordering, panic::{self, AssertUnwindSafe}};` |
@@ -223,7 +228,10 @@ Idempotent writes (e.g. attribution final insert) return repository **outcome en
 
 ## 9. Implementation Phases
 
-Follow [`docs/plans/quant-pivot/07-implementation-phases.md`](docs/plans/quant-pivot/07-implementation-phases.md). Do not skip Phase exit criteria.
+Current implementation state and exit criteria are owned by
+[`docs/plans/quant-pivot/phase-12/12.1-implementation-ledger.md`](docs/plans/quant-pivot/phase-12/12.1-implementation-ledger.md).
+Historical phase plans and dated audits are design/deletion context only; they must not be used to
+recover the active task or to require a real-venue canary for Implementation Closure.
 
 ## 10. Reference Index
 
@@ -232,5 +240,6 @@ Follow [`docs/plans/quant-pivot/07-implementation-phases.md`](docs/plans/quant-p
 | [quant-pivot/README.md](docs/plans/quant-pivot/README.md) | Architecture index |
 | [00-quant-pivot-architecture.md](docs/plans/quant-pivot/00-quant-pivot-architecture.md) | Target architecture |
 | [02-crate-refactor-and-deletion-plan.md](docs/plans/quant-pivot/02-crate-refactor-and-deletion-plan.md) | Deletion inventory |
+| [Phase 12 implementation ledger](docs/plans/quant-pivot/phase-12/12.1-implementation-ledger.md) | Current implementation state and evidence |
 | [quant-pivot-domain.mdc](.cursor/rules/quant-pivot-domain.mdc) | Domain rules |
 | [quant-pivot-rust-style.mdc](.cursor/rules/quant-pivot-rust-style.mdc) | Rust style (still applies) |

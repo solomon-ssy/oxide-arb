@@ -142,7 +142,7 @@ request_timeout_ms = 15000
 # Purpose: Zeroizing Polymarket relayer API key used only by the authenticated submission adapter.
 # Requirement: Optional; recommended value: no implicit default.
 # Type/unit/range: String; unitless; write_only.
-# Validation/cross-field contract: [deploy.relayer.credentials] When When runtime mode permits order submission and wallet_kind is proxy, gnosis_safe, or deposit_wallet: Both relayer API key and relayer API-key address are required.
+# Validation/cross-field contract: [deploy.relayer.credentials] When When an authorized intent may submit and wallet_kind is proxy, gnosis_safe, or deposit_wallet: Both relayer API key and relayer API-key address are required.
 # Operational impact: Changes quant-pivot-api Polymarket relayer authentication and submission adapter; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-api Polymarket relayer authentication and submission adapter
 # Apply: process restart required; startup validation is fail-closed.
@@ -155,7 +155,7 @@ request_timeout_ms = 15000
 # Purpose: Ethereum address that owns the relayer API key (the signer EOA address).
 # Requirement: Optional; recommended value: no implicit default.
 # Type/unit/range: String; unitless; no additional scalar restriction beyond the serialized Rust type.
-# Validation/cross-field contract: [deploy.relayer.credentials] When When runtime mode permits order submission and wallet_kind is proxy, gnosis_safe, or deposit_wallet: Both relayer API key and relayer API-key address are required.
+# Validation/cross-field contract: [deploy.relayer.credentials] When When an authorized intent may submit and wallet_kind is proxy, gnosis_safe, or deposit_wallet: Both relayer API key and relayer API-key address are required.
 # Operational impact: Changes quant-pivot-api Polymarket relayer authentication and submission adapter; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-api Polymarket relayer authentication and submission adapter
 # Apply: process restart required; startup validation is fail-closed.
@@ -462,7 +462,7 @@ poll_secs = 30
 # Purpose: HTTP connect timeout in milliseconds.
 # Requirement: Required; recommended value: 10000.
 # Type/unit/range: Integer; milliseconds; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -473,29 +473,51 @@ connect_timeout_ms = 10000
 # Purpose: Per-request timeout in milliseconds.
 # Requirement: Required; recommended value: 60000.
 # Type/unit/range: Integer; milliseconds; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
 request_timeout_ms = 60000
-# Field: market_data.finalized_exchange_history.max_response_bytes
-# Purpose: Maximum decoded response body accepted from either provider.
+# Field: market_data.finalized_exchange_history.max_hypersync_response_body_bytes
+# Purpose: Maximum streamed JSON response body accepted from `HyperSync`.
 # Requirement: Required; recommended value: 67108864.
 # Type/unit/range: Integer; bytes; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
-max_response_bytes = 67108864
+max_hypersync_response_body_bytes = 67108864
+# Field: market_data.finalized_exchange_history.max_rpc_response_body_bytes
+# Purpose: Maximum streamed JSON-RPC response body accepted from the attestor.
+# Requirement: Required; recommended value: 67108864.
+# Type/unit/range: Integer; bytes; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+max_rpc_response_body_bytes = 67108864
+# Field: market_data.finalized_exchange_history.max_canonical_chunk_bytes
+# Purpose: Maximum max-width canonical JSON header/log array bytes retained for one chunk.
+# Requirement: Required; recommended value: 67108864.
+# Type/unit/range: Integer; bytes; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+max_canonical_chunk_bytes = 67108864
 # Field: market_data.finalized_exchange_history.min_blocks_per_chunk
 # Purpose: Minimum inclusive chunk span after adaptive contraction.
 # Requirement: Required; recommended value: 100.
 # Type/unit/range: Integer; blocks; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -503,10 +525,10 @@ max_response_bytes = 67108864
 # Variants: not applicable.
 min_blocks_per_chunk = 100
 # Field: market_data.finalized_exchange_history.max_blocks_per_chunk
-# Purpose: Maximum inclusive chunk span after adaptive expansion.
+# Purpose: Maximum inclusive chunk span after adaptive expansion (at most 50,000).
 # Requirement: Required; recommended value: 2000.
 # Type/unit/range: Integer; blocks; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -517,7 +539,7 @@ max_blocks_per_chunk = 2000
 # Purpose: First retry delay in milliseconds.
 # Requirement: Required; recommended value: 500.
 # Type/unit/range: Integer; milliseconds; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -528,7 +550,7 @@ retry_initial_ms = 500
 # Purpose: Maximum retry delay in milliseconds.
 # Requirement: Required; recommended value: 30000.
 # Type/unit/range: Integer; milliseconds; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -539,7 +561,7 @@ retry_max_ms = 30000
 # Purpose: Maximum attempts per provider pair before the frontier fails closed.
 # Requirement: Required; recommended value: 8.
 # Type/unit/range: Integer; count; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -591,10 +613,10 @@ activation_frontier_days = 33
 # Variants: not applicable.
 retention_frontier_days = 200
 # Field: market_data.finalized_exchange_history.hot_window_blocks_per_tick
-# Purpose: Maximum blocks assigned to the activation frontier per scheduling turn.
+# Purpose: Maximum blocks assigned to activation per turn (at most 1,500,000).
 # Requirement: Required; recommended value: 50000.
 # Type/unit/range: Integer; blocks; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -602,10 +624,10 @@ retention_frontier_days = 200
 # Variants: not applicable.
 hot_window_blocks_per_tick = 50000
 # Field: market_data.finalized_exchange_history.full_history_blocks_per_tick
-# Purpose: Maximum blocks assigned to the retention frontier per scheduling turn.
+# Purpose: Maximum blocks assigned to retention per turn (at most 1,500,000).
 # Requirement: Required; recommended value: 5000.
 # Type/unit/range: Integer; blocks; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -616,7 +638,7 @@ full_history_blocks_per_tick = 5000
 # Purpose: Maximum rows written in one fact batch.
 # Requirement: Required; recommended value: 1000.
 # Type/unit/range: Integer; count; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -675,7 +697,7 @@ provider_id = "publicnode_polygon_archive"
 # Purpose: Maximum inclusive block span in one `eth_getLogs` request.
 # Requirement: Required; recommended value: 10.
 # Type/unit/range: Integer; blocks; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -686,7 +708,7 @@ max_blocks_per_log_request = 10
 # Purpose: Maximum concurrent `eth_getLogs` subrequests within one logical chunk.
 # Requirement: Required; recommended value: 2.
 # Type/unit/range: Integer; count; minimum=0.
-# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, HyperSync/RPC response-body, canonical-chunk, attestor request span/concurrency, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -6237,6 +6259,17 @@ statement_cache_capacity = 256
 application_name = "quant-pivot"
 
 [db.clickhouse]
+# Field: db.clickhouse.resource_governance
+# Purpose: Ownership boundary for server-level resource governance. Default: `self_managed`.
+# Requirement: Required; recommended value: "self_managed".
+# Type/unit/range: Variant; unitless; enum=provider_managed|self_managed.
+# Validation/cross-field contract: No additional semantic or cross-field rule beyond the scalar and type contract.
+# Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: provider_managed, self_managed.
+resource_governance = "self_managed"
 # Field: db.clickhouse.deployment_id
 # Purpose: Stable deployment identity included in signed research evidence.
 # Requirement: Required; recommended value: "local-development".
@@ -6306,8 +6339,8 @@ password = "REPLACE_WITH_DB_CLICKHOUSE_PASSWORD"
 # Field: db.clickhouse.flush_interval_secs
 # Purpose: Max age (seconds) of a partial batch before it is flushed. Lower = fresher analytics, more insert requests. Default: `5`.
 # Requirement: Required; recommended value: 5.
-# Type/unit/range: Integer; seconds; minimum=0.
-# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: The batch size, flush interval, and concurrent insert limit must each be greater than zero.
+# Type/unit/range: Integer; seconds; minimum=1, maximum=5.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
 # Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
 # Apply: process restart required; startup validation is fail-closed.
@@ -6317,8 +6350,8 @@ flush_interval_secs = 5
 # Field: db.clickhouse.batch_size
 # Purpose: Rows per insert batch; a full batch flushes immediately. `ClickHouse` favors large batches — sized for the L2 tick feed (~3K rows/s peaks). Default: `5000`.
 # Requirement: Required; recommended value: 5000.
-# Type/unit/range: Integer; count; minimum=0.
-# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: The batch size, flush interval, and concurrent insert limit must each be greater than zero.
+# Type/unit/range: Integer; count; minimum=1, maximum=5000.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
 # Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
 # Apply: process restart required; startup validation is fail-closed.
@@ -6326,16 +6359,143 @@ flush_interval_secs = 5
 # Variants: not applicable.
 batch_size = 5000
 # Field: db.clickhouse.max_concurrent_inserts
-# Purpose: Maximum concurrent insert operations (semaphore). Prevents overwhelming the server under high tick ingestion rates. Default: `8`.
+# Purpose: Maximum concurrent insert operations. One permit is reserved for the canonical L2 ledger; the remainder serve bulk/telemetry writes. Must be at least two. Default: `8`.
 # Requirement: Required; recommended value: 8.
-# Type/unit/range: Integer; count; minimum=0.
-# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: The batch size, flush interval, and concurrent insert limit must each be greater than zero.
+# Type/unit/range: Integer; count; minimum=2.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
 # Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
 max_concurrent_inserts = 8
+# Field: db.clickhouse.max_inflight_write_bytes
+# Purpose: Process-wide byte budget retained by variable-size bulk write queues. Default: 64 MiB.
+# Requirement: Required; recommended value: 67108864.
+# Type/unit/range: Integer; bytes; minimum=1048576, maximum=1073741824.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
+# Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+max_inflight_write_bytes = 67108864
+# Field: db.clickhouse.max_concurrent_reads
+# Purpose: Maximum analytical reads admitted concurrently by the process-wide `ClickHousePool`. Every admitted read is also capped by `max_threads_per_query`; together these bounds reserve server capacity for the canonical ledger writer. Default: `4`.
+# Requirement: Required; recommended value: 4.
+# Type/unit/range: Integer; count; minimum=1, maximum=32.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
+# Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+max_concurrent_reads = 4
+# Field: db.clickhouse.max_threads_per_query
+# Purpose: Maximum `ClickHouse` worker threads available to any single query or insert. This prevents concurrent research reads from exhausting the server thread pool needed by canonical ledger writes. Default: `2`.
+# Requirement: Required; recommended value: 2.
+# Type/unit/range: Integer; count; minimum=1, maximum=64.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
+# Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+max_threads_per_query = 2
+
+[db.clickhouse.io]
+# Field: db.clickhouse.io.query_timeout_ms
+# Purpose: Total admission + response deadline for one runtime analytical query.
+# Requirement: Required; recommended value: 30000.
+# Type/unit/range: Integer; milliseconds; minimum=1, maximum=300000.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
+# Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+query_timeout_ms = 30000
+# Field: db.clickhouse.io.maintenance_timeout_ms
+# Purpose: Total deadline for each bootstrap, verify, or maintenance query.
+# Requirement: Required; recommended value: 120000.
+# Type/unit/range: Integer; milliseconds; minimum=1, maximum=600000.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
+# Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+maintenance_timeout_ms = 120000
+
+[db.clickhouse.io.critical_insert]
+# Field: db.clickhouse.io.critical_insert.send_timeout_ms
+# Purpose: Maximum time to flush one encoded chunk to the socket.
+# Requirement: Required; recommended value: 300.
+# Type/unit/range: Integer; milliseconds; minimum=1, maximum=3899.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
+# Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+send_timeout_ms = 300
+# Field: db.clickhouse.io.critical_insert.end_timeout_ms
+# Purpose: Maximum time to receive the server's durable insert response.
+# Requirement: Required; recommended value: 1200.
+# Type/unit/range: Integer; milliseconds; minimum=1, maximum=3899.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
+# Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+end_timeout_ms = 1200
+# Field: db.clickhouse.io.critical_insert.attempt_timeout_ms
+# Purpose: Total metadata + all chunks + response deadline for one attempt.
+# Requirement: Required; recommended value: 1800.
+# Type/unit/range: Integer; milliseconds; minimum=1, maximum=3899.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
+# Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+attempt_timeout_ms = 1800
+
+[db.clickhouse.io.bulk_insert]
+# Field: db.clickhouse.io.bulk_insert.send_timeout_ms
+# Purpose: Maximum time to flush one encoded chunk to the socket.
+# Requirement: Required; recommended value: 750.
+# Type/unit/range: Integer; milliseconds; minimum=1, maximum=3899.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
+# Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+send_timeout_ms = 750
+# Field: db.clickhouse.io.bulk_insert.end_timeout_ms
+# Purpose: Maximum time to receive the server's durable insert response.
+# Requirement: Required; recommended value: 1750.
+# Type/unit/range: Integer; milliseconds; minimum=1, maximum=3899.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
+# Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+end_timeout_ms = 1750
+# Field: db.clickhouse.io.bulk_insert.attempt_timeout_ms
+# Purpose: Total metadata + all chunks + response deadline for one attempt.
+# Requirement: Required; recommended value: 3000.
+# Type/unit/range: Integer; milliseconds; minimum=1, maximum=3899.
+# Validation/cross-field contract: [deploy.clickhouse.writer] When Always: Batch count/age, writer byte budgets, read concurrency, per-query threads, and all ClickHouse I/O deadlines are bounded. Insert send plus end fits within one attempt; the complete three-attempt retry window remains below the durable ACK ceiling, one-second derived flush plus retry plus scheduling margin fits the shared receipt deadline, configured flush plus retry plus margin fits the shutdown capacity budget, and a critical attempt remains below publication quarantine.
+# Operational impact: Changes quant-pivot-storage ClickHouse fact, lineage, and analytics pools; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-storage ClickHouse fact, lineage, and analytics pools
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+attempt_timeout_ms = 3000
 
 [cache]
 # Field: cache.operation_timeout_ms
@@ -6620,7 +6780,7 @@ deadline_ms = 15000
 # Purpose: Base64URL-no-pad 32-byte HS256 signing-key source.
 # Requirement: Required; recommended value: "".
 # Type/unit/range: String; unitless; write_only.
-# Validation/cross-field contract: [deploy.web.jwt-signing-key] When Every runtime mode: The value must be a Base64URL-no-pad encoded 32-byte HS256 signing key. [deploy.evidence.key-separation] When When the evidence-attestation signing key is configured: The evidence-attestation signing key must be cryptographically independent from the JWT signing key.
+# Validation/cross-field contract: [deploy.web.jwt-signing-key] When Every deployment: The value must be a Base64URL-no-pad encoded 32-byte HS256 signing key. [deploy.evidence.key-separation] When When the evidence-attestation signing key is configured: The evidence-attestation signing key must be cryptographically independent from the JWT signing key.
 # Operational impact: Changes quant-pivot-web authentication, token verification, and password-crypto boundary; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-web authentication, token verification, and password-crypto boundary
 # Apply: process restart required; startup validation is fail-closed.
@@ -6762,7 +6922,7 @@ report_expire_sweep_secs = 300
 # Variants: not applicable.
 intent_expire_sweep_secs = 60
 # Field: quant.workers.execution_dispatch_secs
-# Purpose: Auto-execution dispatcher poll-backstop cadence (seconds). The dispatcher is wake-driven: a fresh `ApprovedByPolicy` approval nudges it for near-immediate submit. This cadence is the **backstop** poll that catches missed wakes, retries admission defers, and drains crash-recovery work. The durable queue is Postgres (`ApprovedByPolicy` rows under a per-intent row lock). The current deployment runs a single dispatcher; repository locking remains authoritative across processes.
+# Purpose: Authorized-intent dispatcher poll-backstop cadence (seconds). The dispatcher is wake-driven: a freshly `Authorized` intent nudges it for near-immediate submit. This cadence is the **backstop** poll that catches missed wakes, retries admission defers, and drains crash-recovery work. The durable queue is Postgres (`Authorized` rows under a per-intent row lock). The current deployment runs a single dispatcher; repository locking remains authoritative across processes.
 # Requirement: Required; recommended value: 10.
 # Type/unit/range: Integer; seconds; minimum=0.
 # Validation/cross-field contract: No additional semantic or cross-field rule beyond the scalar and type contract.
@@ -6819,7 +6979,7 @@ venue_incentive_lookback_days = 35
 
 [quant.account]
 # Field: quant.account.funder
-# Purpose: Polymarket proxy/funder address used as `user=<funder>` for Data API position reads. Required to generate reports (all modes).
+# Purpose: Polymarket proxy/funder address used as `user=<funder>` for Data API position reads. Required to generate real-account-sized reports.
 # Requirement: Optional; recommended value: no implicit default.
 # Type/unit/range: String; unitless; no additional scalar restriction beyond the serialized Rust type.
 # Validation/cross-field contract: [deploy.account-read-credentials] When Whenever the production account is read: A private key and non-empty funder address are required because reports freeze real collateral and position state; account reads are not simulation.
@@ -6832,13 +6992,13 @@ funder = "REPLACE_WITH_POLYMARKET_FUNDER_ADDRESS"
 # Field: quant.account.wallet_kind
 # Purpose: Wallet shape for money-moving on-chain operations.
 # Requirement: Required; recommended value: "eoa".
-# Type/unit/range: Variant; unitless; no additional scalar restriction beyond the serialized Rust type.
-# Validation/cross-field contract: [deploy.relayer.credentials] When When runtime mode permits order submission and wallet_kind is proxy, gnosis_safe, or deposit_wallet: Both relayer API key and relayer API-key address are required.
+# Type/unit/range: Variant; unitless; enum=deposit_wallet|eoa|gnosis_safe|proxy.
+# Validation/cross-field contract: [deploy.relayer.credentials] When When an authorized intent may submit and wallet_kind is proxy, gnosis_safe, or deposit_wallet: Both relayer API key and relayer API-key address are required.
 # Operational impact: Changes quant-pivot-core credential-gated venue account snapshot and report capital freeze; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core credential-gated venue account snapshot and report capital freeze
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
-# Variants: variant_0, variant_1, variant_2, variant_3.
+# Variants: deposit_wallet, eoa, gnosis_safe, proxy.
 wallet_kind = "eoa"
 
 [quant.research_jobs]

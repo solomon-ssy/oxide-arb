@@ -1,18 +1,30 @@
 //! Official-SDK order metadata and FAK wire semantics over a local CLOB stub.
 
-use std::time::Duration;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use alloy::primitives::Address;
 use chrono::{NaiveDate, Utc};
-use polymarket_client_sdk_v2::clob::types::SignatureType;
-use quant_pivot_error::api::ApiError;
+use polymarket_client_sdk_v2::{
+    POLYGON,
+    clob::types::{OrderPayload, Side as SdkSide, SignatureType},
+    contract_config,
+    types::U256,
+};
+use quant_pivot_error::api::{ApiError, ClobFundingDeficit, ClobOrderError};
 use quant_pivot_models::{
     config::PolymarketConfig,
+    domain::order::PolymarketOrderRules,
     enums::{
-        common::{OrderType, TickSize},
+        common::{OrderType, Side, TickSize},
         execution::{VenueOrderStatus, VenueTradeStatus},
     },
-    types::{EvmAddress, EvmTransactionHash, MarketId, OrderId, VenueTradeId},
+    types::{
+        ContentHash, EvmAddress, EvmTransactionHash, EvmUint256, MarketId, OrderId, Shares, Usd,
+        VenueOrderAmount, VenueTradeId,
+    },
 };
 use rust_decimal_macros::dec;
 use serde_json::Value;
@@ -22,46 +34,30 @@ use wiremock::{
 };
 
 use super::support::{
-    clob_client_order_timeout, deposit_wallet_clob_client, funder_clob_client,
-    mount_clob_balance_requirements, mount_clob_requirements, mount_derive_api_key,
-    mount_post_order, test_clob_client, test_order_request, test_signer, test_token_id,
+    TEST_CONDITION_ID, clob_client_order_timeout, complete_market_info_payload,
+    deposit_wallet_clob_client, funder_clob_client, mount_clob_balance_requirements,
+    mount_clob_requirements, mount_clob_route_requirements, mount_derive_api_key, mount_post_order,
+    test_clob_client, test_market_info_hash, test_order_request, test_signer, test_token_id,
+    unbound_test_signer,
 };
 use crate::{
-    clob::{ClobClient, OrderSubmissionStage},
+    clob::{
+        ClobClient, ClobSide, OrderSubmissionStage, VenueFundingAsset, VenueFundingEvidence,
+        WireTokenId,
+    },
     wallet::WalletTopology,
 };
 
-const CONDITION_ID: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
 const TRANSACTION_HASH_1: &str =
     "0x1111111111111111111111111111111111111111111111111111111111111111";
 const TRANSACTION_HASH_2: &str =
     "0x2222222222222222222222222222222222222222222222222222222222222222";
 
-fn complete_market_info_payload() -> Value {
-    serde_json::json!({
-        "c": CONDITION_ID,
-        "t": [
-            { "t": test_token_id().as_str(), "o": "Yes" },
-            { "t": "2", "o": "No" }
-        ],
-        "mts": "0.01",
-        "mos": "5",
-        "nr": false,
-        "itode": false,
-        "ibce": false,
-        "oas": 0,
-        "fd": { "r": "0.25", "e": 2, "to": true },
-        "mbf": 0,
-        "tbf": 0,
-        "rfqe": false
-    })
-}
-
 fn trade_payload(id: &str, status: &str, transaction_hash: &str) -> Value {
     serde_json::json!({
         "id": id,
         "taker_order_id": "venue-fak-async",
-        "market": CONDITION_ID,
+        "market": TEST_CONDITION_ID,
         "asset_id": test_token_id().as_str(),
         "side": "BUY",
         "size": "50",
@@ -95,7 +91,7 @@ fn order_payload(order_id: &str, status: &str, trade_ids: &[&str]) -> Value {
         "status": status,
         "owner": "ffffffff-ffff-ffff-ffff-ffffffffffff",
         "maker_address": "0x2222222222222222222222222222222222222222",
-        "market": CONDITION_ID,
+        "market": TEST_CONDITION_ID,
         "asset_id": test_token_id().as_str(),
         "side": "BUY",
         "original_size": "50",
@@ -107,6 +103,17 @@ fn order_payload(order_id: &str, status: &str, trade_ids: &[&str]) -> Value {
         "expiration": "1705322396",
         "order_type": "FAK"
     })
+}
+
+async fn assert_no_post(server: &MockServer) {
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("request ledger")
+            .iter()
+            .all(|request| request.url.path() != "/order")
+    );
 }
 
 #[tokio::test]
@@ -150,6 +157,34 @@ async fn connect_rejects_v1_protocol() {
 }
 
 #[tokio::test]
+async fn connect_binds_signer_chain() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "version": 2
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let signer = unbound_test_signer();
+    assert_eq!(signer.inner().chain_id(), None);
+    let topology = WalletTopology::eoa(signer.address());
+    let config = PolymarketConfig {
+        chain_id: POLYGON,
+        clob_base_url: server.uri(),
+        ..PolymarketConfig::default()
+    };
+
+    let client = ClobClient::connect(signer, &config, &topology)
+        .await
+        .expect("unbound keystore signer must be bound during connect");
+
+    assert_eq!(client.signer.inner().chain_id(), Some(POLYGON));
+}
+
+#[tokio::test]
 async fn sdk_metadata_matches_endpoints() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
@@ -160,7 +195,94 @@ async fn sdk_metadata_matches_endpoints() {
     let metadata = client.order_metadata(&token_id).await.expect("metadata");
 
     assert_eq!(metadata.tick_size, TickSize::Hundredth);
+    assert_eq!(metadata.minimum_order_size, Shares::new(dec!(5)));
+    assert_eq!(metadata.market_id, MarketId::new(TEST_CONDITION_ID));
+    assert_eq!(metadata.token_id, token_id);
     assert!(!metadata.neg_risk);
+}
+
+#[tokio::test]
+async fn book_identity_blocks() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    Mock::given(method("GET"))
+        .and(path("/book"))
+        .and(query_param("token_id", token_id.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "market": TEST_CONDITION_ID,
+            "asset_id": U256::from(1_u8),
+            "timestamp": "1705322096000",
+            "hash": "wrong-book",
+            "bids": [],
+            "asks": [],
+            "min_order_size": "5",
+            "neg_risk": false,
+            "tick_size": "0.01"
+        })))
+        .mount(&server)
+        .await;
+    let client = test_clob_client(&server).await;
+
+    let error = client
+        .order_metadata(&token_id)
+        .await
+        .expect_err("book asset identity mismatch must fail closed");
+
+    assert!(matches!(
+        error,
+        ApiError::ClobOrder(ClobOrderError::IdentityMismatch {
+            field: "book.asset_id",
+            ..
+        })
+    ));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn raw_balance_normalizes() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_requirements(&server, &token_id).await;
+    let client = test_clob_client(&server).await;
+
+    assert_eq!(
+        client.collateral_balance().await.expect("collateral"),
+        Usd::new(dec!(10000))
+    );
+}
+
+#[tokio::test]
+async fn exact_funding_threshold() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_route_requirements(&server, &token_id, false, "101000000", Some("101000000")).await;
+    let client = test_clob_client(&server).await;
+    let metadata = client
+        .order_metadata(&token_id)
+        .await
+        .expect("live metadata");
+
+    let evidence = client
+        .order_funding_evidence(&test_order_request(OrderType::Fak), &metadata)
+        .await
+        .expect("valid exact-threshold evidence");
+    let VenueFundingEvidence::Ready { snapshot, required } = evidence else {
+        panic!("exact raw balance and allowance must be ready");
+    };
+    assert_eq!(snapshot.balance.as_str(), "101000000");
+    assert_eq!(
+        snapshot.human_balance.collateral(),
+        Some(Usd::new(dec!(101)))
+    );
+    assert_eq!(
+        snapshot.allowance.as_ref().map(EvmUint256::as_str),
+        Some("101000000")
+    );
+    assert_eq!(required.as_str(), "101000000");
+    assert_no_post(&server).await;
 }
 
 #[tokio::test]
@@ -168,19 +290,20 @@ async fn market_info_validates_observation() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     Mock::given(method("GET"))
-        .and(path(format!("/clob-markets/{CONDITION_ID}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(complete_market_info_payload()))
+        .and(path(format!("/clob-markets/{TEST_CONDITION_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(complete_market_info_payload(false)))
         .expect(1)
         .mount(&server)
         .await;
     let client = test_clob_client(&server).await;
 
     let observation = client
-        .clob_market_info_version(&MarketId::new(CONDITION_ID))
+        .clob_market_info_version(&MarketId::new(TEST_CONDITION_ID))
         .await
         .expect("complete V2 market info");
 
     assert_eq!(observation.fee_details.rate, dec!(0.25));
+    assert_eq!(observation.minimum_order_size, Shares::new(dec!(5)));
     assert_eq!(observation.fee_details.exponent, 2);
     assert!(observation.fee_details.taker_only);
     assert_eq!(observation.builder_maker_fee_rate_bps, 0);
@@ -191,10 +314,10 @@ async fn market_info_validates_observation() {
 async fn missing_fee_never_defaults() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
-    let mut payload = complete_market_info_payload();
+    let mut payload = complete_market_info_payload(false);
     payload.as_object_mut().expect("test object").remove("fd");
     Mock::given(method("GET"))
-        .and(path(format!("/clob-markets/{CONDITION_ID}")))
+        .and(path(format!("/clob-markets/{TEST_CONDITION_ID}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(payload))
         .expect(1)
         .mount(&server)
@@ -202,7 +325,7 @@ async fn missing_fee_never_defaults() {
     let client = test_clob_client(&server).await;
 
     let error = client
-        .clob_market_info_version(&MarketId::new(CONDITION_ID))
+        .clob_market_info_version(&MarketId::new(TEST_CONDITION_ID))
         .await
         .expect_err("missing fd must be rejected");
 
@@ -243,6 +366,12 @@ async fn fak_uses_never_retried() {
         .find(|request| request.url.path() == "/order")
         .map(|request| serde_json::from_slice::<Value>(&request.body).expect("V2 order JSON"))
         .expect("order request");
+    assert!(requests.iter().any(|request| request.url.path() == "/book"));
+    assert!(
+        requests
+            .iter()
+            .all(|request| !matches!(request.url.path(), "/tick-size" | "/neg-risk"))
+    );
     assert_eq!(body["orderType"].as_str(), Some("FAK"));
     let order = body["order"].as_object().expect("V2 signed order object");
     for field in ["timestamp", "metadata", "builder"] {
@@ -261,7 +390,7 @@ async fn buy_rechecks_pusd_requirement() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     let token_id = test_token_id();
-    mount_clob_balance_requirements(&server, &token_id, "100").await;
+    mount_clob_balance_requirements(&server, &token_id, "100000000").await;
     let client = test_clob_client(&server).await;
 
     let error = client
@@ -272,19 +401,456 @@ async fn buy_rechecks_pusd_requirement() {
     assert_eq!(error.stage, OrderSubmissionStage::Prepare);
     assert!(matches!(
         error.source,
-        ApiError::Clob {
-            code,
-            retryable: false,
+        ApiError::ClobOrder(ClobOrderError::FundingUnavailable {
+            deficit: ClobFundingDeficit::InsufficientBalance,
             ..
-        } if code == "insufficient_pusd_balance"
+        })
     ));
-    assert!(
-        server
-            .received_requests()
-            .await
-            .expect("request ledger")
-            .iter()
-            .all(|request| request.url.path() != "/order")
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn missing_allowance_blocks() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_route_requirements(&server, &token_id, false, "10000000000", None).await;
+    let client = test_clob_client(&server).await;
+
+    let error = client
+        .place_order(&test_order_request(OrderType::Fak))
+        .await
+        .expect_err("missing exact V2 spender must block");
+
+    assert!(matches!(
+        error.source,
+        ApiError::ClobOrder(ClobOrderError::FundingUnavailable {
+            deficit: ClobFundingDeficit::MissingAllowance,
+            ..
+        })
+    ));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn low_allowance_blocks() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_route_requirements(&server, &token_id, false, "10000000000", Some("100000000"))
+        .await;
+    let client = test_clob_client(&server).await;
+
+    let error = client
+        .place_order(&test_order_request(OrderType::Fak))
+        .await
+        .expect_err("allowance below principal plus fee must block");
+
+    assert!(matches!(
+        error.source,
+        ApiError::ClobOrder(ClobOrderError::FundingUnavailable {
+            deficit: ClobFundingDeficit::InsufficientAllowance,
+            ..
+        })
+    ));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn malformed_allowance_blocks() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_route_requirements(&server, &token_id, false, "10000000000", Some("01")).await;
+    let client = test_clob_client(&server).await;
+
+    let error = client
+        .place_order(&test_order_request(OrderType::Fak))
+        .await
+        .expect_err("non-canonical uint256 allowance must block");
+
+    assert!(matches!(
+        error.source,
+        ApiError::ClobOrder(ClobOrderError::MalformedUint256 {
+            field: "allowance",
+            ..
+        })
+    ));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn fractional_balance_blocks() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_route_requirements(
+        &server,
+        &token_id,
+        false,
+        "1.5",
+        Some("115792089237316195423570985008687907853269984665640564039457584007913129639935"),
+    )
+    .await;
+    let client = test_clob_client(&server).await;
+
+    let error = client
+        .place_order(&test_order_request(OrderType::Fak))
+        .await
+        .expect_err("fractional raw balance must fail strict uint256 parsing");
+
+    assert!(matches!(
+        error.source,
+        ApiError::ClobOrder(ClobOrderError::MalformedUint256 {
+            field: "balance",
+            ..
+        })
+    ));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn minimum_order_blocks() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_requirements(&server, &token_id).await;
+    let client = test_clob_client(&server).await;
+    let mut request = test_order_request(OrderType::Fak);
+    request.amount = VenueOrderAmount::PrincipalUsd(Usd::new(dec!(1)));
+
+    let error = client
+        .place_order(&request)
+        .await
+        .expect_err("order below live venue minimum must block");
+
+    assert!(matches!(
+        error.source,
+        ApiError::ClobOrder(ClobOrderError::RuleViolation { .. })
+    ));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn precision_drift_blocks() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_requirements(&server, &token_id).await;
+    let client = test_clob_client(&server).await;
+    let mut request = test_order_request(OrderType::Fak);
+    request.amount = VenueOrderAmount::PrincipalUsd(Usd::new(dec!(100.001)));
+
+    let error = client
+        .place_order(&request)
+        .await
+        .expect_err("adapter must reject hidden SDK rounding");
+
+    assert!(matches!(
+        error.source,
+        ApiError::ClobOrder(ClobOrderError::RuleViolation { .. })
+    ));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn market_identity_blocks() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_requirements(&server, &token_id).await;
+    let client = test_clob_client(&server).await;
+    let mut request = test_order_request(OrderType::Fak);
+    request.market_id = MarketId::new(format!("0x{}", "2".repeat(64)));
+
+    let error = client
+        .place_order(&request)
+        .await
+        .expect_err("book market identity mismatch must block");
+
+    assert!(matches!(
+        error.source,
+        ApiError::ClobOrder(ClobOrderError::IdentityMismatch {
+            field: "book.market",
+            ..
+        })
+    ));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn entry_rule_drift_blocks() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_requirements(&server, &token_id).await;
+    let client = test_clob_client(&server).await;
+    let baseline = test_order_request(OrderType::Fak);
+    let mut tick = baseline.clone();
+    tick.expected_tick_size = TickSize::Thousandth;
+    let mut minimum = baseline.clone();
+    minimum.expected_minimum_order_size = Shares::new(dec!(6));
+    let mut neg_risk = baseline.clone();
+    neg_risk.expected_neg_risk = true;
+    let mut payload = baseline;
+    payload.expected_clob_market_info_payload_hash = ContentHash::from_bytes([0x55; 32]);
+
+    for (label, request) in [
+        ("tick", tick),
+        ("minimum", minimum),
+        ("neg_risk", neg_risk),
+        ("payload", payload),
+    ] {
+        let result = client.place_order(&request).await;
+        assert!(result.is_err(), "{label} drift must fail before POST");
+        assert_eq!(
+            result.expect_err("drift result").stage,
+            OrderSubmissionStage::Prepare
+        );
+    }
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn exit_rule_drift_blocks() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_requirements(&server, &token_id).await;
+    let client = test_clob_client(&server).await;
+    let mut baseline = test_order_request(OrderType::Gtc);
+    baseline.side = Side::Sell;
+    baseline.amount = VenueOrderAmount::Shares(Shares::new(dec!(10)));
+    baseline.expected_fee = Usd::ZERO;
+    let mut tick = baseline.clone();
+    tick.expected_tick_size = TickSize::Thousandth;
+    let mut minimum = baseline.clone();
+    minimum.expected_minimum_order_size = Shares::new(dec!(6));
+    let mut neg_risk = baseline.clone();
+    neg_risk.expected_neg_risk = true;
+    let mut payload = baseline;
+    payload.expected_clob_market_info_payload_hash = ContentHash::from_bytes([0x77; 32]);
+
+    for (label, request) in [
+        ("tick", tick),
+        ("minimum", minimum),
+        ("neg_risk", neg_risk),
+        ("payload", payload),
+    ] {
+        let result = client.place_order(&request).await;
+        assert!(result.is_err(), "exit {label} drift must fail before POST");
+        assert_eq!(
+            result.expect_err("exit drift result").stage,
+            OrderSubmissionStage::Prepare
+        );
+    }
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn payload_mismatch_blocks() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_requirements(&server, &token_id).await;
+    let client = test_clob_client(&server).await;
+    let request = test_order_request(OrderType::Fak);
+    let metadata = client
+        .order_metadata(&token_id)
+        .await
+        .expect("live metadata");
+    let wire_token_id = WireTokenId::try_from(&token_id).expect("wire token").0;
+    client
+        .seed_order_rules(wire_token_id, &metadata)
+        .expect("seed SDK rules");
+    let canonical = PolymarketOrderRules::new(metadata.tick_size, metadata.minimum_order_size)
+        .expect("rules")
+        .validate_order(request.side, request.amount, request.price)
+        .expect("canonical request");
+    let order_side = SdkSide::from(ClobSide::from(request.side));
+    let mut unsigned = client
+        .build_unsigned_order(&request, canonical, wire_token_id, order_side)
+        .await
+        .expect("unsigned order");
+    let OrderPayload::V2(payload) = &mut unsigned.payload else {
+        panic!("fixture must build V2");
+    };
+    payload.order.makerAmount += U256::from(1_u8);
+
+    let error = client
+        .validate_unsigned_order(&request, wire_token_id, order_side, &canonical, &unsigned)
+        .expect_err("changed SDK payload must fail before signing");
+
+    assert!(matches!(
+        error,
+        ApiError::ClobOrder(ClobOrderError::PayloadMismatch {
+            field: "maker_amount",
+            ..
+        })
+    ));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn sell_funding_exact() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_route_requirements(&server, &token_id, false, "10000000", Some("10000000")).await;
+    let client = test_clob_client(&server).await;
+    let metadata = client
+        .order_metadata(&token_id)
+        .await
+        .expect("live metadata");
+    let mut request = test_order_request(OrderType::Gtc);
+    request.side = Side::Sell;
+    request.amount = VenueOrderAmount::Shares(Shares::new(dec!(10)));
+    request.expected_fee = Usd::ZERO;
+    request.expected_neg_risk = false;
+    request.expected_clob_market_info_payload_hash = test_market_info_hash(false);
+
+    let evidence = client
+        .order_funding_evidence(&request, &metadata)
+        .await
+        .expect("exact SELL funding evidence");
+
+    assert!(matches!(evidence, VenueFundingEvidence::Ready { .. }));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn sell_allowance_missing() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_route_requirements(&server, &token_id, false, "10000000", None).await;
+    let client = test_clob_client(&server).await;
+    let metadata = client
+        .order_metadata(&token_id)
+        .await
+        .expect("live metadata");
+    let mut request = test_order_request(OrderType::Gtc);
+    request.side = Side::Sell;
+    request.amount = VenueOrderAmount::Shares(Shares::new(dec!(10)));
+    request.expected_fee = Usd::ZERO;
+
+    let evidence = client
+        .order_funding_evidence(&request, &metadata)
+        .await
+        .expect("missing allowance is valid evidence");
+
+    assert!(matches!(
+        evidence,
+        VenueFundingEvidence::MissingAllowance { .. }
+    ));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn sell_balance_insufficient() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_route_requirements(&server, &token_id, false, "9999999", Some("10000000")).await;
+    let client = test_clob_client(&server).await;
+    let metadata = client
+        .order_metadata(&token_id)
+        .await
+        .expect("live metadata");
+    let mut request = test_order_request(OrderType::Gtc);
+    request.side = Side::Sell;
+    request.amount = VenueOrderAmount::Shares(Shares::new(dec!(10)));
+    request.expected_fee = Usd::ZERO;
+
+    let evidence = client
+        .order_funding_evidence(&request, &metadata)
+        .await
+        .expect("low balance is valid evidence");
+
+    assert!(matches!(
+        evidence,
+        VenueFundingEvidence::InsufficientBalance { .. }
+    ));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn sell_allowance_insufficient() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_route_requirements(&server, &token_id, false, "10000000", Some("9999999")).await;
+    let client = test_clob_client(&server).await;
+    let metadata = client
+        .order_metadata(&token_id)
+        .await
+        .expect("live metadata");
+    let mut request = test_order_request(OrderType::Gtc);
+    request.side = Side::Sell;
+    request.amount = VenueOrderAmount::Shares(Shares::new(dec!(10)));
+    request.expected_fee = Usd::ZERO;
+
+    let evidence = client
+        .order_funding_evidence(&request, &metadata)
+        .await
+        .expect("low allowance is valid evidence");
+
+    assert!(matches!(
+        evidence,
+        VenueFundingEvidence::InsufficientAllowance { .. }
+    ));
+    assert_no_post(&server).await;
+}
+
+#[tokio::test]
+async fn neg_risk_sell_spender() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_route_requirements(&server, &token_id, true, "100000000", Some("10000000")).await;
+    mount_post_order(
+        &server,
+        r#"{
+            "errorMsg":"",
+            "makingAmount":"10",
+            "orderID":"venue-neg-risk-sell",
+            "status":"matched",
+            "success":true,
+            "takingAmount":"9.2",
+            "transactionHashes":[]
+        }"#,
+        1,
+    )
+    .await;
+    let client = test_clob_client(&server).await;
+    let mut request = test_order_request(OrderType::Gtc);
+    request.side = Side::Sell;
+    request.amount = VenueOrderAmount::Shares(Shares::new(dec!(10)));
+    request.expected_fee = Usd::ZERO;
+    request.expected_neg_risk = true;
+    request.expected_clob_market_info_payload_hash = test_market_info_hash(true);
+
+    client
+        .place_order(&request)
+        .await
+        .expect("neg-risk SELL with exact V2 allowance");
+
+    let expected_spender = contract_config(POLYGON, true)
+        .and_then(|config| config.exchange_v2)
+        .expect("neg-risk V2 spender");
+    let expected_spender = format!("{expected_spender:#x}");
+    let metadata = client
+        .order_metadata(&token_id)
+        .await
+        .expect("live neg-risk metadata");
+    let snapshot = client
+        .balance_allowance_snapshot(VenueFundingAsset::Conditional, Some(&token_id), &metadata)
+        .await
+        .expect("typed funding snapshot");
+    assert_eq!(snapshot.spender.as_str(), expected_spender.as_str());
+    assert_eq!(
+        snapshot.allowance.as_ref().map(EvmUint256::as_str),
+        Some("10000000")
     );
 }
 
@@ -367,7 +933,7 @@ async fn assert_maker_identity(signature_type: Option<SignatureType>, funder: Ad
         .respond_with(
             ResponseTemplate::new(200).set_body_json(serde_json::json!([{
                 "date": "2026-08-15",
-                "condition_id": CONDITION_ID,
+                "condition_id": TEST_CONDITION_ID,
                 "asset_address": format!("0x{}", "3".repeat(40)),
                 "maker_address": maker.as_str(),
                 "rebated_fees_usdc": "0.25"
@@ -451,6 +1017,50 @@ async fn post_order_preserves_identities() {
             .map(EvmTransactionHash::as_str)
             .collect::<Vec<_>>(),
         vec![TRANSACTION_HASH_1, TRANSACTION_HASH_2]
+    );
+}
+
+#[tokio::test]
+async fn concurrent_rules_are_serialized() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_requirements(&server, &token_id).await;
+    Mock::given(method("POST"))
+        .and(path("/order"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(4))
+                .set_body_json(serde_json::json!({
+                    "errorMsg": "",
+                    "makingAmount": "100",
+                    "orderID": "venue-concurrent",
+                    "status": "matched",
+                    "success": true,
+                    "takingAmount": "100",
+                    "transactionHashes": []
+                })),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = Arc::new(test_clob_client(&server).await);
+    let first_client = Arc::clone(&client);
+    let second_client = Arc::clone(&client);
+    let first_request = test_order_request(OrderType::Fak);
+    let second_request = test_order_request(OrderType::Fak);
+
+    let started = Instant::now();
+    let (first, second) = tokio::join!(
+        async move { first_client.place_order(&first_request).await },
+        async move { second_client.place_order(&second_request).await },
+    );
+
+    first.expect("first serialized SDK rule build");
+    second.expect("second serialized SDK rule build");
+    assert!(
+        started.elapsed() < Duration::from_millis(6_500),
+        "POST must execute after releasing the SDK rule lock"
     );
 }
 

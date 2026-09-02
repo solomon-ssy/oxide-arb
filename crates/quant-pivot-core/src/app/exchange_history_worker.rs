@@ -10,6 +10,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use blake3::Hasher;
 use chrono::{DateTime, TimeDelta, Utc};
 use quant_pivot_api::exchange::{
@@ -17,9 +18,9 @@ use quant_pivot_api::exchange::{
         ExchangeHistoryProjection, ExecutionProjectionError, history_token_ids, project_history,
     },
     history_client::{
-        AttestedHistoryChunk, CanonicalBlockHeader, ExchangeHistoryAttestor,
+        ArchiveProbe, AttestedHistoryChunk, CanonicalBlockHeader, ExchangeHistoryAttestor,
         ExchangeHistoryExtractor, ExtractedHistoryChunk, HistoryClientError,
-        HistoryContinuityProofBasis, HistoryDigest, chunks_agree,
+        HistoryContinuityProof, HistoryContinuityProofBasis, chunks_agree,
     },
 };
 use quant_pivot_error::{
@@ -46,10 +47,7 @@ use quant_pivot_models::{
         WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID, builtin_research_profiles,
     },
 };
-use quant_pivot_repository::{
-    clickhouse::ChFactWriter,
-    traits::{ExchangeHistoryRepository, FactWriter, MarketRepository},
-};
+use quant_pivot_repository::traits::{ExchangeHistoryRepository, FactWriter, MarketRepository};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -58,11 +56,15 @@ use crate::{infra::periodic_task::PeriodicTask, observability::metrics_hub::Metr
 
 const CHUNK_NAMESPACE: Uuid = Uuid::from_u128(0x6f0d_f3a4_7274_5e8f_9d92_7fb3_e3b1_e91a);
 const POLYGON_CHAIN_ID: i64 = 137;
+const SERVING_HEAD_CAS_ATTEMPTS: usize = 4;
 #[derive(Debug, Serialize)]
 struct AvailabilityPolicyCommitment {
     chain_id: u64,
     finalized_only: bool,
     model_confirmation_blocks: u64,
+    rollback_buffer_blocks: u64,
+    activation_frontier_days: u32,
+    retention_frontier_days: u32,
     provider_agreement: &'static str,
     extractor_provider_id: String,
     attestor_provider_id: String,
@@ -81,13 +83,111 @@ struct ProjectionQuarantine {
 
 #[derive(Clone)]
 pub struct ExchangeHistoryWriters {
-    pub raw_logs: Arc<ChFactWriter<ExchangeLogRawRow>>,
-    pub events: Arc<ChFactWriter<ExchangeEventRow>>,
-    pub fee_charges: Arc<ChFactWriter<ExchangeFeeChargeRow>>,
-    pub matches: Arc<ChFactWriter<ExchangeMatchRow>>,
-    pub executions: Arc<ChFactWriter<MarketExecutionRow>>,
-    pub participants: Arc<ChFactWriter<ExecutionParticipantRow>>,
-    pub acceptance: Arc<ChFactWriter<ExchangeHistoryAcceptanceRow>>,
+    pub raw_logs: Arc<dyn FactWriter<ExchangeLogRawRow>>,
+    pub events: Arc<dyn FactWriter<ExchangeEventRow>>,
+    pub fee_charges: Arc<dyn FactWriter<ExchangeFeeChargeRow>>,
+    pub matches: Arc<dyn FactWriter<ExchangeMatchRow>>,
+    pub executions: Arc<dyn FactWriter<MarketExecutionRow>>,
+    pub participants: Arc<dyn FactWriter<ExecutionParticipantRow>>,
+    pub acceptance: Arc<dyn FactWriter<ExchangeHistoryAcceptanceRow>>,
+}
+
+#[async_trait]
+trait HistoryExtractorSource: Send + Sync {
+    async fn fetch_chunk(
+        &self,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<ExtractedHistoryChunk, HistoryClientError>;
+
+    async fn shutdown(&self) -> Result<(), HistoryClientError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl HistoryExtractorSource for ExchangeHistoryExtractor {
+    async fn fetch_chunk(
+        &self,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<ExtractedHistoryChunk, HistoryClientError> {
+        Self::fetch_chunk(self, from_block, to_block).await
+    }
+
+    async fn shutdown(&self) -> Result<(), HistoryClientError> {
+        Self::shutdown(self).await
+    }
+}
+
+#[async_trait]
+trait HistoryAttestorSource: Send + Sync {
+    async fn probe_archive(&self) -> Result<ArchiveProbe, HistoryClientError>;
+
+    async fn finalized_head(&self) -> Result<CanonicalBlockHeader, HistoryClientError>;
+
+    async fn block_header(
+        &self,
+        block_number: u64,
+    ) -> Result<CanonicalBlockHeader, HistoryClientError>;
+
+    async fn block_at_or_after(
+        &self,
+        timestamp: u64,
+        upper_block: u64,
+    ) -> Result<CanonicalBlockHeader, HistoryClientError>;
+
+    async fn fetch_chunk(
+        &self,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<AttestedHistoryChunk, HistoryClientError>;
+
+    async fn verify_continuity(
+        &self,
+        proof: &HistoryContinuityProof,
+    ) -> Result<bool, HistoryClientError>;
+}
+
+#[async_trait]
+impl HistoryAttestorSource for ExchangeHistoryAttestor {
+    async fn probe_archive(&self) -> Result<ArchiveProbe, HistoryClientError> {
+        Self::probe_archive(self).await
+    }
+
+    async fn finalized_head(&self) -> Result<CanonicalBlockHeader, HistoryClientError> {
+        Self::finalized_head(self).await
+    }
+
+    async fn block_header(
+        &self,
+        block_number: u64,
+    ) -> Result<CanonicalBlockHeader, HistoryClientError> {
+        Self::block_header(self, block_number).await
+    }
+
+    async fn block_at_or_after(
+        &self,
+        timestamp: u64,
+        upper_block: u64,
+    ) -> Result<CanonicalBlockHeader, HistoryClientError> {
+        Self::block_at_or_after(self, timestamp, upper_block).await
+    }
+
+    async fn fetch_chunk(
+        &self,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<AttestedHistoryChunk, HistoryClientError> {
+        Self::fetch_chunk(self, from_block, to_block).await
+    }
+
+    async fn verify_continuity(
+        &self,
+        proof: &HistoryContinuityProof,
+    ) -> Result<bool, HistoryClientError> {
+        Self::verify_continuity(self, proof).await
+    }
 }
 
 #[derive(Clone)]
@@ -131,8 +231,8 @@ impl ExchangeHistoryProgressPort for ExchangeHistoryProgressHandle {
 /// Reconstructs a dual-provider-attested semantic execution history. The
 /// activation frontier always receives capacity before retention work.
 pub struct ExchangeHistoryWorker {
-    extractor: Arc<ExchangeHistoryExtractor>,
-    attestor: Arc<ExchangeHistoryAttestor>,
+    extractor: Arc<dyn HistoryExtractorSource>,
+    attestor: Arc<dyn HistoryAttestorSource>,
     history_repo: Arc<dyn ExchangeHistoryRepository>,
     market_repo: Arc<dyn MarketRepository>,
     writers: ExchangeHistoryWriters,
@@ -145,6 +245,143 @@ pub struct ExchangeHistoryWorker {
 }
 
 impl ExchangeHistoryWorker {
+    /// Canonical commitment to the configured Polygon history-availability policy.
+    pub fn availability_policy_hash(
+        config: &FinalizedExchangeHistoryConfig,
+    ) -> QuantResult<ContentHash> {
+        let commitment = AvailabilityPolicyCommitment {
+            chain_id: u64::try_from(POLYGON_CHAIN_ID)
+                .map_err(|_| ExchangeHistoryError::InvalidTime)?,
+            finalized_only: true,
+            model_confirmation_blocks: config.model_confirmation_blocks,
+            rollback_buffer_blocks: config.rollback_buffer_blocks,
+            activation_frontier_days: config.activation_frontier_days,
+            retention_frontier_days: config.retention_frontier_days,
+            provider_agreement: "hypersync_plus_independent_archive_rpc_exact_v1",
+            extractor_provider_id: config.hypersync.provider_id.clone(),
+            attestor_provider_id: config.attestor.provider_id.clone(),
+        };
+        let bytes =
+            serde_json::to_vec(&commitment).map_err(|error| ExchangeHistoryError::Projection {
+                detail: format!("availability policy serialization failed: {error}"),
+            })?;
+        Ok(ContentHash::from_bytes(*blake3::hash(&bytes).as_bytes()))
+    }
+
+    /// Canonical identity of one immutable Polygon history plan.
+    #[must_use]
+    pub fn plan_id(
+        finalized_block: u64,
+        finalized_hash: &EvmBlockHash,
+        policy_hash: ContentHash,
+        bootstrap_profile_set_hash: ContentHash,
+    ) -> Uuid {
+        let mut preimage = Vec::with_capacity(128);
+        preimage.extend_from_slice(b"quant-pivot/exchange-history-plan/v1\0");
+        preimage.extend_from_slice(&POLYGON_CHAIN_ID.to_be_bytes());
+        preimage.extend_from_slice(policy_hash.as_bytes());
+        preimage.extend_from_slice(bootstrap_profile_set_hash.as_bytes());
+        preimage.extend_from_slice(&finalized_block.to_be_bytes());
+        preimage.extend_from_slice(finalized_hash.as_str().as_bytes());
+        Uuid::new_v5(&CHUNK_NAMESPACE, &preimage)
+    }
+
+    /// Canonical content identity of one accepted Polygon history chunk.
+    #[must_use]
+    pub fn chunk_id(
+        frontier: ExchangeHistoryFrontier,
+        from_block: u64,
+        to_block: u64,
+        digest: ContentHash,
+    ) -> Uuid {
+        let mut preimage =
+            format!("polygon:{}:{from_block}:{to_block}:", frontier.as_str()).into_bytes();
+        preimage.extend_from_slice(digest.as_bytes());
+        Uuid::new_v5(&CHUNK_NAMESPACE, &preimage)
+    }
+
+    /// Canonical idempotency token for the active acceptance commit marker.
+    #[must_use]
+    pub fn acceptance_token(chunk_id: Uuid) -> ContentHash {
+        dedup_token("acceptance", chunk_id, 0)
+    }
+
+    /// Canonical identity of one immutable serving-head preimage.
+    #[must_use]
+    pub fn serving_head_id(
+        plan_id: Uuid,
+        previous_seal_id: Option<HistoryServingHeadSealId>,
+        chunks: &[HistorySealChunkRef],
+    ) -> HistoryServingHeadSealId {
+        let mut preimage = Vec::with_capacity(chunks.len().saturating_mul(40).saturating_add(96));
+        preimage.extend_from_slice(b"quant-pivot/history-serving-head-id/v1\0");
+        preimage.extend_from_slice(plan_id.as_bytes());
+        match previous_seal_id {
+            Some(previous_seal_id) => {
+                preimage.push(1);
+                preimage.extend_from_slice(previous_seal_id.as_uuid_ref().as_bytes());
+            }
+            None => preimage.push(0),
+        }
+        for chunk in chunks {
+            preimage.extend_from_slice(chunk.chunk_id.as_bytes());
+            preimage.extend_from_slice(&chunk.state_revision.to_be_bytes());
+        }
+        HistoryServingHeadSealId::new(Uuid::new_v5(&CHUNK_NAMESPACE, &preimage))
+    }
+
+    fn is_head_cas_conflict(error: &StorageError) -> bool {
+        matches!(
+            error,
+            StorageError::StateConflict { entity, detail, .. }
+                if *entity == "quant_history_serving_head_seal"
+                    && detail == "serving head predecessor is not the latest immutable head"
+        )
+    }
+
+    /// Monotone cross-store revision for an acceptance lifecycle timestamp.
+    pub fn state_revision(at: DateTime<Utc>) -> QuantResult<u64> {
+        u64::try_from(at.timestamp_micros()).map_err(|_| ExchangeHistoryError::InvalidTime.into())
+    }
+
+    /// Canonical commitment to the complete analysis-only bootstrap-profile set.
+    pub fn bootstrap_profile_set_hash() -> QuantResult<ContentHash> {
+        let profiles =
+            builtin_research_profiles().map_err(|detail| ExchangeHistoryError::Projection {
+                detail: format!("built-in research profiles are invalid: {detail}"),
+            })?;
+        Self::hash_bootstrap_profiles(&profiles)
+    }
+
+    fn hash_bootstrap_profiles(profiles: &[ResearchProfileArtifact]) -> QuantResult<ContentHash> {
+        let mut bootstrap_refs = profiles
+            .iter()
+            .filter(|profile| {
+                profile.spec.serving_authority == ServingAuthority::AnalysisOnlyWithLiveL2
+            })
+            .map(|profile| &profile.profile_ref)
+            .collect::<Vec<_>>();
+        bootstrap_refs.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+        if bootstrap_refs.len() != 3 {
+            return Err(ExchangeHistoryError::Projection {
+                detail: "fresh-boot history plan requires exactly three bootstrap profiles"
+                    .to_owned(),
+            }
+            .into());
+        }
+        let mut profile_hasher = Hasher::new();
+        profile_hasher.update(b"quant-pivot/exchange-history-bootstrap-profiles/v1\0");
+        for profile_ref in bootstrap_refs {
+            profile_hasher.update(profile_ref.id.as_str().as_bytes());
+            profile_hasher.update(b"\0");
+            profile_hasher.update(&profile_ref.version.to_be_bytes());
+            profile_hasher.update(profile_ref.content_hash.as_bytes());
+        }
+        Ok(ContentHash::from_bytes(
+            *profile_hasher.finalize().as_bytes(),
+        ))
+    }
+
     pub fn connect(
         history_repo: Arc<dyn ExchangeHistoryRepository>,
         market_repo: Arc<dyn MarketRepository>,
@@ -157,7 +394,7 @@ impl ExchangeHistoryWorker {
             .map_err(|error| extraction_failure(&error))?;
         let attestor = ExchangeHistoryAttestor::connect(&config)
             .map_err(|error| attestation_failure(&error))?;
-        let policy_hash = policy_hash(&config)?;
+        let policy_hash = Self::availability_policy_hash(&config)?;
         let initial_chunk_blocks = config.max_blocks_per_chunk;
         Ok(Self {
             extractor: Arc::new(extractor),
@@ -186,7 +423,7 @@ impl ExchangeHistoryWorker {
         }
         let poll_secs = self.config.poll_secs;
         let worker = Arc::clone(&self);
-        PeriodicTask::run(
+        let run_result = PeriodicTask::run(
             "exchange-history-worker",
             move || Duration::from_secs(poll_secs),
             0.05,
@@ -197,7 +434,19 @@ impl ExchangeHistoryWorker {
                 async move { worker.run_once().await }
             },
         )
-        .await
+        .await;
+        let shutdown_result = self
+            .extractor
+            .shutdown()
+            .await
+            .map_err(|error| extraction_failure(&error));
+        if let Err(error) = shutdown_result {
+            if run_result.is_ok() {
+                return Err(error.into());
+            }
+            tracing::error!(%error, "HyperSync runtime shutdown also failed");
+        }
+        run_result
     }
 
     /// Block application startup until the independent witness proves archive,
@@ -219,8 +468,14 @@ impl ExchangeHistoryWorker {
             self.extractor.fetch_chunk(from_block, to_block),
             self.attestor.fetch_chunk(from_block, to_block),
         );
-        let extracted = extracted.map_err(|error| extraction_failure(&error))?;
-        let attested = attested.map_err(|error| attestation_failure(&error))?;
+        let (extracted, attested) = match (extracted, attested) {
+            (Ok(extracted), Ok(attested)) => (extracted, attested),
+            (Err(error), Ok(_)) => return Err(extraction_failure(&error).into()),
+            (Ok(_), Err(error)) => return Err(attestation_failure(&error).into()),
+            (Err(extractor), Err(attestor)) => {
+                return Err(provider_pair_failure(&extractor, &attestor).into());
+            }
+        };
         let continuity_agrees = self
             .attestor
             .verify_continuity(&extracted.continuity_proof)
@@ -251,16 +506,21 @@ impl ExchangeHistoryWorker {
             .ok_or(ExchangeHistoryError::InvalidTime)?;
         let plan = self.ensure_plan(&finalized, model_head).await?;
         self.verify_plan_anchor(&plan).await?;
+        let activation_target = Self::activation_target(&plan, model_head)?;
         self.reconcile_frontier(ExchangeHistoryFrontier::Activation, model_head)
             .await?;
         self.reconcile_frontier(ExchangeHistoryFrontier::Retention, model_head)
             .await?;
+        self.validate_activation_cursor(activation_target).await?;
         self.sync_serving_head(&plan).await?;
         let activation_start = plan_block(plan.activation_from_block)?;
-        let activation_through = plan_block(plan.activation_through_block)?;
-        self.publish_plan(&plan).await?;
+        self.publish_plan(&plan, activation_target).await?;
         if self
-            .advance_activation(activation_start, activation_through)
+            .advance_activation(
+                activation_start,
+                activation_target,
+                plan_block(plan.activation_through_block)?,
+            )
             .await?
         {
             return Ok(());
@@ -272,7 +532,7 @@ impl ExchangeHistoryWorker {
             plan_block(plan.weather_required_from_block)?,
         )
         .await?;
-        self.publish_ready(activation_through);
+        self.publish_ready(activation_target);
         Ok(())
     }
 
@@ -285,31 +545,7 @@ impl ExchangeHistoryWorker {
             builtin_research_profiles().map_err(|detail| ExchangeHistoryError::Projection {
                 detail: format!("built-in research profiles are invalid: {detail}"),
             })?;
-        let mut bootstrap_refs = profiles
-            .iter()
-            .filter(|profile| {
-                profile.spec.serving_authority == ServingAuthority::AnalysisOnlyWithLiveL2
-            })
-            .map(|profile| &profile.profile_ref)
-            .collect::<Vec<_>>();
-        bootstrap_refs.sort_unstable_by(|left, right| left.id.cmp(&right.id));
-        if bootstrap_refs.len() != 3 {
-            return Err(ExchangeHistoryError::Projection {
-                detail: "fresh-boot history plan requires exactly three bootstrap profiles"
-                    .to_owned(),
-            }
-            .into());
-        }
-        let mut profile_hasher = Hasher::new();
-        profile_hasher.update(b"quant-pivot/exchange-history-bootstrap-profiles/v1\0");
-        for profile_ref in bootstrap_refs {
-            profile_hasher.update(profile_ref.id.as_str().as_bytes());
-            profile_hasher.update(b"\0");
-            profile_hasher.update(&profile_ref.version.to_be_bytes());
-            profile_hasher.update(profile_ref.content_hash.as_bytes());
-        }
-        let bootstrap_profile_set_hash =
-            ContentHash::from_bytes(*profile_hasher.finalize().as_bytes());
+        let bootstrap_profile_set_hash = Self::hash_bootstrap_profiles(&profiles)?;
         if let Some(plan) = self.history_repo.load_plan(POLYGON_CHAIN_ID).await? {
             if plan.policy_hash != self.policy_hash
                 || plan.bootstrap_profile_set_hash != bootstrap_profile_set_hash
@@ -350,21 +586,20 @@ impl ExchangeHistoryWorker {
         let retention_through = activation_from
             .checked_sub(1)
             .ok_or(ExchangeHistoryError::InvalidTime)?;
-        let mut preimage = Vec::with_capacity(128);
-        preimage.extend_from_slice(b"quant-pivot/exchange-history-plan/v1\0");
-        preimage.extend_from_slice(&POLYGON_CHAIN_ID.to_be_bytes());
-        preimage.extend_from_slice(self.policy_hash.as_bytes());
-        preimage.extend_from_slice(bootstrap_profile_set_hash.as_bytes());
-        preimage.extend_from_slice(&finalized.number.to_be_bytes());
-        preimage.extend_from_slice(finalized.hash.as_bytes());
+        let finalized_anchor_hash = block_hash(&finalized.hash)?;
         self.history_repo
             .create_or_load_plan(NewExchangeHistoryPlan {
-                plan_id: Uuid::new_v5(&CHUNK_NAMESPACE, &preimage),
+                plan_id: Self::plan_id(
+                    finalized.number,
+                    &finalized_anchor_hash,
+                    self.policy_hash,
+                    bootstrap_profile_set_hash,
+                ),
                 chain_id: POLYGON_CHAIN_ID,
                 policy_hash: self.policy_hash,
                 bootstrap_profile_set_hash,
                 finalized_anchor_block: block_i64(finalized.number)?,
-                finalized_anchor_hash: block_hash(&finalized.hash)?,
+                finalized_anchor_hash,
                 finalized_anchor_timestamp: i64::try_from(finalized.timestamp)
                     .map_err(|_| ExchangeHistoryError::InvalidTime)?,
                 activation_from_block: block_i64(activation_from)?,
@@ -377,6 +612,43 @@ impl ExchangeHistoryWorker {
             })
             .await
             .map_err(Into::into)
+    }
+
+    fn activation_target(plan: &ExchangeHistoryPlanInfo, model_head: u64) -> QuantResult<u64> {
+        // The plan freezes the initial anchor and backfill window. The live
+        // activation frontier is deliberately not rewritten into that WORM
+        // plan; every pass follows the independently attested model head.
+        let initial_target = plan_block(plan.activation_through_block)?;
+        if model_head < initial_target {
+            return Err(ExchangeHistoryError::Attestation {
+                detail: format!(
+                    "current model head {model_head} regressed below immutable initial target {initial_target}"
+                ),
+            }
+            .into());
+        }
+        Ok(model_head)
+    }
+
+    async fn validate_activation_cursor(&self, target: u64) -> QuantResult<()> {
+        let accepted = self
+            .history_repo
+            .latest_accepted(ExchangeHistoryFrontier::Activation)
+            .await?
+            .as_ref()
+            .map(|row| block_u64(row.to_block))
+            .transpose()?;
+        if let Some(accepted) = accepted
+            && accepted > target
+        {
+            return Err(ExchangeHistoryError::Attestation {
+                detail: format!(
+                    "current model head {target} regressed below accepted activation frontier {accepted}"
+                ),
+            }
+            .into());
+        }
+        Ok(())
     }
 
     async fn verify_plan_anchor(&self, plan: &ExchangeHistoryPlanInfo) -> QuantResult<()> {
@@ -491,11 +763,29 @@ impl ExchangeHistoryWorker {
         Ok(())
     }
 
-    async fn advance_activation(&self, start: u64, target: u64) -> QuantResult<bool> {
+    async fn advance_activation(
+        &self,
+        start: u64,
+        target: u64,
+        initial_through: u64,
+    ) -> QuantResult<bool> {
         let latest = self
             .history_repo
             .latest_accepted(ExchangeHistoryFrontier::Activation)
             .await?;
+        if let Some(accepted) = latest
+            .as_ref()
+            .map(|row| block_u64(row.to_block))
+            .transpose()?
+            && accepted > target
+        {
+            return Err(ExchangeHistoryError::Attestation {
+                detail: format!(
+                    "current model head {target} regressed below accepted activation frontier {accepted}"
+                ),
+            }
+            .into());
+        }
         let next = next_block(latest.as_ref(), start)?;
         self.publish_target(latest.as_ref(), start, target);
         if next > target {
@@ -505,8 +795,13 @@ impl ExchangeHistoryWorker {
         let budget_end = next
             .saturating_add(self.config.hot_window_blocks_per_tick.saturating_sub(1))
             .min(target);
-        self.process_budget(ExchangeHistoryFrontier::Activation, next, budget_end)
-            .await?;
+        self.process_budget(
+            ExchangeHistoryFrontier::Activation,
+            next,
+            budget_end,
+            initial_through,
+        )
+        .await?;
         Ok(true)
     }
 
@@ -615,15 +910,22 @@ impl ExchangeHistoryWorker {
         frontier: ExchangeHistoryFrontier,
         mut next: u64,
         budget_end: u64,
+        initial_through: u64,
     ) -> QuantResult<()> {
         while next <= budget_end {
             let desired_span = self.adaptive_chunk_blocks.load(Ordering::Relaxed).clamp(
                 self.config.min_blocks_per_chunk,
                 self.config.max_blocks_per_chunk,
             );
-            let desired_end = next
+            let mut desired_end = next
                 .saturating_add(desired_span.saturating_sub(1))
                 .min(budget_end);
+            // Preserve a whole-chunk endpoint for the immutable initial fit
+            // window even if the attested live head advanced during catch-up.
+            // The next iteration can consume the remaining live-tail budget.
+            if next <= initial_through {
+                desired_end = desired_end.min(initial_through);
+            }
             let (extracted, attested) = self.fetch_agreed(frontier, next, desired_end).await?;
             let accepted_end = extracted.to_block;
             self.record_chunk_success(accepted_end.saturating_sub(next).saturating_add(1));
@@ -696,7 +998,7 @@ impl ExchangeHistoryWorker {
                 self.extractor.fetch_chunk(from_block, to_block),
                 self.attestor.fetch_chunk(from_block, to_block),
             );
-            match (extracted, attested) {
+            let retry = match (extracted, attested) {
                 (Ok(extracted), Ok(attested)) => {
                     self.publish_stage(ExchangeHistoryStage::Attesting);
                     let continuity_agrees = self
@@ -727,27 +1029,41 @@ impl ExchangeHistoryWorker {
                     }
                     return Ok((extracted, attested));
                 }
-                (Err(error), _) | (_, Err(error)) if shrinkable(&error) => {
+                (Err(error), Ok(_)) if shrinkable(&error) => {
                     return Err(FetchFailure::Shrink);
                 }
-                (extractor_result, attestor_result) => {
+                (Ok(_), Err(error)) if shrinkable(&error) => {
+                    return Err(FetchFailure::Shrink);
+                }
+                (Err(extractor), Err(attestor))
+                    if shrinkable(&extractor) && shrinkable(&attestor) =>
+                {
+                    return Err(FetchFailure::Shrink);
+                }
+                (Err(error), Ok(_)) => {
+                    if attempt == self.config.retry_max_attempts {
+                        return Err(FetchFailure::Contract(extraction_failure(&error).into()));
+                    }
+                    (true, false)
+                }
+                (Ok(_), Err(error)) => {
+                    if attempt == self.config.retry_max_attempts {
+                        return Err(FetchFailure::Contract(attestation_failure(&error).into()));
+                    }
+                    (false, true)
+                }
+                (Err(extractor), Err(attestor)) => {
                     if attempt == self.config.retry_max_attempts {
                         return Err(FetchFailure::Contract(
-                            match (extractor_result, attestor_result) {
-                                (Err(error), _) => extraction_failure(&error).into(),
-                                (_, Err(error)) => attestation_failure(&error).into(),
-                                (Ok(_), Ok(_)) => ExchangeHistoryError::Attestation {
-                                    detail: "provider retry state is inconsistent".to_owned(),
-                                }
-                                .into(),
-                            },
+                            provider_pair_failure(&extractor, &attestor).into(),
                         ));
                     }
-                    self.publish_retry(extractor_result.is_err(), attestor_result.is_err());
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                    delay = delay.saturating_mul(2).min(self.config.retry_max_ms);
+                    (true, true)
                 }
-            }
+            };
+            self.publish_retry(retry.0, retry.1);
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            delay = delay.saturating_mul(2).min(self.config.retry_max_ms);
         }
         Err(FetchFailure::Contract(
             ExchangeHistoryError::Attestation {
@@ -765,7 +1081,12 @@ impl ExchangeHistoryWorker {
     ) -> QuantResult<()> {
         let from_block = extracted.from_block;
         let to_block = extracted.to_block;
-        let chunk_id = chunk_content_id(frontier, from_block, to_block, extracted.digest);
+        let chunk_id = Self::chunk_id(
+            frontier,
+            from_block,
+            to_block,
+            ContentHash::from_bytes(extracted.digest.0),
+        );
         let started_at = Utc::now();
         let attempt = self
             .history_repo
@@ -935,46 +1256,51 @@ impl ExchangeHistoryWorker {
             effective_through_at.ok_or_else(|| ExchangeHistoryError::Projection {
                 detail: "accepted activation head has no effective-through timestamp".to_owned(),
             })?;
-        let latest = self
-            .history_repo
-            .latest_serving_head(ExchangeHistoryFrontier::Activation)
-            .await?;
-        if latest.as_ref().is_some_and(|head| {
-            head.seal.accepted_through_block == last.to_block && head.chunks == chunks
-        }) {
-            return Ok(());
+        for _attempt in 0..SERVING_HEAD_CAS_ATTEMPTS {
+            let latest = self
+                .history_repo
+                .latest_serving_head(ExchangeHistoryFrontier::Activation)
+                .await?;
+            if latest.as_ref().is_some_and(|head| {
+                head.seal.accepted_through_block == last.to_block && head.chunks == chunks
+            }) {
+                return Ok(());
+            }
+            let previous_seal_id = latest.as_ref().map(|head| head.seal.serving_head_seal_id);
+            let seal_id = Self::serving_head_id(plan.plan_id, previous_seal_id, &chunks);
+            let mut command = CreateHistoryServingHeadSeal {
+                seal: NewHistoryServingHeadSeal {
+                    serving_head_seal_id: seal_id,
+                    seal_hash: ContentHash::from_bytes([0; 32]),
+                    plan_id: plan.plan_id,
+                    frontier: ExchangeHistoryFrontier::Activation,
+                    previous_seal_id,
+                    window_from_block: plan.activation_from_block,
+                    accepted_through_block: last.to_block,
+                    effective_through_at,
+                    policy_hash: plan.policy_hash,
+                    created_at: Utc::now(),
+                },
+                chunks: chunks.clone(),
+            };
+            command.seal.seal_hash =
+                command
+                    .derive_hash()
+                    .map_err(|error| ExchangeHistoryError::Projection {
+                        detail: format!("derive serving-head seal hash: {error}"),
+                    })?;
+            match self.history_repo.create_serving_head(command).await {
+                Ok(_) => return Ok(()),
+                Err(error) if Self::is_head_cas_conflict(&error) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
-        let mut preimage = Vec::with_capacity(chunks.len().saturating_mul(40).saturating_add(80));
-        preimage.extend_from_slice(b"quant-pivot/history-serving-head-id/v1\0");
-        preimage.extend_from_slice(plan.plan_id.as_bytes());
-        for chunk in &chunks {
-            preimage.extend_from_slice(chunk.chunk_id.as_bytes());
-            preimage.extend_from_slice(&chunk.state_revision.to_be_bytes());
-        }
-        let seal_id = HistoryServingHeadSealId::new(Uuid::new_v5(&CHUNK_NAMESPACE, &preimage));
-        let mut command = CreateHistoryServingHeadSeal {
-            seal: NewHistoryServingHeadSeal {
-                serving_head_seal_id: seal_id,
-                seal_hash: ContentHash::from_bytes([0; 32]),
-                plan_id: plan.plan_id,
-                frontier: ExchangeHistoryFrontier::Activation,
-                previous_seal_id: latest.as_ref().map(|head| head.seal.serving_head_seal_id),
-                window_from_block: plan.activation_from_block,
-                accepted_through_block: last.to_block,
-                effective_through_at,
-                policy_hash: plan.policy_hash,
-                created_at: Utc::now(),
-            },
-            chunks,
-        };
-        command.seal.seal_hash =
-            command
-                .derive_hash()
-                .map_err(|error| ExchangeHistoryError::Projection {
-                    detail: format!("derive serving-head seal hash: {error}"),
-                })?;
-        self.history_repo.create_serving_head(command).await?;
-        Ok(())
+        Err(StorageError::state_conflict(
+            "quant_history_serving_head_seal",
+            None::<&Uuid>,
+            "serving head predecessor CAS did not converge within its bounded retry budget",
+        )
+        .into())
     }
 
     async fn validate_boundary(
@@ -1057,12 +1383,12 @@ impl ExchangeHistoryWorker {
             effective_through_at: effective_through_at.timestamp_millis(),
             accepted_at: accepted_at.timestamp_millis(),
             active: u8::from(active),
-            state_revision: state_revision(accepted_at)?,
+            state_revision: Self::state_revision(accepted_at)?,
             schema_version: ExchangeHistoryAcceptanceRow::SCHEMA_VERSION,
         };
         self.writers
             .acceptance
-            .write_batch_idempotent(&dedup_token("acceptance", row.chunk_id, 0), vec![row])
+            .write_batch_idempotent(&Self::acceptance_token(row.chunk_id), vec![row])
             .await?;
         Ok(())
     }
@@ -1104,7 +1430,7 @@ impl ExchangeHistoryWorker {
             effective_through_at: effective_through_at.timestamp_millis(),
             accepted_at: accepted_at.timestamp_millis(),
             active: 0,
-            state_revision: state_revision(revoked_at)?,
+            state_revision: Self::state_revision(revoked_at)?,
             schema_version: ExchangeHistoryAcceptanceRow::SCHEMA_VERSION,
         };
         self.writers
@@ -1285,14 +1611,18 @@ impl ExchangeHistoryWorker {
         self.progress.publish(progress);
     }
 
-    async fn publish_plan(&self, plan: &ExchangeHistoryPlanInfo) -> QuantResult<()> {
+    async fn publish_plan(
+        &self,
+        plan: &ExchangeHistoryPlanInfo,
+        activation_target: u64,
+    ) -> QuantResult<()> {
         let retention = self
             .history_repo
             .earliest_accepted(ExchangeHistoryFrontier::Retention)
             .await?;
         let mut progress = self.progress.snapshot().as_ref().clone();
         progress.activation_from_block = Some(plan_block(plan.activation_from_block)?);
-        progress.target_block = Some(plan_block(plan.activation_through_block)?);
+        progress.target_block = Some(activation_target);
         progress.retention_from_block = Some(plan_block(plan.retention_from_block)?);
         progress.retention_accepted_from_block = retention
             .as_ref()
@@ -1373,7 +1703,7 @@ impl ExchangeHistoryWorker {
             let target = progress
                 .target_block
                 .ok_or_else(|| ExchangeHistoryError::Projection {
-                    detail: "activation progress has no immutable target block".to_owned(),
+                    detail: "activation progress has no current model-head target".to_owned(),
                 })?;
             let total = target.saturating_sub(activation_from).saturating_add(1);
             let covered = accepted
@@ -1515,7 +1845,7 @@ enum FetchFailure {
 }
 
 async fn write_rows<T>(
-    writer: &Arc<ChFactWriter<T>>,
+    writer: &Arc<dyn FactWriter<T>>,
     table_key: &str,
     chunk_id: Uuid,
     batch_size: usize,
@@ -1523,7 +1853,6 @@ async fn write_rows<T>(
 ) -> Result<(), StorageError>
 where
     T: Send + Sync + 'static,
-    ChFactWriter<T>: FactWriter<T>,
 {
     let size = batch_size.max(1);
     let mut rows = rows.into_iter();
@@ -1556,25 +1885,6 @@ fn range_attempt_id(frontier: ExchangeHistoryFrontier, from_block: u64, to_block
         &CHUNK_NAMESPACE,
         format!("polygon:{frontier}:{from_block}:{to_block}").as_bytes(),
     )
-}
-
-fn chunk_content_id(
-    frontier: ExchangeHistoryFrontier,
-    from_block: u64,
-    to_block: u64,
-    digest: HistoryDigest,
-) -> Uuid {
-    let frontier = match frontier {
-        ExchangeHistoryFrontier::Activation => "activation",
-        ExchangeHistoryFrontier::Retention => "retention",
-    };
-    let mut preimage = format!("polygon:{frontier}:{from_block}:{to_block}:").into_bytes();
-    preimage.extend_from_slice(&digest.0);
-    Uuid::new_v5(&CHUNK_NAMESPACE, &preimage)
-}
-
-fn state_revision(at: DateTime<Utc>) -> QuantResult<u64> {
-    u64::try_from(at.timestamp_micros()).map_err(|_| ExchangeHistoryError::InvalidTime.into())
 }
 
 fn chunk_row(
@@ -1659,7 +1969,7 @@ fn accepted_row(
             .ok_or(ExchangeHistoryError::InvalidTime)?,
         ),
         state_revision: Some(
-            i64::try_from(state_revision(accepted_at)?)
+            i64::try_from(ExchangeHistoryWorker::state_revision(accepted_at)?)
                 .map_err(|_| ExchangeHistoryError::FrontierOverflow)?,
         ),
         accepted_at: Some(accepted_at),
@@ -1696,22 +2006,6 @@ fn chunk_from_info(
         created_at: chunk.created_at,
         updated_at,
     }
-}
-
-fn policy_hash(config: &FinalizedExchangeHistoryConfig) -> QuantResult<ContentHash> {
-    let commitment = AvailabilityPolicyCommitment {
-        chain_id: 137,
-        finalized_only: true,
-        model_confirmation_blocks: config.model_confirmation_blocks,
-        provider_agreement: "hypersync_plus_independent_archive_rpc_exact_v1",
-        extractor_provider_id: config.hypersync.provider_id.clone(),
-        attestor_provider_id: config.attestor.provider_id.clone(),
-    };
-    let bytes =
-        serde_json::to_vec(&commitment).map_err(|error| ExchangeHistoryError::Projection {
-            detail: format!("availability policy serialization failed: {error}"),
-        })?;
-    Ok(ContentHash::from_bytes(*blake3::hash(&bytes).as_bytes()))
 }
 
 fn dedup_token(table_key: &str, chunk_id: Uuid, batch_index: u64) -> ContentHash {
@@ -1814,7 +2108,10 @@ fn quarantine_evidence_hash(
 
 fn shrinkable(error: &HistoryClientError) -> bool {
     match error {
-        HistoryClientError::ResponseBudget { .. } => true,
+        HistoryClientError::RpcResponseBodyBudget { .. }
+        | HistoryClientError::HyperSyncResponseBodyBudget { .. }
+        | HistoryClientError::CanonicalChunkBudget { .. }
+        | HistoryClientError::HyperSyncPayloadTooLarge => true,
         HistoryClientError::RpcRejected { message, .. } => {
             let message = message.to_ascii_lowercase();
             message.contains("block range")
@@ -1835,6 +2132,16 @@ fn extraction_failure(error: &HistoryClientError) -> ExchangeHistoryError {
 fn attestation_failure(error: &HistoryClientError) -> ExchangeHistoryError {
     ExchangeHistoryError::Attestation {
         detail: error.to_string(),
+    }
+}
+
+fn provider_pair_failure(
+    extractor: &HistoryClientError,
+    attestor: &HistoryClientError,
+) -> ExchangeHistoryError {
+    ExchangeHistoryError::ProviderFailures {
+        extractor: extractor.to_string(),
+        attestor: attestor.to_string(),
     }
 }
 
@@ -1862,11 +2169,858 @@ fn block_hash(value: &str) -> QuantResult<EvmBlockHash> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HistoryClientError, shrinkable};
+    use std::{
+        collections::{BTreeMap, HashSet},
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+    };
+
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
+    use parking_lot::Mutex;
+    use quant_pivot_api::exchange::history_client::HistoryDigest;
+    use quant_pivot_error::{
+        QuantError, exchange_history::ExchangeHistoryError, storage::StorageError,
+    };
+    use quant_pivot_models::{
+        config::FinalizedExchangeHistoryConfig,
+        domain::{
+            api::MarketPageQuery,
+            data_plane::{
+                CreateHistoryFitSeal, CreateHistoryServingHeadSeal, ExchangeHistoryChunkInfo,
+                ExchangeHistoryChunkStatus, ExchangeHistoryFrontier, ExchangeHistoryPlanInfo,
+                ExchangeHistoryQuarantineInfo, ExchangeHistoryQuarantineRead,
+                ExchangeHistoryQuarantineRecord, ExchangeHistoryQuarantineResolutionInfo,
+                HistoryFitSeal, HistorySealChunkRef, HistoryServingHeadSeal,
+                HistoryServingHeadSealInfo, NewExchangeHistoryChunk, NewExchangeHistoryPlan,
+                NewExchangeHistoryQuarantine, NewExchangeHistoryQuarantineResolution,
+                ResolveAcceptedHistoryRange,
+            },
+            market::{MarketInfo, UpsertMarket},
+            pagination::Paginated,
+        },
+        enums::market::MarketStatus,
+        types::{ContentHash, HistoryFitSealId, HistoryServingHeadSealId, MarketId, TokenId},
+    };
+    use quant_pivot_repository::traits::{ExchangeHistoryRepository, FactWriter, MarketRepository};
+    use uuid::Uuid;
+
+    use super::{
+        ArchiveProbe, AttestedHistoryChunk, CanonicalBlockHeader, ExchangeEventRow,
+        ExchangeFeeChargeRow, ExchangeHistoryAcceptanceRow, ExchangeHistoryProgressHandle,
+        ExchangeHistoryStage, ExchangeHistoryWorker, ExchangeHistoryWriters, ExchangeLogRawRow,
+        ExchangeMatchRow, ExecutionParticipantRow, ExtractedHistoryChunk, FetchFailure,
+        HistoryAttestorSource, HistoryClientError, HistoryContinuityProof,
+        HistoryContinuityProofBasis, HistoryExtractorSource, MarketExecutionRow, MetricsHub,
+        block_hash, shrinkable,
+    };
+
+    const ACTIVATION_START: u64 = 100;
+    const CONFIRMATIONS: u64 = 12;
+
+    #[derive(Default)]
+    struct HistoryState {
+        plan: Option<ExchangeHistoryPlanInfo>,
+        chunks: Vec<ExchangeHistoryChunkInfo>,
+        heads: Vec<HistoryServingHeadSeal>,
+    }
+
+    #[derive(Default)]
+    struct MemoryHistoryRepository {
+        state: Mutex<HistoryState>,
+    }
+
+    impl MemoryHistoryRepository {
+        fn snapshot(&self) -> HistoryState {
+            let state = self.state.lock();
+            HistoryState {
+                plan: state.plan.clone(),
+                chunks: state.chunks.clone(),
+                heads: state.heads.clone(),
+            }
+        }
+
+        fn plan_info(plan: NewExchangeHistoryPlan) -> ExchangeHistoryPlanInfo {
+            ExchangeHistoryPlanInfo {
+                plan_id: plan.plan_id,
+                chain_id: plan.chain_id,
+                policy_hash: plan.policy_hash,
+                bootstrap_profile_set_hash: plan.bootstrap_profile_set_hash,
+                finalized_anchor_block: plan.finalized_anchor_block,
+                finalized_anchor_hash: plan.finalized_anchor_hash,
+                finalized_anchor_timestamp: plan.finalized_anchor_timestamp,
+                activation_from_block: plan.activation_from_block,
+                activation_through_block: plan.activation_through_block,
+                crypto_required_from_block: plan.crypto_required_from_block,
+                weather_required_from_block: plan.weather_required_from_block,
+                retention_from_block: plan.retention_from_block,
+                retention_through_block: plan.retention_through_block,
+                created_at: plan.created_at,
+            }
+        }
+
+        fn chunk_info(chunk: NewExchangeHistoryChunk) -> ExchangeHistoryChunkInfo {
+            ExchangeHistoryChunkInfo {
+                chunk_id: chunk.chunk_id,
+                frontier: chunk.frontier,
+                from_block: chunk.from_block,
+                to_block: chunk.to_block,
+                status: chunk.status,
+                attempt_count: chunk.attempt_count,
+                hypersync_count: chunk.hypersync_count,
+                attestor_count: chunk.attestor_count,
+                hypersync_digest: chunk.hypersync_digest,
+                attestor_digest: chunk.attestor_digest,
+                first_block_hash: chunk.first_block_hash,
+                last_block_hash: chunk.last_block_hash,
+                archive_height: chunk.archive_height,
+                continuity_basis: chunk.continuity_basis,
+                continuity_block: chunk.continuity_block,
+                continuity_hash: chunk.continuity_hash,
+                effective_through_at: chunk.effective_through_at,
+                state_revision: chunk.state_revision,
+                accepted_at: chunk.accepted_at,
+                created_at: chunk.created_at,
+                updated_at: chunk.updated_at,
+            }
+        }
+
+        fn unexpected<T>(operation: &str) -> Result<T, StorageError> {
+            Err(StorageError::invariant_violation(
+                Some("exchange_history_test"),
+                format!("unexpected test repository operation {operation}"),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl ExchangeHistoryRepository for MemoryHistoryRepository {
+        async fn create_or_load_plan(
+            &self,
+            plan: NewExchangeHistoryPlan,
+        ) -> Result<ExchangeHistoryPlanInfo, StorageError> {
+            let mut state = self.state.lock();
+            if let Some(existing) = &state.plan {
+                return Ok(existing.clone());
+            }
+            let plan = Self::plan_info(plan);
+            state.plan = Some(plan.clone());
+            drop(state);
+            Ok(plan)
+        }
+
+        async fn load_plan(
+            &self,
+            chain_id: i64,
+        ) -> Result<Option<ExchangeHistoryPlanInfo>, StorageError> {
+            Ok(self
+                .state
+                .lock()
+                .plan
+                .clone()
+                .filter(|plan| plan.chain_id == chain_id))
+        }
+
+        async fn find_range(
+            &self,
+            frontier: ExchangeHistoryFrontier,
+            from_block: i64,
+            to_block: i64,
+        ) -> Result<Option<ExchangeHistoryChunkInfo>, StorageError> {
+            Ok(self
+                .state
+                .lock()
+                .chunks
+                .iter()
+                .find(|chunk| {
+                    chunk.frontier == frontier
+                        && chunk.from_block == from_block
+                        && chunk.to_block == to_block
+                })
+                .cloned())
+        }
+
+        async fn save_chunk(
+            &self,
+            chunk: NewExchangeHistoryChunk,
+        ) -> Result<ExchangeHistoryChunkInfo, StorageError> {
+            let chunk = Self::chunk_info(chunk);
+            let mut state = self.state.lock();
+            if let Some(existing) = state
+                .chunks
+                .iter_mut()
+                .find(|existing| existing.chunk_id == chunk.chunk_id)
+            {
+                existing.clone_from(&chunk);
+            } else {
+                state.chunks.push(chunk.clone());
+            }
+            drop(state);
+            Ok(chunk)
+        }
+
+        async fn latest_accepted(
+            &self,
+            frontier: ExchangeHistoryFrontier,
+        ) -> Result<Option<ExchangeHistoryChunkInfo>, StorageError> {
+            Ok(self
+                .state
+                .lock()
+                .chunks
+                .iter()
+                .filter(|chunk| {
+                    chunk.frontier == frontier
+                        && chunk.status == ExchangeHistoryChunkStatus::Accepted
+                })
+                .max_by_key(|chunk| chunk.to_block)
+                .cloned())
+        }
+
+        async fn earliest_accepted(
+            &self,
+            frontier: ExchangeHistoryFrontier,
+        ) -> Result<Option<ExchangeHistoryChunkInfo>, StorageError> {
+            Ok(self
+                .state
+                .lock()
+                .chunks
+                .iter()
+                .filter(|chunk| {
+                    chunk.frontier == frontier
+                        && chunk.status == ExchangeHistoryChunkStatus::Accepted
+                })
+                .min_by_key(|chunk| chunk.from_block)
+                .cloned())
+        }
+
+        async fn accepted_from(
+            &self,
+            frontier: ExchangeHistoryFrontier,
+            from_block: i64,
+        ) -> Result<Vec<ExchangeHistoryChunkInfo>, StorageError> {
+            let mut chunks = self
+                .state
+                .lock()
+                .chunks
+                .iter()
+                .filter(|chunk| {
+                    chunk.frontier == frontier
+                        && chunk.status == ExchangeHistoryChunkStatus::Accepted
+                        && chunk.to_block >= from_block
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            chunks.sort_unstable_by_key(|chunk| chunk.from_block);
+            Ok(chunks)
+        }
+
+        async fn rewind_from(
+            &self,
+            frontier: ExchangeHistoryFrontier,
+            from_block: i64,
+            updated_at: DateTime<Utc>,
+        ) -> Result<Vec<ExchangeHistoryChunkInfo>, StorageError> {
+            let mut state = self.state.lock();
+            let mut rewound = Vec::new();
+            for chunk in &mut state.chunks {
+                if chunk.frontier == frontier
+                    && chunk.status == ExchangeHistoryChunkStatus::Accepted
+                    && chunk.to_block >= from_block
+                {
+                    rewound.push(chunk.clone());
+                    chunk.status = ExchangeHistoryChunkStatus::Rewound;
+                    chunk.updated_at = updated_at;
+                }
+            }
+            drop(state);
+            Ok(rewound)
+        }
+
+        async fn quarantine_chunk(
+            &self,
+            _chunk: NewExchangeHistoryChunk,
+            _quarantine: NewExchangeHistoryQuarantine,
+        ) -> Result<ExchangeHistoryQuarantineInfo, StorageError> {
+            Self::unexpected("quarantine_chunk")
+        }
+
+        async fn list_quarantine(
+            &self,
+            _frontier: ExchangeHistoryFrontier,
+            _limit: u64,
+        ) -> Result<Vec<ExchangeHistoryQuarantineInfo>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn page_quarantine(
+            &self,
+            _query: ExchangeHistoryQuarantineRead,
+        ) -> Result<Vec<ExchangeHistoryQuarantineRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn active_quarantine(
+            &self,
+            _frontier: ExchangeHistoryFrontier,
+            _from_block: i64,
+            _to_block: i64,
+            _limit: u64,
+        ) -> Result<Vec<ExchangeHistoryQuarantineInfo>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn count_active_quarantine(
+            &self,
+            _frontier: ExchangeHistoryFrontier,
+        ) -> Result<u64, StorageError> {
+            Ok(0)
+        }
+
+        async fn resolve_quarantine(
+            &self,
+            _resolution: NewExchangeHistoryQuarantineResolution,
+        ) -> Result<ExchangeHistoryQuarantineResolutionInfo, StorageError> {
+            Self::unexpected("resolve_quarantine")
+        }
+
+        async fn resolve_accepted_range(
+            &self,
+            _resolution: ResolveAcceptedHistoryRange,
+        ) -> Result<Vec<ExchangeHistoryQuarantineResolutionInfo>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_fit_seal(
+            &self,
+            _command: CreateHistoryFitSeal,
+        ) -> Result<HistoryFitSeal, StorageError> {
+            Self::unexpected("create_fit_seal")
+        }
+
+        async fn find_fit_seal(
+            &self,
+            _fit_seal_id: HistoryFitSealId,
+        ) -> Result<Option<HistoryFitSeal>, StorageError> {
+            Ok(None)
+        }
+
+        async fn create_serving_head(
+            &self,
+            command: CreateHistoryServingHeadSeal,
+        ) -> Result<HistoryServingHeadSeal, StorageError> {
+            let mut state = self.state.lock();
+            if let Some(existing) = state
+                .heads
+                .iter()
+                .find(|head| head.seal.serving_head_seal_id == command.seal.serving_head_seal_id)
+            {
+                return Ok(existing.clone());
+            }
+            let seal = HistoryServingHeadSealInfo {
+                serving_head_seal_id: command.seal.serving_head_seal_id,
+                seal_hash: command.seal.seal_hash,
+                plan_id: command.seal.plan_id,
+                frontier: command.seal.frontier,
+                previous_seal_id: command.seal.previous_seal_id,
+                window_from_block: command.seal.window_from_block,
+                accepted_through_block: command.seal.accepted_through_block,
+                effective_through_at: command.seal.effective_through_at,
+                policy_hash: command.seal.policy_hash,
+                created_at: command.seal.created_at,
+            };
+            let head = HistoryServingHeadSeal {
+                seal,
+                chunks: command.chunks,
+            };
+            state.heads.push(head.clone());
+            drop(state);
+            Ok(head)
+        }
+
+        async fn latest_serving_head(
+            &self,
+            frontier: ExchangeHistoryFrontier,
+        ) -> Result<Option<HistoryServingHeadSeal>, StorageError> {
+            Ok(self
+                .state
+                .lock()
+                .heads
+                .iter()
+                .rev()
+                .find(|head| head.seal.frontier == frontier)
+                .cloned())
+        }
+
+        async fn serving_head_at(
+            &self,
+            frontier: ExchangeHistoryFrontier,
+            decision_at: DateTime<Utc>,
+        ) -> Result<Option<HistoryServingHeadSeal>, StorageError> {
+            Ok(self
+                .state
+                .lock()
+                .heads
+                .iter()
+                .rev()
+                .find(|head| head.seal.frontier == frontier && head.seal.created_at <= decision_at)
+                .cloned())
+        }
+
+        async fn validate_fit_seal(
+            &self,
+            _fit_seal_id: HistoryFitSealId,
+            _seal_hash: ContentHash,
+        ) -> Result<HistoryFitSeal, StorageError> {
+            Self::unexpected("validate_fit_seal")
+        }
+
+        async fn validate_serving_head(
+            &self,
+            serving_head_seal_id: HistoryServingHeadSealId,
+            seal_hash: ContentHash,
+        ) -> Result<HistoryServingHeadSeal, StorageError> {
+            self.state
+                .lock()
+                .heads
+                .iter()
+                .find(|head| {
+                    head.seal.serving_head_seal_id == serving_head_seal_id
+                        && head.seal.seal_hash == seal_hash
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    StorageError::not_found("history_serving_head_seal", serving_head_seal_id)
+                })
+        }
+    }
+
+    struct EmptyMarketRepository;
+
+    impl EmptyMarketRepository {
+        fn unexpected<T>(operation: &str) -> Result<T, StorageError> {
+            Err(StorageError::invariant_violation(
+                Some("market_test"),
+                format!("unexpected test repository operation {operation}"),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl MarketRepository for EmptyMarketRepository {
+        async fn find_by_id(
+            &self,
+            _id: &MarketId,
+        ) -> Result<Option<Arc<MarketInfo>>, StorageError> {
+            Ok(None)
+        }
+
+        async fn find_by_ids(
+            &self,
+            _ids: &[MarketId],
+        ) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn find_by_tokens(
+            &self,
+            _token_ids: &[TokenId],
+        ) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn page(
+            &self,
+            _query: MarketPageQuery,
+        ) -> Result<Paginated<MarketInfo>, StorageError> {
+            Self::unexpected("market_page")
+        }
+
+        async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError> {
+            Ok(Arc::from([]))
+        }
+
+        async fn find_by_event(
+            &self,
+            _event_id: &str,
+        ) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn find_existing_ids(
+            &self,
+            _ids: &[MarketId],
+        ) -> Result<HashSet<String>, StorageError> {
+            Ok(HashSet::new())
+        }
+
+        async fn upsert(&self, _market: UpsertMarket) -> Result<Arc<MarketInfo>, StorageError> {
+            Self::unexpected("market_upsert")
+        }
+
+        async fn upsert_batch(&self, _markets: Vec<UpsertMarket>) -> Result<u64, StorageError> {
+            Self::unexpected("market_upsert_batch")
+        }
+
+        async fn update_status(
+            &self,
+            _id: &MarketId,
+            _status: MarketStatus,
+            _outcome: Option<&str>,
+        ) -> Result<(), StorageError> {
+            Self::unexpected("market_update_status")
+        }
+    }
+
+    struct MemoryWriter<T> {
+        rows: Mutex<Vec<T>>,
+    }
+
+    impl<T> MemoryWriter<T>
+    where
+        T: Send + Sync + 'static,
+    {
+        fn shared() -> Arc<dyn FactWriter<T>> {
+            Arc::new(Self {
+                rows: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl<T> FactWriter<T> for MemoryWriter<T>
+    where
+        T: Send + Sync + 'static,
+    {
+        async fn write_batch(&self, rows: Vec<T>) -> Result<(), StorageError> {
+            self.rows.lock().extend(rows);
+            Ok(())
+        }
+    }
+
+    impl ExchangeHistoryWriters {
+        fn memory() -> Self {
+            Self {
+                raw_logs: MemoryWriter::<ExchangeLogRawRow>::shared(),
+                events: MemoryWriter::<ExchangeEventRow>::shared(),
+                fee_charges: MemoryWriter::<ExchangeFeeChargeRow>::shared(),
+                matches: MemoryWriter::<ExchangeMatchRow>::shared(),
+                executions: MemoryWriter::<MarketExecutionRow>::shared(),
+                participants: MemoryWriter::<ExecutionParticipantRow>::shared(),
+                acceptance: MemoryWriter::<ExchangeHistoryAcceptanceRow>::shared(),
+            }
+        }
+    }
+
+    struct RollingHistorySource {
+        finalized_head: AtomicU64,
+        max_span: AtomicU64,
+        requested: Mutex<Vec<(u64, u64)>>,
+    }
+
+    impl RollingHistorySource {
+        const fn new(finalized_head: u64) -> Self {
+            Self {
+                finalized_head: AtomicU64::new(finalized_head),
+                max_span: AtomicU64::new(u64::MAX),
+                requested: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn advance(&self, finalized_head: u64) {
+            self.finalized_head.store(finalized_head, Ordering::SeqCst);
+        }
+
+        fn header(block: u64) -> CanonicalBlockHeader {
+            CanonicalBlockHeader {
+                number: block,
+                hash: format!("0x{block:064x}"),
+                parent_hash: format!("0x{:064x}", block.saturating_sub(1)),
+                timestamp: 1_700_000_000_u64.saturating_add(block.saturating_mul(2)),
+            }
+        }
+
+        fn extracted(&self, from_block: u64, to_block: u64) -> ExtractedHistoryChunk {
+            let confirmation = to_block.saturating_add(CONFIRMATIONS);
+            ExtractedHistoryChunk {
+                from_block,
+                to_block,
+                archive_height: self.finalized_head.load(Ordering::SeqCst),
+                first_block: Self::header(from_block),
+                last_block: Self::header(to_block),
+                confirmation_anchor: Self::header(confirmation),
+                logs: Vec::new(),
+                digest: HistoryDigest([0; 32]),
+                continuity_proof: HistoryContinuityProof {
+                    basis: HistoryContinuityProofBasis::HyperSyncBoundaryHeaders,
+                    attested_block_number: to_block,
+                    attested_block_hash: Self::header(to_block).hash,
+                    first_block_number: from_block,
+                    first_parent_hash: Self::header(from_block).parent_hash,
+                },
+                observed_at_millis: i64::try_from(Self::header(confirmation).timestamp)
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(1_000),
+            }
+        }
+
+        fn attested(&self, from_block: u64, to_block: u64) -> AttestedHistoryChunk {
+            let extracted = self.extracted(from_block, to_block);
+            AttestedHistoryChunk {
+                from_block,
+                to_block,
+                first_block: extracted.first_block,
+                last_block: extracted.last_block,
+                confirmation_anchor: extracted.confirmation_anchor,
+                logs: extracted.logs,
+                digest: extracted.digest,
+                observed_at_millis: extracted.observed_at_millis,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HistoryExtractorSource for RollingHistorySource {
+        async fn fetch_chunk(
+            &self,
+            from_block: u64,
+            to_block: u64,
+        ) -> Result<ExtractedHistoryChunk, HistoryClientError> {
+            self.requested.lock().push((from_block, to_block));
+            if to_block.saturating_sub(from_block).saturating_add(1)
+                > self.max_span.load(Ordering::SeqCst)
+            {
+                return Err(HistoryClientError::CanonicalChunkBudget { limit: 1 });
+            }
+            if to_block.saturating_add(CONFIRMATIONS) > self.finalized_head.load(Ordering::SeqCst) {
+                return Err(HistoryClientError::InvalidConfig(
+                    "test chunk exceeds finalized head".to_owned(),
+                ));
+            }
+            Ok(self.extracted(from_block, to_block))
+        }
+    }
+
+    #[async_trait]
+    impl HistoryAttestorSource for RollingHistorySource {
+        async fn probe_archive(&self) -> Result<ArchiveProbe, HistoryClientError> {
+            Ok(ArchiveProbe {
+                finalized_head: Self::header(self.finalized_head.load(Ordering::SeqCst)),
+                contract_code_hashes: BTreeMap::new(),
+            })
+        }
+
+        async fn finalized_head(&self) -> Result<CanonicalBlockHeader, HistoryClientError> {
+            Ok(Self::header(self.finalized_head.load(Ordering::SeqCst)))
+        }
+
+        async fn block_header(
+            &self,
+            block_number: u64,
+        ) -> Result<CanonicalBlockHeader, HistoryClientError> {
+            Ok(Self::header(block_number))
+        }
+
+        async fn block_at_or_after(
+            &self,
+            _timestamp: u64,
+            upper_block: u64,
+        ) -> Result<CanonicalBlockHeader, HistoryClientError> {
+            if upper_block < ACTIVATION_START {
+                return Err(HistoryClientError::InvalidConfig(
+                    "test history frontier exceeds upper block".to_owned(),
+                ));
+            }
+            Ok(Self::header(ACTIVATION_START))
+        }
+
+        async fn fetch_chunk(
+            &self,
+            from_block: u64,
+            to_block: u64,
+        ) -> Result<AttestedHistoryChunk, HistoryClientError> {
+            if to_block.saturating_add(CONFIRMATIONS) > self.finalized_head.load(Ordering::SeqCst) {
+                return Err(HistoryClientError::InvalidConfig(
+                    "test chunk exceeds finalized head".to_owned(),
+                ));
+            }
+            Ok(self.attested(from_block, to_block))
+        }
+
+        async fn verify_continuity(
+            &self,
+            _proof: &HistoryContinuityProof,
+        ) -> Result<bool, HistoryClientError> {
+            Ok(true)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ProviderBehavior {
+        Success,
+        Shrinkable,
+        Fatal,
+    }
+
+    impl ProviderBehavior {
+        fn failure(self, provider: &'static str) -> Option<HistoryClientError> {
+            match self {
+                Self::Success => None,
+                Self::Shrinkable => Some(HistoryClientError::CanonicalChunkBudget { limit: 1 }),
+                Self::Fatal => Some(HistoryClientError::Network {
+                    provider,
+                    operation: "fetch_chunk",
+                }),
+            }
+        }
+    }
+
+    struct ScriptedExtractor {
+        source: Arc<RollingHistorySource>,
+        behavior: ProviderBehavior,
+    }
+
+    #[async_trait]
+    impl HistoryExtractorSource for ScriptedExtractor {
+        async fn fetch_chunk(
+            &self,
+            from_block: u64,
+            to_block: u64,
+        ) -> Result<ExtractedHistoryChunk, HistoryClientError> {
+            if let Some(error) = self.behavior.failure("test-hypersync") {
+                return Err(error);
+            }
+            Ok(self.source.extracted(from_block, to_block))
+        }
+    }
+
+    struct ScriptedAttestor {
+        source: Arc<RollingHistorySource>,
+        behavior: ProviderBehavior,
+    }
+
+    #[async_trait]
+    impl HistoryAttestorSource for ScriptedAttestor {
+        async fn probe_archive(&self) -> Result<ArchiveProbe, HistoryClientError> {
+            Ok(ArchiveProbe {
+                finalized_head: RollingHistorySource::header(
+                    self.source.finalized_head.load(Ordering::SeqCst),
+                ),
+                contract_code_hashes: BTreeMap::new(),
+            })
+        }
+
+        async fn finalized_head(&self) -> Result<CanonicalBlockHeader, HistoryClientError> {
+            Ok(RollingHistorySource::header(
+                self.source.finalized_head.load(Ordering::SeqCst),
+            ))
+        }
+
+        async fn block_header(
+            &self,
+            block_number: u64,
+        ) -> Result<CanonicalBlockHeader, HistoryClientError> {
+            Ok(RollingHistorySource::header(block_number))
+        }
+
+        async fn block_at_or_after(
+            &self,
+            _timestamp: u64,
+            upper_block: u64,
+        ) -> Result<CanonicalBlockHeader, HistoryClientError> {
+            Ok(RollingHistorySource::header(upper_block))
+        }
+
+        async fn fetch_chunk(
+            &self,
+            from_block: u64,
+            to_block: u64,
+        ) -> Result<AttestedHistoryChunk, HistoryClientError> {
+            if let Some(error) = self.behavior.failure("test-attestor") {
+                return Err(error);
+            }
+            Ok(self.source.attested(from_block, to_block))
+        }
+
+        async fn verify_continuity(
+            &self,
+            _proof: &HistoryContinuityProof,
+        ) -> Result<bool, HistoryClientError> {
+            Ok(true)
+        }
+    }
+
+    impl ExchangeHistoryWorker {
+        fn test_sources(
+            repository: Arc<MemoryHistoryRepository>,
+            extractor: Arc<dyn HistoryExtractorSource>,
+            attestor: Arc<dyn HistoryAttestorSource>,
+        ) -> Self {
+            let config = FinalizedExchangeHistoryConfig {
+                enabled: true,
+                min_blocks_per_chunk: 1,
+                max_blocks_per_chunk: 100,
+                retry_initial_ms: 1,
+                retry_max_ms: 1,
+                retry_max_attempts: 1,
+                model_confirmation_blocks: CONFIRMATIONS,
+                hot_window_blocks_per_tick: 100,
+                full_history_blocks_per_tick: 100,
+                batch_size: 100,
+                ..FinalizedExchangeHistoryConfig::default()
+            };
+            Self {
+                extractor,
+                attestor,
+                history_repo: repository,
+                market_repo: Arc::new(EmptyMarketRepository),
+                writers: ExchangeHistoryWriters::memory(),
+                policy_hash: Self::availability_policy_hash(&config).expect("test history policy"),
+                progress: ExchangeHistoryProgressHandle::fresh_boot(),
+                metrics: Arc::new(MetricsHub::new()),
+                adaptive_chunk_blocks: AtomicU64::new(config.max_blocks_per_chunk),
+                adaptive_success_count: AtomicU64::new(0),
+                config,
+            }
+        }
+
+        fn test(
+            repository: Arc<MemoryHistoryRepository>,
+            source: Arc<RollingHistorySource>,
+        ) -> Self {
+            let extractor: Arc<dyn HistoryExtractorSource> =
+                Arc::<RollingHistorySource>::clone(&source);
+            let attestor: Arc<dyn HistoryAttestorSource> = source;
+            Self::test_sources(repository, extractor, attestor)
+        }
+
+        fn scripted(
+            extractor_behavior: ProviderBehavior,
+            attestor_behavior: ProviderBehavior,
+        ) -> Self {
+            let source = Arc::new(RollingHistorySource::new(112));
+            let extractor: Arc<dyn HistoryExtractorSource> = Arc::new(ScriptedExtractor {
+                source: Arc::clone(&source),
+                behavior: extractor_behavior,
+            });
+            let attestor: Arc<dyn HistoryAttestorSource> = Arc::new(ScriptedAttestor {
+                source,
+                behavior: attestor_behavior,
+            });
+            Self::test_sources(
+                Arc::new(MemoryHistoryRepository::default()),
+                extractor,
+                attestor,
+            )
+        }
+    }
 
     #[test]
     fn shrink_classifier_is_bounded() {
-        assert!(shrinkable(&HistoryClientError::ResponseBudget { limit: 1 }));
+        assert!(shrinkable(&HistoryClientError::CanonicalChunkBudget {
+            limit: 1
+        }));
         assert!(shrinkable(&HistoryClientError::RpcRejected {
             method: "eth_getLogs",
             code: -32600,
@@ -1877,5 +3031,466 @@ mod tests {
             code: -32005,
             message: "rate limit exceeded".to_owned(),
         }));
+    }
+
+    #[tokio::test]
+    async fn provider_failure_matrix() {
+        enum Expected {
+            Success,
+            Shrink,
+            Extraction,
+            Attestation,
+            Pair,
+        }
+
+        let cases = [
+            (
+                "both providers succeed",
+                ProviderBehavior::Success,
+                ProviderBehavior::Success,
+                Expected::Success,
+            ),
+            (
+                "extractor alone fails fatally",
+                ProviderBehavior::Fatal,
+                ProviderBehavior::Success,
+                Expected::Extraction,
+            ),
+            (
+                "attestor alone fails fatally",
+                ProviderBehavior::Success,
+                ProviderBehavior::Fatal,
+                Expected::Attestation,
+            ),
+            (
+                "extractor alone requires shrink",
+                ProviderBehavior::Shrinkable,
+                ProviderBehavior::Success,
+                Expected::Shrink,
+            ),
+            (
+                "attestor alone requires shrink",
+                ProviderBehavior::Success,
+                ProviderBehavior::Shrinkable,
+                Expected::Shrink,
+            ),
+            (
+                "both providers require shrink",
+                ProviderBehavior::Shrinkable,
+                ProviderBehavior::Shrinkable,
+                Expected::Shrink,
+            ),
+            (
+                "extractor shrink cannot hide attestor fatal",
+                ProviderBehavior::Shrinkable,
+                ProviderBehavior::Fatal,
+                Expected::Pair,
+            ),
+            (
+                "attestor shrink cannot hide extractor fatal",
+                ProviderBehavior::Fatal,
+                ProviderBehavior::Shrinkable,
+                Expected::Pair,
+            ),
+            (
+                "both providers fail fatally",
+                ProviderBehavior::Fatal,
+                ProviderBehavior::Fatal,
+                Expected::Pair,
+            ),
+        ];
+
+        for (label, extractor, attestor, expected) in cases {
+            let worker = ExchangeHistoryWorker::scripted(extractor, attestor);
+            let result = worker
+                .fetch_providers(ExchangeHistoryFrontier::Activation, 100, 100)
+                .await;
+            match (expected, result) {
+                (Expected::Success, Ok(_)) | (Expected::Shrink, Err(FetchFailure::Shrink)) => {}
+                (
+                    Expected::Extraction,
+                    Err(FetchFailure::Contract(QuantError::ExchangeHistory(
+                        ExchangeHistoryError::Extraction { detail },
+                    ))),
+                ) => assert_eq!(
+                    detail, "test-hypersync request failed during fetch_chunk",
+                    "{label}"
+                ),
+                (
+                    Expected::Attestation,
+                    Err(FetchFailure::Contract(QuantError::ExchangeHistory(
+                        ExchangeHistoryError::Attestation { detail },
+                    ))),
+                ) => assert_eq!(
+                    detail, "test-attestor request failed during fetch_chunk",
+                    "{label}"
+                ),
+                (
+                    Expected::Pair,
+                    Err(FetchFailure::Contract(QuantError::ExchangeHistory(
+                        ExchangeHistoryError::ProviderFailures {
+                            extractor,
+                            attestor,
+                        },
+                    ))),
+                ) => {
+                    assert!(!extractor.is_empty(), "{label}");
+                    assert!(!attestor.is_empty(), "{label}");
+                }
+                _ => panic!("unexpected provider-pair result for {label}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_classifies_provider_pairs() {
+        let cases = [
+            (
+                "both providers succeed",
+                ProviderBehavior::Success,
+                ProviderBehavior::Success,
+                None,
+            ),
+            (
+                "extractor alone fails",
+                ProviderBehavior::Fatal,
+                ProviderBehavior::Success,
+                Some("extraction"),
+            ),
+            (
+                "attestor alone fails",
+                ProviderBehavior::Success,
+                ProviderBehavior::Fatal,
+                Some("attestation"),
+            ),
+            (
+                "both providers fail",
+                ProviderBehavior::Fatal,
+                ProviderBehavior::Fatal,
+                Some("pair"),
+            ),
+        ];
+
+        for (label, extractor, attestor, expected) in cases {
+            let result = ExchangeHistoryWorker::scripted(extractor, attestor)
+                .probe()
+                .await;
+            match (expected, result) {
+                (None, Ok(()))
+                | (
+                    Some("extraction"),
+                    Err(QuantError::ExchangeHistory(ExchangeHistoryError::Extraction { .. })),
+                )
+                | (
+                    Some("attestation"),
+                    Err(QuantError::ExchangeHistory(ExchangeHistoryError::Attestation { .. })),
+                )
+                | (
+                    Some("pair"),
+                    Err(QuantError::ExchangeHistory(ExchangeHistoryError::ProviderFailures {
+                        ..
+                    })),
+                ) => {}
+                _ => panic!("unexpected startup probe result for {label}"),
+            }
+        }
+    }
+
+    #[test]
+    fn activation_target_tracks_head() {
+        let plan = ExchangeHistoryPlanInfo {
+            plan_id: Uuid::nil(),
+            chain_id: 137,
+            policy_hash: ContentHash::from_bytes([1; 32]),
+            bootstrap_profile_set_hash: ContentHash::from_bytes([2; 32]),
+            finalized_anchor_block: 112,
+            finalized_anchor_hash: block_hash(&format!("0x{:064x}", 112)).expect("anchor hash"),
+            finalized_anchor_timestamp: 1_700_000_224,
+            activation_from_block: 100,
+            activation_through_block: 100,
+            crypto_required_from_block: 100,
+            weather_required_from_block: 100,
+            retention_from_block: 100,
+            retention_through_block: 99,
+            created_at: Utc::now(),
+        };
+
+        assert_eq!(
+            ExchangeHistoryWorker::activation_target(&plan, 103).expect("rolling target"),
+            103
+        );
+        assert!(ExchangeHistoryWorker::activation_target(&plan, 99).is_err());
+    }
+
+    #[test]
+    fn serving_id_binds_predecessor() {
+        let plan_id = Uuid::from_u128(1);
+        let chunks = [HistorySealChunkRef {
+            chunk_id: Uuid::from_u128(2),
+            frontier: ExchangeHistoryFrontier::Activation,
+            state_revision: 3,
+            from_block: 100,
+            to_block: 110,
+        }];
+        let predecessor = HistoryServingHeadSealId::new(Uuid::from_u128(4));
+        let initial = ExchangeHistoryWorker::serving_head_id(plan_id, None, &chunks);
+        let successor = ExchangeHistoryWorker::serving_head_id(plan_id, Some(predecessor), &chunks);
+
+        assert_ne!(initial, successor);
+        assert_eq!(
+            successor,
+            ExchangeHistoryWorker::serving_head_id(plan_id, Some(predecessor), &chunks)
+        );
+    }
+
+    #[test]
+    fn policy_frontiers_are_committed() {
+        let baseline = FinalizedExchangeHistoryConfig::default();
+        let baseline_hash = ExchangeHistoryWorker::availability_policy_hash(&baseline)
+            .expect("hash baseline history policy");
+
+        let mut activation = baseline.clone();
+        activation.activation_frontier_days += 1;
+        assert_ne!(
+            ExchangeHistoryWorker::availability_policy_hash(&activation)
+                .expect("hash activation history policy"),
+            baseline_hash
+        );
+
+        let mut retention = baseline.clone();
+        retention.retention_frontier_days += 1;
+        assert_ne!(
+            ExchangeHistoryWorker::availability_policy_hash(&retention)
+                .expect("hash retention history policy"),
+            baseline_hash
+        );
+
+        let mut rollback = baseline.clone();
+        rollback.rollback_buffer_blocks += 1;
+        assert_ne!(
+            ExchangeHistoryWorker::availability_policy_hash(&rollback)
+                .expect("hash rollback history policy"),
+            baseline_hash
+        );
+
+        let mut scheduling = baseline;
+        scheduling.poll_secs += 1;
+        scheduling.max_blocks_per_chunk += 1;
+        assert_eq!(
+            ExchangeHistoryWorker::availability_policy_hash(&scheduling)
+                .expect("hash scheduling history policy"),
+            baseline_hash
+        );
+    }
+
+    #[tokio::test]
+    async fn catchup_preserves_initial_cut() {
+        let repository = Arc::new(MemoryHistoryRepository::default());
+        let source = Arc::new(RollingHistorySource::new(116));
+        let worker = ExchangeHistoryWorker::test(Arc::clone(&repository), Arc::clone(&source));
+        let initial = worker
+            .ensure_plan(&RollingHistorySource::header(112), 100)
+            .await
+            .expect("freeze the initial plan before catch-up starts");
+        assert!(repository.snapshot().chunks.is_empty());
+
+        worker
+            .run_once()
+            .await
+            .expect("catch up beyond the frozen target");
+        assert_eq!(
+            source.requested.lock().as_slice(),
+            &[(100, 100), (101, 104)]
+        );
+        let caught_up = repository.snapshot();
+        assert_eq!(caught_up.plan.as_ref(), Some(&initial));
+        assert_eq!(
+            caught_up
+                .heads
+                .last()
+                .expect("live serving head")
+                .seal
+                .accepted_through_block,
+            104
+        );
+        assert!(
+            caught_up
+                .heads
+                .iter()
+                .any(|head| head.seal.accepted_through_block == 100)
+        );
+        assert!(
+            caught_up
+                .chunks
+                .iter()
+                .all(|chunk| chunk.to_block <= 100 || chunk.from_block > 100)
+        );
+
+        source.advance(120);
+        worker.run_once().await.expect("append newer live history");
+        let rolling = repository.snapshot();
+        assert_eq!(rolling.plan.as_ref(), Some(&initial));
+        assert_eq!(source.requested.lock().last(), Some(&(105, 108)));
+        assert_eq!(
+            rolling
+                .heads
+                .last()
+                .expect("new live head")
+                .seal
+                .accepted_through_block,
+            108
+        );
+        let restarted = ExchangeHistoryWorker::test(Arc::clone(&repository), source);
+        restarted
+            .run_once()
+            .await
+            .expect("restart without changing the frozen prefix");
+        let replayed = repository.snapshot();
+        assert_eq!(replayed.chunks, rolling.chunks);
+        assert_eq!(replayed.heads, rolling.heads);
+    }
+
+    #[tokio::test]
+    async fn catchup_keeps_tick_budget() {
+        let repository = Arc::new(MemoryHistoryRepository::default());
+        let source = Arc::new(RollingHistorySource::new(192));
+        let mut worker = ExchangeHistoryWorker::test(Arc::clone(&repository), Arc::clone(&source));
+        worker.config.hot_window_blocks_per_tick = 50;
+        worker
+            .run_once()
+            .await
+            .expect("first bounded catch-up pass");
+        let initial = repository.snapshot().plan.expect("initial history plan");
+        assert_eq!(initial.activation_through_block, 180);
+        assert_eq!(source.requested.lock().as_slice(), &[(100, 149)]);
+
+        source.advance(208);
+        worker
+            .run_once()
+            .await
+            .expect("cross the preserved cut within one tick budget");
+        assert_eq!(
+            source.requested.lock().as_slice(),
+            &[(100, 149), (150, 180), (181, 196)]
+        );
+        let final_state = repository.snapshot();
+        assert_eq!(final_state.plan.as_ref(), Some(&initial));
+        assert_eq!(
+            final_state
+                .heads
+                .last()
+                .expect("caught-up live head")
+                .seal
+                .accepted_through_block,
+            196
+        );
+    }
+
+    #[tokio::test]
+    async fn shrinking_preserves_initial_cut() {
+        let repository = Arc::new(MemoryHistoryRepository::default());
+        let source = Arc::new(RollingHistorySource::new(118));
+        source.max_span.store(2, Ordering::SeqCst);
+        let worker = ExchangeHistoryWorker::test(Arc::clone(&repository), Arc::clone(&source));
+        worker
+            .ensure_plan(&RollingHistorySource::header(115), 103)
+            .await
+            .expect("initial plan");
+        worker
+            .run_once()
+            .await
+            .expect("adaptive provider shrink remains bounded by the cut");
+        assert!(
+            source
+                .requested
+                .lock()
+                .iter()
+                .all(|(from, to)| *to <= 103 || *from > 103)
+        );
+        let state = repository.snapshot();
+        let ranges = state
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.status == ExchangeHistoryChunkStatus::Accepted)
+            .map(|chunk| (chunk.from_block, chunk.to_block))
+            .collect::<Vec<_>>();
+        assert_eq!(ranges, vec![(100, 101), (102, 103), (104, 105), (106, 106)]);
+        assert_eq!(
+            state
+                .heads
+                .last()
+                .expect("fully caught-up head")
+                .seal
+                .accepted_through_block,
+            106
+        );
+    }
+
+    #[tokio::test]
+    async fn rolling_head_is_idempotent() {
+        let repository = Arc::new(MemoryHistoryRepository::default());
+        let source = Arc::new(RollingHistorySource::new(112));
+        let worker = ExchangeHistoryWorker::test(Arc::clone(&repository), Arc::clone(&source));
+
+        worker.run_once().await.expect("initial history pass");
+        let first = repository.snapshot();
+        let initial_plan = first.plan.clone().expect("initial immutable plan");
+        let first_chunks = first
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.status == ExchangeHistoryChunkStatus::Accepted)
+            .collect::<Vec<_>>();
+        assert_eq!(first_chunks.len(), 1);
+        assert_eq!(
+            (first_chunks[0].from_block, first_chunks[0].to_block),
+            (100, 100)
+        );
+        assert_eq!(first.heads.len(), 1);
+        assert_eq!(first.heads[0].seal.accepted_through_block, 100);
+
+        source.advance(115);
+        worker.run_once().await.expect("rolling history pass");
+        let second = repository.snapshot();
+        let second_plan = second.plan.clone().expect("persisted immutable plan");
+        let second_chunks = second
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.status == ExchangeHistoryChunkStatus::Accepted)
+            .collect::<Vec<_>>();
+        assert_eq!(second_plan, initial_plan);
+        assert_eq!(second_plan.finalized_anchor_block, 112);
+        assert_eq!(second_plan.activation_through_block, 100);
+        assert_eq!(second_chunks.len(), 2);
+        assert_eq!(
+            (second_chunks[1].from_block, second_chunks[1].to_block),
+            (101, 103)
+        );
+        assert_eq!(second.heads.len(), 2);
+        assert_ne!(
+            second.heads[0].seal.serving_head_seal_id,
+            second.heads[1].seal.serving_head_seal_id
+        );
+        assert_eq!(
+            second.heads[1].seal.previous_seal_id,
+            Some(second.heads[0].seal.serving_head_seal_id)
+        );
+        assert_eq!(second.heads[1].seal.accepted_through_block, 103);
+        assert!(
+            second.heads[1].seal.effective_through_at > second.heads[0].seal.effective_through_at
+        );
+        let rolling_progress = worker.progress().snapshot();
+        assert_eq!(rolling_progress.target_block, Some(103));
+        assert_eq!(rolling_progress.accepted_through_block, Some(103));
+
+        let restarted = ExchangeHistoryWorker::test(Arc::clone(&repository), Arc::clone(&source));
+        restarted.run_once().await.expect("restart history pass");
+        let replayed = repository.snapshot();
+        assert_eq!(replayed.plan, second.plan);
+        assert_eq!(replayed.chunks, second.chunks);
+        assert_eq!(replayed.heads, second.heads);
+        let progress = restarted.progress().snapshot();
+        assert_eq!(progress.target_block, Some(103));
+        assert_eq!(progress.accepted_through_block, Some(103));
+        assert_eq!(progress.stage, ExchangeHistoryStage::ActivationReady);
     }
 }

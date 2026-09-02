@@ -108,6 +108,8 @@ mod policy_governance;
 mod portfolio_optimizer;
 #[path = "repository/governance/promotion_permit.rs"]
 mod promotion_permit;
+#[path = "repository/research/recommendation_economic_outcome.rs"]
+mod recommendation_economic_outcome;
 #[path = "repository/accounting/recommendation_resolution_outcome.rs"]
 mod recommendation_resolution_outcome;
 #[path = "repository/execution/report_scheduler.rs"]
@@ -118,6 +120,8 @@ mod research_job;
 mod research_readiness;
 #[path = "repository/accounting/resolution_projection.rs"]
 mod resolution_projection;
+#[path = "repository/research/route_economic_health.rs"]
+mod route_economic_health;
 #[path = "repository/governance/runtime_control.rs"]
 mod runtime_control;
 #[path = "repository/research/trade_policy_trial.rs"]
@@ -182,8 +186,12 @@ async fn run_catalog_scenarios() -> Result<(), String> {
         catalog_ledger::failed_never_creates_coverage,
         catalog_ledger::identical_reconcile_only_audit,
         catalog_ledger::projection_upsert_updates_status,
+        catalog_ledger::late_source_preserves_terminal,
         catalog_ledger::object_rejected_before_commit,
         clob_market_info::concurrent_retries_deduplicate,
+        domain_projection::crypto_equivocation_rejected,
+        domain_projection::crypto_generation_monotonic,
+        domain_projection::crypto_rtds_order_monotonic,
         domain_projection::crypto_source_sequence_bigint,
         domain_projection::crypto_rejected_before_write,
         domain_source_expectation::source_exists_before_optimistically,
@@ -233,9 +241,18 @@ async fn run_execution_scenarios() -> Result<(), String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn report_announcement_race_contracts() {
+    Box::pin(with_postgres_suite(
+        execution_submission::superseded_announcement_releases(),
+    ))
+    .await
+    .expect("start report-announcement race PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn account_recovery_contracts() {
     Box::pin(with_postgres_suite(async {
-        account_recovery::unknown_execution_is_idempotent().await;
+        Box::pin(account_recovery::unknown_execution_is_idempotent()).await;
     }))
     .await
     .expect("start account-recovery PostgreSQL suite");
@@ -259,7 +276,9 @@ async fn run_position_scenarios() -> Result<(), String> {
         execution_submission::reconcile_ambiguous_not_capital,
         execution_submission::reconcile_unresolvable_impairs_ambiguous,
         execution_submission::reconcile_partial_writes_position,
+        execution_submission::reconcile_fill_preserves_exits,
         execution_submission::reconcile_correction_is_idempotent,
+        execution_submission::reconcile_concurrent_is_idempotent,
         execution_submission::operator_resolve_impaired_capital,
         execution_submission::entry_fill_freezes_denominator,
         execution_submission::exit_full_releases_pnl,
@@ -272,6 +291,7 @@ async fn run_position_scenarios() -> Result<(), String> {
 async fn run_platform_scenarios() -> Result<(), String> {
     run_scenarios_result!(
         report_scheduler::two_coordinators_claim_run,
+        report_scheduler::activation_read_stays_coherent,
         report_scheduler::restart_coalesces_latest_gap,
         report_scheduler::config_change_skips_occurrence,
         access_control::user_crud_paging_delete,
@@ -328,6 +348,7 @@ async fn run_research_scenarios() -> Result<(), String> {
         model_registry::model_version_rejects_boundary,
         model_registry::immutable_artifacts_coexist,
         model_registry::route_candidate_catalog_filters,
+        research_readiness::latest_valid_breaks_ties,
         research_readiness::readiness_evidence_scoped_only,
         research_readiness::readiness_evidence_rejects_tampering,
         research_readiness::shadow_missing_without_fallbacks,
@@ -377,6 +398,15 @@ async fn research_job_feedback_contracts() {
     .expect("start feedback research-job PostgreSQL suite");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_order_contracts() {
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(research_readiness::latest_valid_breaks_ties);
+    }))
+    .await
+    .expect("start readiness-order PostgreSQL suite");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn research_job_recovery_contracts() {
     Box::pin(with_postgres_suite(async {
@@ -410,6 +440,33 @@ async fn recommendation_resolution_outcome_contracts() {
     .expect("start recommendation-resolution outcome PostgreSQL suite");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recommendation_economic_outcome_contracts() {
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(
+            recommendation_economic_outcome::worm_lineage_is_enforced,
+            recommendation_economic_outcome::durable_horizon_queue_enforced,
+            recommendation_economic_outcome::early_resolution_freezes_boundary,
+            recommendation_economic_outcome::future_terminal_stays_pending,
+            recommendation_economic_outcome::stale_claims_cannot_publish,
+            recommendation_economic_outcome::lease_expiry_rolls_back,
+            recommendation_economic_outcome::existing_outcome_completes_atomically,
+            recommendation_economic_outcome::corrupted_resolution_rejects_claim,
+        );
+    }))
+    .await
+    .expect("start recommendation-economic-outcome PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn route_economic_health_contracts() {
+    Box::pin(with_postgres_suite(async {
+        Box::pin(route_economic_health::insufficient_worm_is_enforced()).await;
+    }))
+    .await
+    .expect("start Route-economic-health PostgreSQL suite");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn execution_attempt_outcome_contracts() {
     Box::pin(with_postgres_suite(async {
@@ -431,6 +488,7 @@ async fn feedback_cohort_repository_contracts() {
         run_scenarios!(
             feedback_cohort::candidate_page_keyset_frozen,
             feedback_cohort::cohort_truth_planes_exact,
+            feedback_cohort::execution_truth_requires_rollup,
             feedback_cohort::cutoff_excludes_late_pages,
             feedback_cohort::keyset_reads_without_duplicates,
         );
@@ -686,6 +744,7 @@ async fn fresh_boot_repository_contracts() {
             fresh_boot::recovery_and_lineage_hold,
             fresh_boot::retry_cas_holds,
             fresh_boot::quarantine_resolution_unlocks,
+            fresh_boot::serving_head_hash_holds,
         );
     }))
     .await

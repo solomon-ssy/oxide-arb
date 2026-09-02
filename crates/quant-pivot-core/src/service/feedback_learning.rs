@@ -3,6 +3,7 @@
 use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use quant_pivot_compute::{ComputeExecutor, OFFLINE_MEMORY_BYTES, OfflineMemory};
 use quant_pivot_error::{
     QuantError, QuantResult, feedback::FeedbackError, research::ResearchError,
     storage::StorageError,
@@ -35,7 +36,7 @@ use quant_pivot_research::{
         FeedbackTrainingStageResult,
     },
 };
-use tokio::time::timeout;
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 const COHORT_MANIFEST_DOMAIN: &str = "quant-pivot/feedback-learning-cohort-manifest";
@@ -50,6 +51,7 @@ pub struct FeedbackLearningExecutionDeps {
     pub cpcv: Arc<dyn CpcvBacktestPort>,
     pub governance: Arc<dyn ModelGovernancePort>,
     pub artifacts: Arc<dyn ArtifactStore>,
+    pub compute: Arc<ComputeExecutor>,
 }
 
 /// Executes one canonical, bounded batch for each feedback learning stage.
@@ -61,6 +63,39 @@ pub struct FeedbackLearningExecutionService {
     cpcv: Arc<dyn CpcvBacktestPort>,
     governance: Arc<dyn ModelGovernancePort>,
     artifacts: Arc<dyn ArtifactStore>,
+    compute: FeedbackLearningCompute,
+}
+
+struct FeedbackLearningCompute {
+    executor: Arc<ComputeExecutor>,
+    memory: OfflineMemory,
+}
+
+impl FeedbackLearningCompute {
+    fn try_new(executor: Arc<ComputeExecutor>) -> QuantResult<Self> {
+        Ok(Self {
+            executor,
+            memory: OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES)?,
+        })
+    }
+
+    async fn run<T, F>(&self, cancel: &CancellationToken, work: F) -> QuantResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QuantResult<T> + Send + 'static,
+    {
+        self.executor
+            .run_offline_cancellable(self.memory, cancel, work)
+            .await
+    }
+
+    async fn finalize<T, F>(&self, work: F) -> QuantResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QuantResult<T> + Send + 'static,
+    {
+        self.executor.run_offline(self.memory, work).await
+    }
 }
 
 struct CpcvBatchPlan {
@@ -70,9 +105,8 @@ struct CpcvBatchPlan {
 }
 
 impl FeedbackLearningExecutionService {
-    #[must_use]
-    pub fn new(deps: FeedbackLearningExecutionDeps) -> Self {
-        Self {
+    pub fn try_new(deps: FeedbackLearningExecutionDeps) -> QuantResult<Self> {
+        Ok(Self {
             datasets: deps.datasets,
             training: deps.training,
             calibration_fit: deps.calibration_fit,
@@ -80,7 +114,8 @@ impl FeedbackLearningExecutionService {
             cpcv: deps.cpcv,
             governance: deps.governance,
             artifacts: deps.artifacts,
-        }
+            compute: FeedbackLearningCompute::try_new(deps.compute)?,
+        })
     }
 
     async fn execute_dataset_batch(
@@ -89,7 +124,12 @@ impl FeedbackLearningExecutionService {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<FeedbackLearningExecutionResult> {
-        params.validate()?;
+        let validation = params.clone();
+        self.compute
+            .run(&cancel, move || {
+                validation.validate().map_err(QuantError::from)
+            })
+            .await?;
         let total = Self::batch_total(params.commands.len())?;
         let mut results = Vec::with_capacity(params.commands.len());
         for (index, command) in params.commands.iter().cloned().enumerate() {
@@ -101,28 +141,44 @@ impl FeedbackLearningExecutionService {
                 |command_cancel| {
                     self.datasets.build_feedback(
                         command.request.clone(),
+                        command.resource_budget.max_working_set_bytes,
                         Arc::clone(&progress),
                         command_cancel,
                     )
                 },
             )
             .await?;
-            results.push(Self::dataset_result(&command, &info)?);
+            let result_cancel = cancel.clone();
+            results.push(
+                self.compute
+                    .run(&cancel, move || {
+                        Self::require_active(&result_cancel, FeedbackStage::DatasetSeal)?;
+                        Self::dataset_result(&command, &info)
+                    })
+                    .await?,
+            );
             progress.report(ResearchJobProgress::with_total(
                 "feedback-dataset-seal",
                 Self::batch_progress(index)?,
                 total,
             ));
         }
-        let artifact = FeedbackLearningStageArtifact::try_new(
-            params.feedback_cycle_id,
-            params.cycle_idempotency_hash,
-            params.candidate_family_hash,
-            params.input_hash()?,
-            None,
-            FeedbackLearningStageResults::DatasetSeal(results),
-        )?;
-        self.persist(artifact).await
+        let artifact_cancel = cancel.clone();
+        let artifact = self
+            .compute
+            .run(&cancel, move || {
+                Self::require_active(&artifact_cancel, FeedbackStage::DatasetSeal)?;
+                FeedbackLearningStageArtifact::try_new(
+                    params.feedback_cycle_id,
+                    params.cycle_idempotency_hash,
+                    params.candidate_family_hash,
+                    params.input_hash()?,
+                    None,
+                    FeedbackLearningStageResults::DatasetSeal(results),
+                )
+            })
+            .await?;
+        self.persist(artifact, &cancel).await
     }
 
     async fn execute_training_batch(
@@ -131,12 +187,18 @@ impl FeedbackLearningExecutionService {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<FeedbackLearningExecutionResult> {
-        params.validate()?;
+        let validation = params.clone();
+        self.compute
+            .run(&cancel, move || {
+                validation.validate().map_err(QuantError::from)
+            })
+            .await?;
         let previous = self
             .load_previous(
                 &params.previous,
                 params.candidate_family_hash,
                 FeedbackStage::DatasetSeal,
+                &cancel,
             )
             .await?;
         let FeedbackLearningStageResults::DatasetSeal(dataset_results) = &previous.results else {
@@ -162,7 +224,13 @@ impl FeedbackLearningExecutionService {
             let dataset = self
                 .require_dataset(&expected.training_dataset_id, DatasetPurpose::Training)
                 .await?;
-            Self::verify_dataset_evidence(&dataset, expected)?;
+            let verify_dataset = dataset.clone();
+            let verify_expected = expected.clone();
+            self.compute
+                .run(&cancel, move || {
+                    Self::verify_dataset_evidence(&verify_dataset, &verify_expected)
+                })
+                .await?;
             let view = Self::execute_bounded(
                 FeedbackStage::Training,
                 command.resource_budget,
@@ -184,27 +252,34 @@ impl FeedbackLearningExecutionService {
                 ));
             }
             let model = self.require_model(&command.params.model_version_id).await?;
-            results.push(Self::training_result(
-                command.candidate_recipe_hash,
-                command.params.model_run_id,
-                &dataset,
-                &model,
-            )?);
+            let candidate_recipe_hash = command.candidate_recipe_hash;
+            let model_run_id = command.params.model_run_id;
+            results.push(
+                Box::pin(self.compute.run(&cancel, move || {
+                    Self::training_result(candidate_recipe_hash, model_run_id, &dataset, &model)
+                }))
+                .await?,
+            );
             progress.report(ResearchJobProgress::with_total(
                 "feedback-training",
                 Self::batch_progress(index)?,
                 total,
             ));
         }
-        let artifact = FeedbackLearningStageArtifact::try_new(
-            params.feedback_cycle_id,
-            params.cycle_idempotency_hash,
-            params.candidate_family_hash,
-            params.input_hash()?,
-            Some(params.previous),
-            FeedbackLearningStageResults::Training(results),
-        )?;
-        self.persist(artifact).await
+        let artifact = self
+            .compute
+            .run(&cancel, move || {
+                FeedbackLearningStageArtifact::try_new(
+                    params.feedback_cycle_id,
+                    params.cycle_idempotency_hash,
+                    params.candidate_family_hash,
+                    params.input_hash()?,
+                    Some(params.previous),
+                    FeedbackLearningStageResults::Training(results),
+                )
+            })
+            .await?;
+        self.persist(artifact, &cancel).await
     }
 
     fn dataset_result(
@@ -365,15 +440,15 @@ impl FeedbackLearningExecutionService {
         &self,
         model_version_id: &ModelVersionId,
     ) -> QuantResult<ModelVersionInfo> {
-        let model = self
-            .training
+        self.training
             .find_version(model_version_id)
             .await?
-            .ok_or_else(|| StorageError::not_found("quant_model_version", model_version_id))?;
-        model
-            .verified_serving_contract()
-            .map_err(|error| Self::contract(format!("invalid model serving contract: {error}")))?;
-        Ok(model)
+            .ok_or_else(|| {
+                QuantError::from(StorageError::not_found(
+                    "quant_model_version",
+                    model_version_id,
+                ))
+            })
     }
 
     fn verify_dataset_evidence(
@@ -431,12 +506,18 @@ impl FeedbackLearningExecutionService {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<FeedbackLearningExecutionResult> {
-        params.validate()?;
+        let validation = params.clone();
+        self.compute
+            .run(&cancel, move || {
+                validation.validate().map_err(QuantError::from)
+            })
+            .await?;
         let training_artifact = self
             .load_previous(
                 &params.previous,
                 params.candidate_family_hash,
                 FeedbackStage::Training,
+                &cancel,
             )
             .await?;
         let FeedbackLearningStageResults::Training(training_results) = &training_artifact.results
@@ -454,6 +535,7 @@ impl FeedbackLearningExecutionService {
                 dataset_reference,
                 params.candidate_family_hash,
                 FeedbackStage::DatasetSeal,
+                &cancel,
             )
             .await?;
         let FeedbackLearningStageResults::DatasetSeal(dataset_results) = &dataset_artifact.results
@@ -488,11 +570,18 @@ impl FeedbackLearningExecutionService {
                 ));
             }
             let source_model = self.require_model(&trained.model_version_id).await?;
-            Self::verify_training_evidence(&source_model, trained)?;
             let calibration_dataset = self
                 .require_dataset(&dataset.training_dataset_id, DatasetPurpose::Calibration)
                 .await?;
-            Self::verify_dataset_evidence(&calibration_dataset, dataset)?;
+            let verify_model = source_model.clone();
+            let verify_training = (*trained).clone();
+            let verify_dataset = calibration_dataset.clone();
+            let verify_dataset_result = dataset.clone();
+            Box::pin(self.compute.run(&cancel, move || {
+                Self::verify_training_evidence(&verify_model, &verify_training)?;
+                Self::verify_dataset_evidence(&verify_dataset, &verify_dataset_result)
+            }))
+            .await?;
             let outcome = Self::execute_bounded(
                 FeedbackStage::Calibration,
                 command.resource_budget,
@@ -507,8 +596,14 @@ impl FeedbackLearningExecutionService {
             )
             .await?;
             results.push(
-                self.calibration_result(command, source_model, calibration_dataset, outcome)
-                    .await?,
+                Box::pin(self.calibration_result(
+                    command,
+                    source_model,
+                    calibration_dataset,
+                    outcome,
+                    &cancel,
+                ))
+                .await?,
             );
             progress.report(ResearchJobProgress::with_total(
                 "feedback-calibration",
@@ -516,15 +611,20 @@ impl FeedbackLearningExecutionService {
                 total,
             ));
         }
-        let artifact = FeedbackLearningStageArtifact::try_new(
-            params.feedback_cycle_id,
-            params.cycle_idempotency_hash,
-            params.candidate_family_hash,
-            params.input_hash()?,
-            Some(params.previous),
-            FeedbackLearningStageResults::Calibration(results),
-        )?;
-        self.persist(artifact).await
+        let artifact = self
+            .compute
+            .run(&cancel, move || {
+                FeedbackLearningStageArtifact::try_new(
+                    params.feedback_cycle_id,
+                    params.cycle_idempotency_hash,
+                    params.candidate_family_hash,
+                    params.input_hash()?,
+                    Some(params.previous),
+                    FeedbackLearningStageResults::Calibration(results),
+                )
+            })
+            .await?;
+        self.persist(artifact, &cancel).await
     }
 
     async fn calibration_result(
@@ -533,6 +633,7 @@ impl FeedbackLearningExecutionService {
         source_model: ModelVersionInfo,
         calibration_dataset: TrainingDatasetInfo,
         outcome: ModelCalibrationFitOutcome,
+        cancel: &CancellationToken,
     ) -> QuantResult<FeedbackCalibrationStageResult> {
         let method = command.params.request.method;
         let (calibration_artifact_id, sample_count) = match outcome {
@@ -566,33 +667,42 @@ impl FeedbackLearningExecutionService {
             .ok_or_else(|| {
                 StorageError::not_found("quant_calibration_artifact", calibration_artifact_id)
             })?;
-        let payload = info
-            .verify_model_score()
-            .map_err(|error| Self::contract(format!("invalid calibration artifact: {error}")))?;
-        let fit = &payload.fit_contract;
-        let mapping_matches = matches!(
-            (method, &payload.mapping),
-            (
-                CalibrationMethod::Isotonic,
-                MonotoneMapping::Isotonic { .. }
-            ) | (CalibrationMethod::Platt, MonotoneMapping::Platt { .. })
-        );
-        if !mapping_matches
-            || fit.model.model_version_id != source_model.model_version_id
-            || fit.model.artifact_hash != source_model.artifact_hash
-            || fit.model.serving_contract_hash != source_model.serving_contract_hash
-            || fit.calibration_dataset.calibration_dataset_id
-                != calibration_dataset.training_dataset_id
-            || fit.calibration_dataset.dataset_hash != Self::dataset_hash(&calibration_dataset)?
-            || fit.policy_snapshot.decision_policy_snapshot_id
-                != command.params.decision_policy_snapshot_id
-            || sample_count != payload.reliability.n_samples
-            || i64::try_from(sample_count).ok() != Some(info.sample_count)
-        {
-            return Err(Self::contract(
-                "calibration artifact read-back differs from its frozen fit command",
-            ));
-        }
+        let verify_source = source_model.clone();
+        let verify_dataset = calibration_dataset.clone();
+        let decision_policy_snapshot_id = command.params.decision_policy_snapshot_id;
+        let calibration_artifact_hash = self
+            .compute
+            .run(cancel, move || {
+                let payload = info.verify_model_score().map_err(|error| {
+                    Self::contract(format!("invalid calibration artifact: {error}"))
+                })?;
+                let fit = &payload.fit_contract;
+                let mapping_matches = matches!(
+                    (method, &payload.mapping),
+                    (
+                        CalibrationMethod::Isotonic,
+                        MonotoneMapping::Isotonic { .. }
+                    ) | (CalibrationMethod::Platt, MonotoneMapping::Platt { .. })
+                );
+                if !mapping_matches
+                    || fit.model.model_version_id != verify_source.model_version_id
+                    || fit.model.artifact_hash != verify_source.artifact_hash
+                    || fit.model.serving_contract_hash != verify_source.serving_contract_hash
+                    || fit.calibration_dataset.calibration_dataset_id
+                        != verify_dataset.training_dataset_id
+                    || fit.calibration_dataset.dataset_hash != Self::dataset_hash(&verify_dataset)?
+                    || fit.policy_snapshot.decision_policy_snapshot_id
+                        != decision_policy_snapshot_id
+                    || sample_count != payload.reliability.n_samples
+                    || i64::try_from(sample_count).ok() != Some(info.sample_count)
+                {
+                    return Err(Self::contract(
+                        "calibration artifact read-back differs from its frozen fit command",
+                    ));
+                }
+                Ok(info.content_hash)
+            })
+            .await?;
         let calibrated = self
             .governance
             .seal_calibrated_model(
@@ -605,48 +715,51 @@ impl FeedbackLearningExecutionService {
                 command.params.actor.clone(),
             )
             .await?;
-        let derivation = calibrated.verified_derivation().map_err(|error| {
-            Self::contract(format!("invalid calibrated model derivation: {error}"))
-        })?;
-        if derivation
-            != (ModelVersionDerivation::ReturnCalibration {
-                parent_model_version_id: source_model.model_version_id,
+        Box::pin(self.compute.finalize(move || {
+            let derivation = calibrated.verified_derivation().map_err(|error| {
+                Self::contract(format!("invalid calibrated model derivation: {error}"))
+            })?;
+            if derivation
+                != (ModelVersionDerivation::ReturnCalibration {
+                    parent_model_version_id: source_model.model_version_id,
+                    calibration_artifact_id,
+                })
+            {
+                return Err(Self::contract(
+                    "calibrated model does not bind its exact source and calibrator",
+                ));
+            }
+            let contract = calibrated.verified_serving_contract().map_err(|error| {
+                Self::contract(format!("invalid calibrated serving contract: {error}"))
+            })?;
+            let source_contract = source_model.verified_serving_contract().map_err(|error| {
+                Self::contract(format!("invalid source serving contract: {error}"))
+            })?;
+            let bindings = contract.bindings();
+            if calibrated.training_dataset_id != source_model.training_dataset_id
+                || bindings.transform.training_input_hash
+                    != source_contract.bindings().transform.training_input_hash
+            {
+                return Err(Self::contract(
+                    "calibrated model changed its source Dataset or training input",
+                ));
+            }
+            Ok(FeedbackCalibrationStageResult::Calibrated {
+                candidate_recipe_hash: command.candidate_recipe_hash,
+                source_model_version_id: source_model.model_version_id,
+                model_run_id: command.params.model_run_id,
+                calibration_dataset_id: calibration_dataset.training_dataset_id,
+                method,
                 calibration_artifact_id,
+                calibration_artifact_hash,
+                calibrated_model_version_id: calibrated.model_version_id,
+                calibrated_model_artifact_hash: calibrated.artifact_hash,
+                calibrated_serving_contract_hash: calibrated.serving_contract_hash,
+                training_input_hash: bindings.transform.training_input_hash,
+                sample_count,
             })
-        {
-            return Err(Self::contract(
-                "calibrated model does not bind its exact source and calibrator",
-            ));
-        }
-        let contract = calibrated.verified_serving_contract().map_err(|error| {
-            Self::contract(format!("invalid calibrated serving contract: {error}"))
-        })?;
-        let source_contract = source_model
-            .verified_serving_contract()
-            .map_err(|error| Self::contract(format!("invalid source serving contract: {error}")))?;
-        let bindings = contract.bindings();
-        if calibrated.training_dataset_id != source_model.training_dataset_id
-            || bindings.transform.training_input_hash
-                != source_contract.bindings().transform.training_input_hash
-        {
-            return Err(Self::contract(
-                "calibrated model changed its source Dataset or training input",
-            ));
-        }
-        Ok(FeedbackCalibrationStageResult::Calibrated {
-            candidate_recipe_hash: command.candidate_recipe_hash,
-            source_model_version_id: source_model.model_version_id,
-            model_run_id: command.params.model_run_id,
-            calibration_dataset_id: calibration_dataset.training_dataset_id,
-            method,
-            calibration_artifact_id,
-            calibration_artifact_hash: info.content_hash,
-            calibrated_model_version_id: calibrated.model_version_id,
-            calibrated_model_artifact_hash: calibrated.artifact_hash,
-            calibrated_serving_contract_hash: calibrated.serving_contract_hash,
-            training_input_hash: bindings.transform.training_input_hash,
-            sample_count,
-        })
+        }))
+        .await
     }
 
     async fn execute_cpcv_batch(
@@ -655,12 +768,17 @@ impl FeedbackLearningExecutionService {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<FeedbackLearningExecutionResult> {
-        params.validate()?;
+        let validation = params.clone();
+        self.compute
+            .run(&cancel, move || {
+                validation.validate().map_err(QuantError::from)
+            })
+            .await?;
         let CpcvBatchPlan {
             calibrated,
             mut results,
             total,
-        } = self.prepare_cpcv_batch(&params).await?;
+        } = self.prepare_cpcv_batch(&params, &cancel).await?;
         results.reserve(params.commands.len());
         for (index, command) in params.commands.iter().cloned().enumerate() {
             Self::require_active(&cancel, FeedbackStage::Cpcv)?;
@@ -740,27 +858,34 @@ impl FeedbackLearningExecutionService {
                 ));
             }
         }
-        results.sort_unstable_by_key(FeedbackCpcvStageResult::candidate_recipe_hash);
-        let artifact = FeedbackLearningStageArtifact::try_new(
-            params.feedback_cycle_id,
-            params.cycle_idempotency_hash,
-            params.candidate_family_hash,
-            params.input_hash()?,
-            Some(params.previous),
-            FeedbackLearningStageResults::Cpcv(results),
-        )?;
-        self.persist(artifact).await
+        let artifact = self
+            .compute
+            .run(&cancel, move || {
+                results.sort_unstable_by_key(FeedbackCpcvStageResult::candidate_recipe_hash);
+                FeedbackLearningStageArtifact::try_new(
+                    params.feedback_cycle_id,
+                    params.cycle_idempotency_hash,
+                    params.candidate_family_hash,
+                    params.input_hash()?,
+                    Some(params.previous),
+                    FeedbackLearningStageResults::Cpcv(results),
+                )
+            })
+            .await?;
+        self.persist(artifact, &cancel).await
     }
 
     async fn prepare_cpcv_batch(
         &self,
         params: &FeedbackCpcvJobParams,
+        cancel: &CancellationToken,
     ) -> QuantResult<CpcvBatchPlan> {
         let calibration_artifact = self
             .load_previous(
                 &params.previous,
                 params.candidate_family_hash,
                 FeedbackStage::Calibration,
+                cancel,
             )
             .await?;
         let FeedbackLearningStageResults::Calibration(calibration_results) =
@@ -837,55 +962,89 @@ impl FeedbackLearningExecutionService {
         reference: &FeedbackLearningStageArtifactRef,
         candidate_family_hash: ContentHash,
         stage: FeedbackStage,
+        cancel: &CancellationToken,
     ) -> QuantResult<FeedbackLearningStageArtifact> {
         reference.validate_for(reference.feedback_cycle_id, stage)?;
+        Self::require_active(cancel, stage)?;
         let bytes = self.artifacts.get(&reference.artifact.uri).await?;
-        if CanonicalDigest::content_hash_bytes(&bytes) != reference.artifact.content_hash {
-            return Err(Self::contract(
-                "learning-stage predecessor bytes differ from their terminal hash",
-            ));
-        }
-        let artifact = FeedbackLearningStageCodec::decode(&bytes)?;
-        if artifact.feedback_cycle_id != reference.feedback_cycle_id
-            || artifact.results.stage() != reference.stage
-            || artifact.artifact_id != reference.artifact_id
-            || artifact.input_hash != reference.input_hash
-            || artifact.candidate_family_hash != candidate_family_hash
-        {
-            return Err(Self::contract(
-                "learning-stage predecessor differs from its frozen reference",
-            ));
-        }
-        Ok(artifact)
+        Self::require_active(cancel, stage)?;
+        let reference = reference.clone();
+        self.compute
+            .run(cancel, move || {
+                if CanonicalDigest::content_hash_bytes(&bytes) != reference.artifact.content_hash {
+                    return Err(Self::contract(
+                        "learning-stage predecessor bytes differ from their terminal hash",
+                    ));
+                }
+                let artifact = FeedbackLearningStageCodec::decode(&bytes)?;
+                if artifact.feedback_cycle_id != reference.feedback_cycle_id
+                    || artifact.results.stage() != reference.stage
+                    || artifact.artifact_id != reference.artifact_id
+                    || artifact.input_hash != reference.input_hash
+                    || artifact.candidate_family_hash != candidate_family_hash
+                {
+                    return Err(Self::contract(
+                        "learning-stage predecessor differs from its frozen reference",
+                    ));
+                }
+                Ok(artifact)
+            })
+            .await
     }
 
     async fn persist(
         &self,
         artifact: FeedbackLearningStageArtifact,
+        cancel: &CancellationToken,
     ) -> QuantResult<FeedbackLearningExecutionResult> {
+        let (artifact, bytes, content_hash, key) = self
+            .compute
+            .run(cancel, move || {
+                let bytes = FeedbackLearningStageCodec::encode(&artifact)?;
+                let content_hash = CanonicalDigest::content_hash_bytes(&bytes);
+                let key = ArtifactKey::new(
+                    ArtifactNamespace::FeedbackLearning,
+                    content_hash.hex(),
+                    "json",
+                )?;
+                Ok((artifact, bytes, content_hash, key))
+            })
+            .await?;
         let artifact_id = artifact.artifact_id;
-        let bytes = FeedbackLearningStageCodec::encode(&artifact)?;
-        let content_hash = CanonicalDigest::content_hash_bytes(&bytes);
-        let key = ArtifactKey::new(
-            ArtifactNamespace::FeedbackLearning,
-            content_hash.hex(),
-            "json",
-        )?;
+        Self::require_active(cancel, artifact.results.stage())?;
         let uri = self.artifacts.put(key, &bytes).await?;
         let persisted = self.artifacts.get(&uri).await?;
-        if CanonicalDigest::content_hash_bytes(&persisted) != content_hash
-            || FeedbackLearningStageCodec::decode(&persisted)? != artifact
-        {
+        self.compute
+            .finalize(move || {
+                let readback = Self::decode_readback(&persisted, content_hash)?;
+                if readback != artifact {
+                    return Err(ResearchError::ArtifactHashMismatch {
+                        expected: content_hash.to_string(),
+                        actual: CanonicalDigest::content_hash_bytes(&persisted).to_string(),
+                    }
+                    .into());
+                }
+                Ok(FeedbackLearningExecutionResult {
+                    artifact_id,
+                    artifact: ResearchJobArtifactRef { uri, content_hash },
+                })
+            })
+            .await
+    }
+
+    fn decode_readback(
+        bytes: &[u8],
+        expected: ContentHash,
+    ) -> QuantResult<FeedbackLearningStageArtifact> {
+        let actual = CanonicalDigest::content_hash_bytes(bytes);
+        if actual != expected {
             return Err(ResearchError::ArtifactHashMismatch {
-                expected: content_hash.to_string(),
-                actual: CanonicalDigest::content_hash_bytes(&persisted).to_string(),
+                expected: expected.to_string(),
+                actual: actual.to_string(),
             }
             .into());
         }
-        Ok(FeedbackLearningExecutionResult {
-            artifact_id,
-            artifact: ResearchJobArtifactRef { uri, content_hash },
-        })
+        FeedbackLearningStageCodec::decode(bytes)
     }
 
     fn verify_training_evidence(
@@ -949,25 +1108,37 @@ impl FeedbackLearningExecutionService {
     {
         budget.validate()?;
         let command_cancel = cancel.child_token();
-        let outcome = timeout(
-            Duration::from_secs(budget.deadline_secs),
-            operation(command_cancel.clone()),
-        )
-        .await;
-        outcome.unwrap_or_else(|_| {
-            command_cancel.cancel();
-            Err(ResearchError::ComputeDeadlineExceeded {
-                operation: match stage {
-                    FeedbackStage::DatasetSeal => "feedback_dataset_seal",
-                    FeedbackStage::Training => "feedback_training",
-                    FeedbackStage::Calibration => "feedback_calibration",
-                    FeedbackStage::Cpcv => "feedback_cpcv",
-                    _ => "feedback_learning",
-                },
-                deadline_secs: budget.deadline_secs,
+        let operation = operation(command_cancel.clone());
+        tokio::pin!(operation);
+        let deadline = sleep(Duration::from_secs(budget.deadline_secs));
+        tokio::pin!(deadline);
+        tokio::select! {
+            biased;
+            result = &mut operation => result,
+            () = &mut deadline => {
+                command_cancel.cancel();
+                match operation.await {
+                    // An idempotent owner may cross its durable commit boundary
+                    // concurrently with the deadline. Drain it and preserve the
+                    // committed result instead of manufacturing a failed job.
+                    Ok(result) => Ok(result),
+                    Err(QuantError::Research(ResearchError::Cancelled { .. })) => {
+                        Err(ResearchError::ComputeDeadlineExceeded {
+                            operation: match stage {
+                                FeedbackStage::DatasetSeal => "feedback_dataset_seal",
+                                FeedbackStage::Training => "feedback_training",
+                                FeedbackStage::Calibration => "feedback_calibration",
+                                FeedbackStage::Cpcv => "feedback_cpcv",
+                                _ => "feedback_learning",
+                            },
+                            deadline_secs: budget.deadline_secs,
+                        }
+                        .into())
+                    }
+                    Err(error) => Err(error),
+                }
             }
-            .into())
-        })
+        }
     }
 
     fn contract(detail: impl Into<String>) -> QuantError {
@@ -995,7 +1166,7 @@ impl FeedbackLearningExecutionPort for FeedbackLearningExecutionService {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<FeedbackLearningExecutionResult> {
-        self.execute_training_batch(params, progress, cancel).await
+        Box::pin(self.execute_training_batch(params, progress, cancel)).await
     }
 
     async fn calibrate(
@@ -1019,16 +1190,21 @@ impl FeedbackLearningExecutionPort for FeedbackLearningExecutionService {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, OnceLock};
+    use std::{
+        sync::{Arc, OnceLock},
+        thread,
+    };
 
+    use quant_pivot_compute::ComputeExecutor;
     use quant_pivot_error::{QuantError, research::ResearchError};
     use quant_pivot_models::{
         domain::ports::FeedbackRecipeResourceBudget,
         enums::quant::{FeedbackStage, TrainingDatasetStatus},
+        hashing::CanonicalDigest,
     };
     use tokio_util::sync::CancellationToken;
 
-    use super::FeedbackLearningExecutionService;
+    use super::{FeedbackLearningCompute, FeedbackLearningExecutionService};
 
     #[test]
     fn dataset_status_preserves_diagnostic() {
@@ -1040,6 +1216,68 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.contains("status=insufficient_labels"));
         assert!(rendered.contains("target=token_payout_ratio/0, label_rows=0"));
+    }
+
+    #[test]
+    fn malformed_readback_is_rejected() {
+        let bytes = br#"{"not":"a learning artifact"}"#;
+        let expected = CanonicalDigest::content_hash_bytes(bytes);
+        let result = FeedbackLearningExecutionService::decode_readback(bytes, expected);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn compute_uses_offline_pool() {
+        let compute = FeedbackLearningCompute::try_new(Arc::new(
+            ComputeExecutor::new().expect("construct governed compute fixture"),
+        ))
+        .expect("construct feedback compute policy");
+        let cancel = CancellationToken::new();
+        let thread_name = compute
+            .run(&cancel, || {
+                Ok::<_, QuantError>(thread::current().name().unwrap_or_default().to_owned())
+            })
+            .await
+            .expect("run feedback verification on governed pool");
+        assert!(thread_name.starts_with("quant-offline-"));
+        let finalize_thread = compute
+            .finalize(|| {
+                Ok::<_, QuantError>(thread::current().name().unwrap_or_default().to_owned())
+            })
+            .await
+            .expect("run committed feedback verification on governed pool");
+        assert!(finalize_thread.starts_with("quant-offline-"));
+    }
+
+    #[tokio::test]
+    async fn deadline_commit_wins() {
+        let observed = Arc::new(OnceLock::new());
+        let captured = Arc::clone(&observed);
+        let parent = CancellationToken::new();
+        let result = FeedbackLearningExecutionService::execute_bounded(
+            FeedbackStage::Training,
+            FeedbackRecipeResourceBudget {
+                max_concurrency: 1,
+                max_working_set_bytes: 1,
+                max_resident_model_bytes: 1,
+                deadline_secs: 1,
+            },
+            &parent,
+            move |cancel| {
+                let _ = captured.set(cancel.clone());
+                async move {
+                    cancel.cancelled().await;
+                    Ok::<_, QuantError>("committed")
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            result.expect("committed result must win deadline"),
+            "committed"
+        );
+        assert!(observed.get().is_some_and(CancellationToken::is_cancelled));
+        assert!(!parent.is_cancelled());
     }
 
     #[tokio::test]

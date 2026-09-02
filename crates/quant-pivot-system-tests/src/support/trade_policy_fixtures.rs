@@ -1,6 +1,6 @@
 //! Complete immutable `TradePolicy` preimages for serving-system tests.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, iter, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::service::{
@@ -120,6 +120,134 @@ pub struct PublishedTradePolicyFixtureInput<'a> {
     pub profile_ref: ResearchProfileRef,
     pub scope: &'a str,
     pub training_window_start: DateTime<Utc>,
+    pub book_timing: FixtureBookTiming,
+}
+
+/// Fixture-only contract connecting exact WS cadence, PIT lag and execution freshness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixtureBookTiming {
+    /// Maximum event age admitted by every candidate and cohort entry policy.
+    pub max_book_age_ms: u64,
+}
+
+impl FixtureBookTiming {
+    /// Global PIT lag retained by the forward closure report.
+    pub const REPORT_LAG_SECS: u64 = 2;
+    /// Period of the existing bounded WebSocket refresh worker.
+    pub const FEED_PERIOD_SECS: u64 = 10;
+    /// Maximum event-to-durable-readback delay for an exact fixture book.
+    pub const DELIVERY_BUDGET_MS: u64 = 2_000;
+    const BOOK_AGE_P95_MS: u64 = 30;
+    const DECISION_P95_MS: u64 = 20;
+    const ENDPOINT_P95_MS: u64 = 25;
+    const MARKET_DELAY_P95_MS: u64 = 35;
+
+    /// Preserve the ordinary Browser and governed-feedback freshness contract.
+    pub const fn standard() -> Self {
+        Self {
+            max_book_age_ms: 2_000,
+        }
+    }
+
+    /// Derive closure freshness from checked source and execution budgets.
+    pub fn closure() -> QuantResult<Self> {
+        let max_book_age_ms = Self::required_age(
+            Self::REPORT_LAG_SECS,
+            Self::FEED_PERIOD_SECS,
+            Self::DELIVERY_BUDGET_MS,
+        )?;
+        Ok(Self { max_book_age_ms })
+    }
+
+    fn required_age(lag_secs: u64, feed_secs: u64, delivery_ms: u64) -> QuantResult<u64> {
+        if feed_secs == 0 || delivery_ms == 0 {
+            return Err(ResearchError::ValidationMethodology {
+                detail: "fixture feed cadence and delivery budget must be positive".to_owned(),
+            }
+            .into());
+        }
+        [
+            lag_secs.checked_mul(1_000),
+            feed_secs.checked_mul(1_000),
+            Some(delivery_ms),
+            Some(Self::BOOK_AGE_P95_MS),
+            Some(Self::DECISION_P95_MS),
+            Some(Self::ENDPOINT_P95_MS),
+            Some(Self::MARKET_DELAY_P95_MS),
+        ]
+        .into_iter()
+        .try_fold(0_u64, |total, value| {
+            value
+                .and_then(|value| total.checked_add(value))
+                .ok_or_else(|| {
+                    ResearchError::ValidationMethodology {
+                        detail: "fixture book timing budget overflow".to_owned(),
+                    }
+                    .into()
+                })
+        })
+    }
+
+    /// Reject freshness budgets that cannot cover the complete closure timeline.
+    pub fn validate_closure(self) -> QuantResult<()> {
+        if self.max_book_age_ms < Self::closure()?.max_book_age_ms {
+            return Err(ResearchError::ValidationMethodology {
+                detail:
+                    "closure freshness cannot cover PIT lag, feed cadence, latency and delivery"
+                        .to_owned(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Verify causal timestamps and the actual exact-book durable delivery age.
+    pub fn verify_delivery(event_ms: i64, persisted_ms: i64, verified_ms: i64) -> QuantResult<()> {
+        let age = verified_ms
+            .checked_sub(event_ms)
+            .and_then(|age| u64::try_from(age).ok());
+        if event_ms > persisted_ms
+            || persisted_ms > verified_ms
+            || age.is_none_or(|age| age > Self::DELIVERY_BUDGET_MS)
+        {
+            return Err(ResearchError::ValidationMethodology {
+                detail: "exact fixture book exceeded its event-to-durable-readback delivery budget"
+                    .to_owned(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn verify_policy(
+        self,
+        candidates: &[TradePolicyCandidateSpec],
+        cohort: &TradePolicyCohort,
+    ) -> QuantResult<()> {
+        let entries_match = candidates
+            .iter()
+            .map(|candidate| &candidate.entry_execution)
+            .chain(iter::once(&cohort.entry_order))
+            .all(|entry| match entry {
+                EntryOrderTemplate::Aggressive {
+                    max_book_age_ms, ..
+                }
+                | EntryOrderTemplate::PassivePostOnly {
+                    max_book_age_ms, ..
+                } => *max_book_age_ms == self.max_book_age_ms,
+            });
+        if self.max_book_age_ms == 0
+            || !entries_match
+            || cohort.max_book_age_ms != self.max_book_age_ms
+        {
+            return Err(ResearchError::ValidationMethodology {
+                detail: "fixture candidate/cohort book timing differs from its source contract"
+                    .to_owned(),
+            }
+            .into());
+        }
+        Ok(())
+    }
 }
 
 impl PublishedTradePolicyFixture {
@@ -291,6 +419,7 @@ struct TradePolicyFixtureContext<'a> {
     subject: ModelVersionInfo,
     source_dataset: TrainingDatasetInfo,
     cohort_key: TradePolicyCohortKey,
+    book_timing: FixtureBookTiming,
     attestor: EvidenceAttestor,
     evidence_scope: EvidenceScopeIdentity,
     readiness: Arc<ResearchReadinessEvidenceService>,
@@ -385,6 +514,7 @@ impl<'a> TradePolicyFixtureContext<'a> {
             decision_policy_snapshot_id,
             scope,
             training_window_start,
+            book_timing,
             ..
         } = input;
         let policy = PgPolicyRepository::new(db.clone())
@@ -482,6 +612,7 @@ impl<'a> TradePolicyFixtureContext<'a> {
             subject,
             source_dataset,
             cohort_key,
+            book_timing,
             attestor,
             evidence_scope,
             readiness,
@@ -673,9 +804,10 @@ impl PolicyEvidenceFixture {
                 })?;
         let methodology_hash =
             ResearchHasher::canonical(&("system-trade-policy-methodology-v1", category))?;
-        let candidates = policy_candidates();
+        let candidates = context.book_timing.candidates();
         let candidate_set_hash = ResearchHasher::canonical(&candidates)?;
-        let cohort = policy_cohort(context.cohort_key.clone());
+        let cohort = context.book_timing.cohort(context.cohort_key.clone());
+        context.book_timing.verify_policy(&candidates, &cohort)?;
         let cohort_hash = ResearchHasher::canonical(&context.cohort_key)?;
         let evidence_objects = PolicyEvidenceObjects::persist(
             context.store,
@@ -777,14 +909,14 @@ impl PolicyEvidenceFixture {
                 observed_at,
                 book_event_count: 10_000,
                 book_age_p50_ms: 10,
-                book_age_p95_ms: 30,
+                book_age_p95_ms: FixtureBookTiming::BOOK_AGE_P95_MS,
                 book_age_p99_ms: 60,
                 decision_prepared_count: 1_000,
-                decision_prepared_p95_ms: Some(20),
+                decision_prepared_p95_ms: Some(FixtureBookTiming::DECISION_P95_MS),
                 endpoint_rtt_count: 1_000,
-                endpoint_rtt_p95_ms: Some(25),
+                endpoint_rtt_p95_ms: Some(FixtureBookTiming::ENDPOINT_P95_MS),
                 market_delay_count: 1_000,
-                market_delay_p95_ms: Some(35),
+                market_delay_p95_ms: Some(FixtureBookTiming::MARKET_DELAY_P95_MS),
             });
         ResearchReadinessEvidenceWriter::new(
             Arc::new(PgResearchReadinessEvidenceRepository::new(
@@ -1480,29 +1612,31 @@ fn volatility_record(context: &EvidenceRowContext<'_>) -> QuantResult<PolicyEvid
     )
 }
 
-fn policy_candidates() -> Vec<TradePolicyCandidateSpec> {
-    vec![
-        TradePolicyCandidateSpec {
-            candidate_id: POLICY_CANDIDATE_ID.to_owned(),
-            entry_condition: EntryConditionTemplate::Immediate,
-            entry_execution: EntryOrderTemplate::Aggressive {
-                fill_requirement: FillRequirement::AllOrNothing,
-                max_slippage_bps: Bps::new(dec!(50)),
-                max_book_age_ms: 2_000,
+impl FixtureBookTiming {
+    fn candidates(self) -> Vec<TradePolicyCandidateSpec> {
+        vec![
+            TradePolicyCandidateSpec {
+                candidate_id: POLICY_CANDIDATE_ID.to_owned(),
+                entry_condition: EntryConditionTemplate::Immediate,
+                entry_execution: EntryOrderTemplate::Aggressive {
+                    fill_requirement: FillRequirement::AllOrNothing,
+                    max_slippage_bps: Bps::new(dec!(50)),
+                    max_book_age_ms: self.max_book_age_ms,
+                },
+                exit: policy_exit_template(),
             },
-            exit: policy_exit_template(),
-        },
-        TradePolicyCandidateSpec {
-            candidate_id: POLICY_PASSIVE_CANDIDATE_ID.to_owned(),
-            entry_condition: EntryConditionTemplate::Immediate,
-            entry_execution: EntryOrderTemplate::PassivePostOnly {
-                placement: PassivePlacement::JoinBestBid,
-                good_til_secs: 30,
-                max_book_age_ms: 2_000,
+            TradePolicyCandidateSpec {
+                candidate_id: POLICY_PASSIVE_CANDIDATE_ID.to_owned(),
+                entry_condition: EntryConditionTemplate::Immediate,
+                entry_execution: EntryOrderTemplate::PassivePostOnly {
+                    placement: PassivePlacement::JoinBestBid,
+                    good_til_secs: 30,
+                    max_book_age_ms: self.max_book_age_ms,
+                },
+                exit: policy_exit_template(),
             },
-            exit: policy_exit_template(),
-        },
-    ]
+        ]
+    }
 }
 
 fn policy_exit_template() -> TradePolicyExitTemplate {
@@ -1565,54 +1699,58 @@ fn policy_cohort_key(profile: &ResearchProfileArtifact) -> QuantResult<TradePoli
     })
 }
 
-fn policy_cohort(key: TradePolicyCohortKey) -> TradePolicyCohort {
-    let exit = policy_exit_template();
-    TradePolicyCohort {
-        key,
-        selected_candidate_id: POLICY_CANDIDATE_ID.to_owned(),
-        entry_condition: EntryConditionTemplate::Immediate,
-        entry_order: EntryOrderTemplate::Aggressive {
-            fill_requirement: FillRequirement::AllOrNothing,
+impl FixtureBookTiming {
+    fn cohort(self, key: TradePolicyCohortKey) -> TradePolicyCohort {
+        let exit = policy_exit_template();
+        TradePolicyCohort {
+            key,
+            selected_candidate_id: POLICY_CANDIDATE_ID.to_owned(),
+            entry_condition: EntryConditionTemplate::Immediate,
+            entry_order: EntryOrderTemplate::Aggressive {
+                fill_requirement: FillRequirement::AllOrNothing,
+                max_slippage_bps: Bps::new(dec!(50)),
+                max_book_age_ms: self.max_book_age_ms,
+            },
             max_slippage_bps: Bps::new(dec!(50)),
-            max_book_age_ms: 2_000,
-        },
-        max_slippage_bps: Bps::new(dec!(50)),
-        max_book_age_ms: 2_000,
-        upper_barrier_bps: exit.upper_barrier_bps,
-        lower_barrier_bps: exit.lower_barrier_bps,
-        vertical_barrier_secs: exit.vertical_barrier_secs,
-        scale_out_targets: exit.scale_out_targets,
-        trailing_stop: exit.trailing_stop,
-        min_score_retention: exit.min_score_retention,
-        min_expected_return_bps: exit.min_expected_return_bps,
-        require_route_gate_eligibility: exit.require_route_gate_eligibility,
-        opportunistic_exit: exit.opportunistic_exit,
-        settlement_mode: exit.settlement_mode,
-        redeem_policy: exit.redeem_policy,
-        sample_count: 100,
-        effective_sample_size: Decimal::from(100),
-        executable_sample_count: 100,
-        executable_coverage: Decimal::ONE,
-        full_l2_coverage: Decimal::ONE,
-        common_candidate_support: Decimal::ONE,
-        passive_reconciled_trade_coverage: None,
-        passive_fill_distribution: None,
-        fee_catalog_coverage: Decimal::ONE,
-        passive_rebate_evidence_coverage: Some(Decimal::ONE),
-        cpcv_path_count: 21,
-        trial_count: 1,
-        deflated_sharpe_ratio: Decimal::ONE,
-        probability_of_backtest_overfitting: Decimal::ZERO,
-        ambiguous_touch_rate: Decimal::ZERO,
-        depth_failure_rate: Decimal::ZERO,
-        lower_confidence_utility_bps: Some(Bps::new(dec!(2))),
-        parameter_source: TradePolicyParameterSource {
-            relaxed_dimensions: Vec::new(),
-            source_sample_count: 100,
-            source_effective_sample_size: Decimal::from(100),
-            source_selector_hash: ResearchHasher::canonical(&"system-policy-source-selector-v1")
+            max_book_age_ms: self.max_book_age_ms,
+            upper_barrier_bps: exit.upper_barrier_bps,
+            lower_barrier_bps: exit.lower_barrier_bps,
+            vertical_barrier_secs: exit.vertical_barrier_secs,
+            scale_out_targets: exit.scale_out_targets,
+            trailing_stop: exit.trailing_stop,
+            min_score_retention: exit.min_score_retention,
+            min_expected_return_bps: exit.min_expected_return_bps,
+            require_route_gate_eligibility: exit.require_route_gate_eligibility,
+            opportunistic_exit: exit.opportunistic_exit,
+            settlement_mode: exit.settlement_mode,
+            redeem_policy: exit.redeem_policy,
+            sample_count: 100,
+            effective_sample_size: Decimal::from(100),
+            executable_sample_count: 100,
+            executable_coverage: Decimal::ONE,
+            full_l2_coverage: Decimal::ONE,
+            common_candidate_support: Decimal::ONE,
+            passive_reconciled_trade_coverage: None,
+            passive_fill_distribution: None,
+            fee_catalog_coverage: Decimal::ONE,
+            passive_rebate_evidence_coverage: Some(Decimal::ONE),
+            cpcv_path_count: 21,
+            trial_count: 1,
+            deflated_sharpe_ratio: Decimal::ONE,
+            probability_of_backtest_overfitting: Decimal::ZERO,
+            ambiguous_touch_rate: Decimal::ZERO,
+            depth_failure_rate: Decimal::ZERO,
+            lower_confidence_utility_bps: Some(Bps::new(dec!(2))),
+            parameter_source: TradePolicyParameterSource {
+                relaxed_dimensions: Vec::new(),
+                source_sample_count: 100,
+                source_effective_sample_size: Decimal::from(100),
+                source_selector_hash: ResearchHasher::canonical(
+                    &"system-policy-source-selector-v1",
+                )
                 .expect("static policy selector hash"),
-        },
+            },
+        }
     }
 }
 
@@ -1698,5 +1836,67 @@ fn structural_volatility_evidence() -> StructuralVolatilityOosEvidence {
         deadline_volume_weighted_coverage: dec!(0.94),
         dr_as_volume_weighted_coverage: dec!(0.95),
         valid: true,
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use quant_pivot_error::QuantResult;
+
+    use super::{FixtureBookTiming, policy_cohort_key};
+    use crate::support::{
+        execution_pg_seed::fixture_profile_ref, model_spec_fixtures::crypto_profile_ref,
+    };
+
+    #[test]
+    fn standard_age_is_unchanged() {
+        assert_eq!(FixtureBookTiming::standard().max_book_age_ms, 2_000);
+        assert!(FixtureBookTiming::standard().validate_closure().is_err());
+    }
+
+    #[test]
+    fn closure_budget_is_checked() -> QuantResult<()> {
+        let timing = FixtureBookTiming::closure()?;
+        assert_eq!(timing.max_book_age_ms, 14_110);
+        timing.validate_closure()?;
+        assert!(
+            FixtureBookTiming {
+                max_book_age_ms: timing.max_book_age_ms - 1
+            }
+            .validate_closure()
+            .is_err()
+        );
+        assert!(FixtureBookTiming::required_age(u64::MAX, 10, 2_000).is_err());
+        assert!(FixtureBookTiming::required_age(2, 10, u64::MAX).is_err());
+        assert!(FixtureBookTiming::required_age(2, 0, 2_000).is_err());
+        assert!(FixtureBookTiming::required_age(2, 10, 0).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn route_candidates_share_timing() -> QuantResult<()> {
+        let timing = FixtureBookTiming::closure()?;
+        for profile in [fixture_profile_ref(), crypto_profile_ref()] {
+            let profile = profile
+                .resolve_builtin_research_profile()
+                .expect("fixture profile resolves");
+            let mut cohort = timing.cohort(policy_cohort_key(&profile)?);
+            let candidates = timing.candidates();
+            timing.verify_policy(&candidates, &cohort)?;
+            assert_eq!(cohort.max_book_age_ms, 14_110);
+            cohort.max_book_age_ms -= 1;
+            assert!(timing.verify_policy(&candidates, &cohort).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn delivery_boundary_is_enforced() -> QuantResult<()> {
+        FixtureBookTiming::verify_delivery(1_000, 2_000, 3_000)?;
+        assert!(FixtureBookTiming::verify_delivery(1_000, 2_000, 3_001).is_err());
+        assert!(FixtureBookTiming::verify_delivery(2_000, 1_000, 3_000).is_err());
+        assert!(FixtureBookTiming::verify_delivery(1_000, 3_001, 3_000).is_err());
+        assert!(FixtureBookTiming::verify_delivery(i64::MIN, 0, i64::MAX).is_err());
+        Ok(())
     }
 }

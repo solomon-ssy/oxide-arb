@@ -4,9 +4,9 @@
 > **Deployment contract**
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
+> - `pre_deployment_behavior`: 允许 clean-break 与唯一 fresh terminal bootstrap rewrite；任何真实数据销毁仍需操作者单独授权。
+> - `post_deployment_behavior`: 本次实现只交付唯一 fresh terminal bootstrap；不设计 upgrade/downgrade 或 data/schema/version migration。
+> - `rollback_and_data_verification`: 只在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置必须另行授权。
 
 > 状态：生产级破坏式实施拆分
 >
@@ -23,28 +23,13 @@ Phase 03 是整个 quant-pivot 的研究平面：市场选择、特征、因子�
 训练、回测、质量门禁、治理，外加 ML 技术栈与历史 point-in-time 解析层。它的
 体量远超单一可验证增量，因此拆成 3.0–3.7。
 
-**当前代码现实（拆分基线）**
+**SUPERSEDED 拆分基线**
 
-- Phase 1 完成：14 张 `quant_*` Postgres 表 / entity / iden、持久化 DTO、
-  [`enums/quant.rs`](../../../crates/quant-pivot-models/src/enums/quant.rs) 生命周期枚举、
-  typed IDs、ClickHouse quant fact 表 + row 类型、`QuantFactRepository` /
-  `ChQuantFactRepository`。
-- Phase 2 完成：`BookFactWriter`、`AsyncWriter` / `ChWriteManager`、
-  `IngestPipelineLagTracker`、`BookDataQualityService`，以及 **live-only** 的
-  [`LiveBookDataSource`](../../../crates/quant-pivot-core/src/pipeline/point_in_time.rs)。
-  runtime-config v3 九段（`selection` / `data_quality` / `features` / `factors` /
-  `model` / `reports` / `portfolio` / `execution` / `notification`）齐全。
-- Phase 3 基本空白：[`quant-pivot-research`](../../../crates/quant-pivot-research)
-  仅 `crate_version()`；无 ML 依赖、无计算 trait、无历史 PIT；Postgres repo impl
-  仅 model registry / recommendation report / order intent；quant ClickHouse fact
-  无生产者；`FeatureVectorInfo.payload` 为不透明 JSON；`SignalCandidate` 是
-  `i8`/`Decimal`/无表的 stub。
-
-**Phase 1 遗留缺口（Phase 03 必补，逐篇标注）**
-
-- 无 `quant_training_dataset` 表（`ModelVersionInfo.training_dataset_id` 是裸 `Uuid`）。
-- 无 backtest-report、shadow-comparison 持久化。
-- 无 ClickHouse 读层（仅写）。
+早期 Phase 1/2 表数、runtime-config v3、stub/module 空白与“待补表”只用于解释当时为何拆分
+3.0–3.8，不再描述 current bytes，也不得恢复已删除的统一 runtime-config 或增量 schema
+路径。当前实施状态只认 [`../phase-12/12.1-implementation-ledger.md`](../phase-12/12.1-implementation-ledger.md)；
+schema 只认唯一 v1 fresh bootstrap，研究计算/持久化形状以 current source 和各自 canonical
+contract 为准。
 
 ## 1. 子phase索引
 
@@ -123,7 +108,7 @@ flowchart TD
 
 - 每个 feature / factor / dataset / model artifact / backtest 都有
   `blake3:` canonical hash（复用
-  [`models::hashing::CanonicalDigest`](../../../crates/quant-pivot-models/src/hashing.rs)）。
+  [`models::hashing::CanonicalDigest`](../../../../crates/quant-pivot-models/src/hashing.rs)）。
 - 所有计算域 trait 接受**冻结快照**（config version、selection snapshot、PIT
   source），禁止读取 mutable runtime state。
 - research crate 禁止：直接下单、读 web state、在循环里查数据库、把第三方 ML
@@ -154,7 +139,7 @@ ml-classical = ["dep:smartcore"]
   `candle` 仍按后续模型 phase 引入（见父文档 §30）。
 
 `quant-pivot-core` 链接 `quant-pivot-research/dataframe`（3.5 数据集 Parquet）；
-`quant-pivot-research` 自身 `default = []`。report_only 二进制因此含 polars，但
+`quant-pivot-research` 自身 `default = []`。报告二进制因此含 polars，但
 在线 hot path 不调用 Polars。CI 分 job 测 `ml-classical` / `optimize` heavy features。
 
 ## 6. 延后项总表（缺口必须在对应子phase文档显式标注）
@@ -176,7 +161,7 @@ ml-classical = ["dep:smartcore"]
 | 其余四垂直（Sports/Politics/Weather/Geopolitics）真实外部数据 | Crypto 范式加性扩展 | Post–3.8 Crypto | [`03.8`](03.8-vertical-domain-closed-loop.md) §12 |
 | direct `highs` + HiGHS 全局组合 | production 与 backtest 唯一实现 | **Phase 05 clean-break** | 3.6 / 05.8 |
 | `ort` ONNX 推理 | `QuantModelRuntime` 预留 arm | Phase 06 | 3.4 §10 |
-| auto-execution 门禁生效 | config 口径记录 | Phase 05/06 | 3.7 §10 |
+| PolicyAutomatic 入场门禁生效 | config 口径记录 | Phase 05/06 | 3.7 §10 |
 | `burn` / `candle` 深度学习 | — | Phase 08 | 3.4 §10 |
 | 对象存储（S3/MinIO）artifact | 本地目录 + content-addressed key | 后续 | 3.0 / 3.4 §1.1 |
 | PG `SignalCandidate` 表 | CH `quant_signal_candidate_event` only | —（by design） | 3.4 §10 |
@@ -206,7 +191,7 @@ ml-classical = ["dep:smartcore"]
 cargo fmt --all --
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p quant-pivot-research --features ml-classical,dataframe,optimize -- -D warnings
-bash scripts/lint-architecture.sh
-bash scripts/lint-quant-pivot-boundary.sh
+cargo xtask architecture audit-functions
+cargo xtask architecture check
 cargo test --workspace
 ```

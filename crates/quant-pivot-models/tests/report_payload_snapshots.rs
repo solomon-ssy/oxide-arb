@@ -3,7 +3,7 @@
 use insta::assert_json_snapshot;
 use support::report_snapshots::{
     TopNReportSnapshot, empty_report, recommendation_immediate_entry, recommendation_limit_entry,
-    recommendation_not_auto_eligible, recommendation_partial_exits, revoked_report,
+    recommendation_operator_only, recommendation_partial_exits, revoked_report,
 };
 
 mod support;
@@ -37,10 +37,10 @@ fn recommendation_partial_exits_snapshot() {
 }
 
 #[test]
-fn recommendation_not_auto_snapshot() {
+fn recommendation_operator_only_snapshot() {
     assert_json_snapshot!(
-        "recommendation_not_auto_eligible_snapshot",
-        recommendation_not_auto_eligible()
+        "recommendation_operator_only_snapshot",
+        recommendation_operator_only()
     );
 }
 

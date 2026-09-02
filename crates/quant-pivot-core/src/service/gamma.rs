@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     mem,
     sync::Arc,
-    time::Instant,
+    time::{Duration as StdDuration, Instant},
 };
 
 use chrono::{DateTime, Duration, Utc};
@@ -45,7 +45,7 @@ use quant_pivot_repository::traits::{CatalogLedgerRepository, EventRepository, M
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -66,6 +66,23 @@ use crate::{
 /// Only publish `market.resolved` for settlements whose `resolved_at` falls
 /// within this window — filters historical reconciliation during full sync.
 const LIVE_RESOLUTION_WINDOW: Duration = Duration::hours(48);
+const LINKAGE_RETRY_DELAY: StdDuration = StdDuration::from_secs(30);
+
+#[derive(Default)]
+struct CatalogProjectionRevision {
+    hash: Mutex<Option<ContentHash>>,
+}
+
+impl CatalogProjectionRevision {
+    async fn advance(&self, hash: ContentHash) -> bool {
+        let mut current = self.hash.lock().await;
+        if current.as_ref() == Some(&hash) {
+            return false;
+        }
+        *current = Some(hash);
+        true
+    }
+}
 
 /// Dependencies injected into [`GammaService`].
 pub struct GammaServiceDeps {
@@ -114,6 +131,7 @@ pub struct GammaService {
     subscription_window_hours: u64,
     linkage_resolver: Option<Arc<LinkageResolverService>>,
     linkage_wake: Arc<Notify>,
+    projection_revision: CatalogProjectionRevision,
 }
 
 impl GammaService {
@@ -137,6 +155,7 @@ impl GammaService {
             subscription_window_hours: deps.subscription_window_hours,
             linkage_resolver: deps.linkage_resolver,
             linkage_wake: Arc::new(Notify::new()),
+            projection_revision: CatalogProjectionRevision::default(),
         }
     }
 
@@ -150,12 +169,14 @@ impl GammaService {
             .gamma_last_sync_success
             .set(i64::from(result.is_ok()));
 
-        if result.is_ok() {
+        if let Ok(projection_changed) = &result {
             self.publish_catalog_ready();
-            self.trigger_linkage_resolution();
+            if *projection_changed {
+                self.trigger_linkage_resolution();
+            }
         }
 
-        result
+        result.map(|_| ())
     }
 
     fn trigger_linkage_resolution(&self) {
@@ -187,6 +208,13 @@ impl GammaService {
                 }
                 Err(error) => {
                     tracing::warn!(%error, "linkage resolver pass failed after gamma sync");
+                    tokio::select! {
+                        biased;
+                        () = shutdown.cancelled() => return,
+                        () = tokio::time::sleep(LINKAGE_RETRY_DELAY) => {
+                            self.linkage_wake.notify_one();
+                        }
+                    }
                 }
             }
         }
@@ -201,7 +229,7 @@ impl GammaService {
         self.status_nudge.nudge();
     }
 
-    async fn sync_inner(&self) -> Result<(), QuantError> {
+    async fn sync_inner(&self) -> Result<bool, QuantError> {
         let sync_kind = if self.catalog_ledger_repo.coverage_start().await?.is_some() {
             CatalogSyncKind::Reconcile
         } else {
@@ -212,43 +240,42 @@ impl GammaService {
             sync_kind,
             started_at: Utc::now(),
         };
-        let result = self.full_sync(&attempt).await;
-        if let Err(failure) = result {
-            let stage = catalog_failure_stage(&failure.error);
-            if let Err(audit_error) = self
-                .catalog_ledger_repo
-                .record_failure(CatalogBatchFailure {
-                    catalog_sync_batch_id: attempt.batch_id,
-                    sync_kind: attempt.sync_kind,
-                    started_at: attempt.started_at,
-                    fetched_at: failure.fetched_at,
-                    failure_stage: stage,
-                    failure_detail: failure.error.to_string(),
-                    rejections: failure.rejections,
-                })
-                .await
-            {
-                tracing::error!(
-                    sync_error = %failure.error,
-                    audit_error = %audit_error,
-                    "gamma sync failed and its catalog attempt audit could not be persisted"
-                );
-                return Err(audit_error.into());
+        match self.full_sync(&attempt).await {
+            Ok(projection_changed) => Ok(projection_changed),
+            Err(failure) => {
+                let stage = catalog_failure_stage(&failure.error);
+                if let Err(audit_error) = self
+                    .catalog_ledger_repo
+                    .record_failure(CatalogBatchFailure {
+                        catalog_sync_batch_id: attempt.batch_id,
+                        sync_kind: attempt.sync_kind,
+                        started_at: attempt.started_at,
+                        fetched_at: failure.fetched_at,
+                        failure_stage: stage,
+                        failure_detail: failure.error.to_string(),
+                        rejections: failure.rejections,
+                    })
+                    .await
+                {
+                    tracing::error!(
+                        sync_error = %failure.error,
+                        audit_error = %audit_error,
+                        "gamma sync failed and its catalog attempt audit could not be persisted"
+                    );
+                    return Err(audit_error.into());
+                }
+                Err(failure.error)
             }
-            return Err(failure.error);
         }
-
-        Ok(())
     }
 
-    async fn full_sync(&self, attempt: &CatalogSyncAttempt) -> Result<(), CatalogSyncFailure> {
+    async fn full_sync(&self, attempt: &CatalogSyncAttempt) -> Result<bool, CatalogSyncFailure> {
         let mut batch = self
             .gamma_client
             .full_sync_with_fees()
             .await
             .map_err(CatalogSyncFailure::from)?;
         let fetched_at = Utc::now();
-
         let filtered_count = batch.filtered.len();
         self.record_prelisting_filters(&batch.filtered);
         let rejected_count = batch.rejected.len();
@@ -263,14 +290,12 @@ impl GammaService {
                 rejections: build_catalog_rejections(&attempt.batch_id, &batch.rejected),
             });
         }
-
         if batch.registry_markets.is_empty() {
             return Err(CatalogSyncFailure::at(
                 MarketError::EmptyCatalog.into(),
                 fetched_at,
             ));
         }
-
         reject_duplicate_catalog_ids(
             "event",
             sorted_ids(
@@ -289,13 +314,11 @@ impl GammaService {
                     .map(|market| market.market_id.as_str()),
             ),
         )?;
-
         let seen_ids: HashSet<MarketId> = batch
             .registry_markets
             .iter()
             .map(|m| m.market_id.clone())
             .collect();
-
         let past_deadline_paused = apply_catalog_deadline(&mut batch.registry_markets, fetched_at);
         let mut event_mutations = HashMap::new();
         let mut market_mutations = HashMap::new();
@@ -343,44 +366,26 @@ impl GammaService {
             event_mutations: &event_mutations,
             market_mutations: &market_mutations,
         })?;
+        let projection_hash = commit.batch.batch_hash;
         self.catalog_ledger_repo.commit(commit).await?;
-        let changed_count = u64::try_from(changed_terms_markets.len()).unwrap_or(u64::MAX);
-        let unchanged_count = u64::try_from(batch.registry_markets.len())
-            .unwrap_or(u64::MAX)
-            .saturating_sub(changed_count);
-        self.metrics.record_maker_rebate_diagnostics(
-            "catalog_terms_commit",
-            "changed",
-            changed_count,
-        );
-        self.metrics.record_maker_rebate_diagnostics(
-            "catalog_terms_commit",
-            "unchanged",
-            unchanged_count,
-        );
-        self.terms_drift_wake.publish(changed_terms_markets);
-        self.invalidate_projection_cache(&batch.registry_events, &batch.registry_markets)
-            .await;
-
-        self.market_registry
-            .register_events(batch.registry_events.clone());
-        self.market_registry
-            .register_markets(batch.registry_markets.clone());
-        self.publish_market_resolutions(newly_settled);
-        self.market_cache.rebuild();
-        self.sync_ws_subscriptions();
-
-        if past_deadline_paused > 0 {
-            self.metrics
-                .gamma_markets_paused
-                .with_label_values(&["past_deadline"])
-                .inc_by(past_deadline_paused);
-        }
-        if tombstoned_count > 0 {
-            self.metrics
-                .gamma_markets_paused
-                .with_label_values(&["gamma_tombstone"])
-                .inc_by(u64::try_from(tombstoned_count).unwrap_or(u64::MAX));
+        let projection_changed = self.projection_revision.advance(projection_hash).await;
+        if projection_changed {
+            self.record_projection_metrics(
+                &batch.registry_markets,
+                changed_terms_markets.len(),
+                past_deadline_paused,
+                tombstoned_count,
+            );
+            self.terms_drift_wake.publish(changed_terms_markets);
+            self.invalidate_projection_cache(&batch.registry_events, &batch.registry_markets)
+                .await;
+            self.market_registry
+                .register_events(batch.registry_events.clone());
+            self.market_registry
+                .register_markets(batch.registry_markets.clone());
+            self.publish_market_resolutions(newly_settled);
+            self.market_cache.rebuild();
+            self.sync_ws_subscriptions();
         }
 
         let event_count = batch.registry_events.len();
@@ -395,11 +400,44 @@ impl GammaService {
             filtered = filtered_count,
             rejected = rejected_count,
             tombstoned = tombstoned_count,
+            projection_changed,
             sync_kind = %attempt.sync_kind,
             "gamma catalog reconciliation complete"
         );
 
-        Ok(())
+        Ok(projection_changed)
+    }
+
+    fn record_projection_metrics(
+        &self,
+        markets: &[MarketRegistryInfo],
+        changed_terms: usize,
+        past_deadline_paused: u64,
+        tombstoned: usize,
+    ) {
+        let changed = u64::try_from(changed_terms).unwrap_or(u64::MAX);
+        let unchanged = u64::try_from(markets.len())
+            .unwrap_or(u64::MAX)
+            .saturating_sub(changed);
+        self.metrics
+            .record_maker_rebate_diagnostics("catalog_terms_commit", "changed", changed);
+        self.metrics.record_maker_rebate_diagnostics(
+            "catalog_terms_commit",
+            "unchanged",
+            unchanged,
+        );
+        if past_deadline_paused > 0 {
+            self.metrics
+                .gamma_markets_paused
+                .with_label_values(&["past_deadline"])
+                .inc_by(past_deadline_paused);
+        }
+        if tombstoned > 0 {
+            self.metrics
+                .gamma_markets_paused
+                .with_label_values(&["gamma_tombstone"])
+                .inc_by(u64::try_from(tombstoned).unwrap_or(u64::MAX));
+        }
     }
 
     /// Count normalization rejects by reason (logging is per-row `debug!` at
@@ -673,25 +711,22 @@ impl GammaService {
         events: &[EventRegistryInfo],
         markets: &[MarketRegistryInfo],
     ) {
-        for event in events {
-            self.cache
-                .invalidate(&CacheKey::EventInfo {
-                    event_id: event.event_id.clone(),
-                })
-                .await;
-        }
+        let mut keys =
+            Vec::with_capacity(events.len().saturating_add(markets.len().saturating_mul(2)));
+        keys.extend(events.iter().map(|event| CacheKey::EventInfo {
+            event_id: event.event_id.clone(),
+        }));
         for market in markets {
-            self.cache
-                .invalidate(&CacheKey::MarketInfo {
+            keys.extend([
+                CacheKey::MarketInfo {
                     market_id: market.market_id.clone(),
-                })
-                .await;
-            self.cache
-                .invalidate(&CacheKey::MarketMetadata {
+                },
+                CacheKey::MarketMetadata {
                     market_id: market.market_id.clone(),
-                })
-                .await;
+                },
+            ]);
         }
+        self.cache.invalidate_many(&keys).await;
     }
 }
 
@@ -1251,6 +1286,17 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
+
+    #[tokio::test]
+    async fn projection_revision_dedupes() {
+        let revision = CatalogProjectionRevision::default();
+        let first = ContentHash::from_bytes([1; 32]);
+        let second = ContentHash::from_bytes([2; 32]);
+
+        assert!(revision.advance(first).await);
+        assert!(!revision.advance(first).await);
+        assert!(revision.advance(second).await);
+    }
 
     fn registry_event(market_ids: Vec<MarketId>) -> EventRegistryInfo {
         EventRegistryInfo {

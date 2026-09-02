@@ -1,4 +1,4 @@
-//! System status + quant runtime mode endpoints.
+//! System status, authority controls, and strict recovery endpoints.
 
 use actix_web::{
     http::Method,
@@ -8,11 +8,13 @@ use chrono::Utc;
 use quant_pivot_models::{
     domain::{
         api::{
-            ActionEligibilityDecision, ActionEligibilityView, CapabilityView,
-            ExecutionRecoveryView, FreshBootProfileProgressView, FreshBootProgressView,
-            FreshBootRunDetailView, FreshBootRunEventView, FreshBootRunProgressView,
-            RetryFreshBootRunRequest, SetEntryAuthorizationPolicyRequest, SetKillSwitchRequest,
-            SupersedeFreshBootRunRequest, SwitchSettlementWritePolicyRequest, SystemStatusView,
+            AccountRecoveryIncidentView, ActionEligibilityDecision, ActionEligibilityView,
+            CapabilityView, ExecutionRecoveryView, FinalizeAccountRecoveryRequest,
+            FreshBootProfileProgressView, FreshBootProgressView, FreshBootRunDetailView,
+            FreshBootRunEventView, FreshBootRunProgressView, ReconcileAccountRecoveryRequest,
+            RetryFreshBootRunRequest, SealAccountRecoveryRequest,
+            SetEntryAuthorizationPolicyRequest, SetKillSwitchRequest, SupersedeFreshBootRunRequest,
+            SwitchSettlementWritePolicyRequest, SystemStatusView,
             system::{
                 ExchangeHistoryQuarantinePageView, ExchangeHistoryQuarantineQuery,
                 ExchangeHistoryQuarantineView, FreshBootCapabilitySummary,
@@ -32,7 +34,7 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::{ContentHash, FreshBootRunId},
+    types::{AccountRecoveryIncidentId, ContentHash, FreshBootRunId, UserId},
 };
 use serde::Serialize;
 
@@ -111,13 +113,13 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         spec(
             Method::POST,
             "/system/runtime-controls/entry-authorization-policy",
-            Rule::ActingRoleGoverned(ResourceType::System, Operation::SwitchMode),
+            Rule::ActingRoleGoverned(ResourceType::System, Operation::UpdateRuntimeControl),
             switch_entry_authorization_policy,
         ),
         spec(
             Method::POST,
             "/system/runtime-controls/settlement-write-policy",
-            Rule::ActingRoleGoverned(ResourceType::System, Operation::SwitchMode),
+            Rule::ActingRoleGoverned(ResourceType::System, Operation::UpdateRuntimeControl),
             switch_settlement_write_policy,
         ),
         spec(
@@ -133,6 +135,36 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/system/execution-recovery",
             Rule::ResourceOp(ResourceType::System, Operation::Read),
             execution_recovery,
+        ),
+        spec(
+            Method::GET,
+            "/system/execution-recovery/incidents/active",
+            Rule::ResourceOp(ResourceType::System, Operation::Read),
+            active_recovery_incident,
+        ),
+        spec(
+            Method::GET,
+            "/system/execution-recovery/incidents/{id}",
+            Rule::ResourceOp(ResourceType::System, Operation::Read),
+            recovery_incident,
+        ),
+        spec(
+            Method::POST,
+            "/system/execution-recovery/incidents/{id}/pause-and-reconcile",
+            Rule::ActingRoleGoverned(ResourceType::System, Operation::Emergency),
+            pause_and_reconcile,
+        ),
+        spec(
+            Method::POST,
+            "/system/execution-recovery/incidents/{id}/seal",
+            Rule::ActingRoleGoverned(ResourceType::System, Operation::Resolve),
+            seal_recovery_incident,
+        ),
+        spec(
+            Method::POST,
+            "/system/execution-recovery/incidents/{id}/unpause-and-finalize",
+            Rule::ActingRoleGoverned(ResourceType::System, Operation::Resume),
+            unpause_and_finalize,
         ),
     ]
 }
@@ -459,6 +491,132 @@ pub async fn execution_recovery(
     state: Data<AppState>,
 ) -> Result<WebResponse<ExecutionRecoveryView>, WebError> {
     Ok(WebResponse::ok(state.execution_recovery.view().await?))
+}
+
+pub async fn recovery_incident(
+    state: Data<AppState>,
+    id: Path<AccountRecoveryIncidentId>,
+) -> Result<WebResponse<AccountRecoveryIncidentView>, WebError> {
+    state
+        .account_recovery_control
+        .incident(&id)
+        .await?
+        .map(WebResponse::ok)
+        .ok_or_else(|| WebError::NotFound(format!("account recovery incident not found: {id}")))
+}
+
+pub async fn active_recovery_incident(
+    state: Data<AppState>,
+) -> Result<WebResponse<Option<AccountRecoveryIncidentView>>, WebError> {
+    Ok(WebResponse::ok(
+        state.account_recovery_control.active_incident().await?,
+    ))
+}
+
+pub async fn pause_and_reconcile(
+    state: Data<AppState>,
+    actor: AuthedActor,
+    _acting_role: ActingRole,
+    op_ctx: OperationCtx,
+    id: Path<AccountRecoveryIncidentId>,
+    body: ValidatedJson<ReconcileAccountRecoveryRequest>,
+) -> Result<WebResponse<AccountRecoveryIncidentView>, WebError> {
+    let body = body.into_inner();
+    let before = state
+        .account_recovery_control
+        .incident(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("account recovery incident not found: {id}")))?;
+    op_ctx.set_action(
+        OperationCategory::System,
+        "system.account_recovery.pause_and_reconcile",
+    );
+    op_ctx.set_detail(serde_json::json!({
+        "incident_id": id.to_string(),
+        "expected_revision": body.expected_revision,
+        "sell_allocation_count": body.sell_allocations.len(),
+        "reason": body.reason,
+        "actor": actor.claims.username,
+    }))?;
+    let before_hash = canonical_state_hash(&before)?;
+    let after = state
+        .account_recovery_control
+        .pause_and_reconcile(&id, body.expected_revision, body.sell_allocations)
+        .await?;
+    op_ctx.set_state_hashes(Some(before_hash), Some(canonical_state_hash(&after)?));
+    Ok(WebResponse::ok(after))
+}
+
+pub async fn seal_recovery_incident(
+    state: Data<AppState>,
+    actor: AuthedActor,
+    _acting_role: ActingRole,
+    op_ctx: OperationCtx,
+    id: Path<AccountRecoveryIncidentId>,
+    body: ValidatedJson<SealAccountRecoveryRequest>,
+) -> Result<WebResponse<AccountRecoveryIncidentView>, WebError> {
+    let body = body.into_inner();
+    let actor_id = actor.claims.sub.parse::<UserId>().map_err(|error| {
+        WebError::Unauthorized(format!("authenticated subject is not a user id: {error}"))
+    })?;
+    let before = state
+        .account_recovery_control
+        .incident(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("account recovery incident not found: {id}")))?;
+    op_ctx.set_action(OperationCategory::System, "system.account_recovery.seal");
+    op_ctx.set_detail(serde_json::json!({
+        "incident_id": id.to_string(),
+        "manifest_id": body.account_recovery_manifest_id.to_string(),
+        "expected_revision": body.expected_revision,
+        "reason": body.reason,
+        "actor": actor.claims.username,
+    }))?;
+    let before_hash = canonical_state_hash(&before)?;
+    let after = state
+        .account_recovery_control
+        .seal(
+            &id,
+            body.account_recovery_manifest_id,
+            body.expected_revision,
+            actor_id,
+        )
+        .await?;
+    op_ctx.set_state_hashes(Some(before_hash), Some(canonical_state_hash(&after)?));
+    Ok(WebResponse::ok(after))
+}
+
+pub async fn unpause_and_finalize(
+    state: Data<AppState>,
+    actor: AuthedActor,
+    _acting_role: ActingRole,
+    op_ctx: OperationCtx,
+    id: Path<AccountRecoveryIncidentId>,
+    body: ValidatedJson<FinalizeAccountRecoveryRequest>,
+) -> Result<WebResponse<AccountRecoveryIncidentView>, WebError> {
+    let body = body.into_inner();
+    let before = state
+        .account_recovery_control
+        .incident(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("account recovery incident not found: {id}")))?;
+    op_ctx.set_action(
+        OperationCategory::System,
+        "system.account_recovery.unpause_and_finalize",
+    );
+    op_ctx.set_detail(serde_json::json!({
+        "incident_id": id.to_string(),
+        "expected_revision": body.expected_revision,
+        "reason": body.reason,
+        "actor": actor.claims.username,
+    }))?;
+    let before_hash = canonical_state_hash(&before)?;
+    let after = state
+        .account_recovery_control
+        .unpause_and_finalize(&id, body.expected_revision)
+        .await?;
+    op_ctx.set_state_hashes(Some(before_hash), Some(canonical_state_hash(&after)?));
+    Ok(WebResponse::ok(after))
 }
 
 pub async fn runtime_controls(

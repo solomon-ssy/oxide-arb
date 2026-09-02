@@ -133,7 +133,7 @@ const fn default_rpc_timeout() -> u64 {
 
 /// Settlement submission rollout configuration (`[polymarket.settlement]`).
 ///
-/// This switch is necessary but never sufficient: runtime mode, kill switch,
+/// This switch is necessary but never sufficient: entry authorization, kill switch,
 /// authorization, verified deployment capability and production evidence are
 /// independent fail-closed gates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

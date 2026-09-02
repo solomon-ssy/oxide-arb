@@ -17,7 +17,7 @@ use rust_decimal::{
 };
 use statrs::distribution::{ContinuousCDF, Normal};
 
-use crate::precision::RESEARCH_DECIMAL_SCALE;
+use crate::{model::CancellationProbe, precision::RESEARCH_DECIMAL_SCALE};
 
 /// Spearman rank correlation between two equal-length series (tie-aware).
 ///
@@ -256,10 +256,17 @@ pub fn wilson_interval(p_hat: f64, n: u64, z: f64, scale: u32) -> QuantResult<(D
 /// both the pooled weight (for the running mean) and the number of original
 /// groups folded into each pool (so the caller can expand back to one output
 /// per input group, not per unit of weight).
-fn pava_pool_groups(group_means: &[Decimal], group_weights: &[u64]) -> Vec<(Decimal, u64, usize)> {
+fn pava_pool_groups(
+    group_means: &[Decimal],
+    group_weights: &[u64],
+    cancellation: &CancellationProbe,
+) -> QuantResult<Vec<(Decimal, u64, usize)>> {
     // Each pool: (weighted sum, total weight, number of original groups merged in).
     let mut pools: Vec<(Decimal, u64, usize)> = Vec::with_capacity(group_means.len());
-    for (&mean, &weight) in group_means.iter().zip(group_weights) {
+    for (index, (&mean, &weight)) in group_means.iter().zip(group_weights).enumerate() {
+        if index % 1_024 == 0 {
+            cancellation.check("isotonic PAVA pooling")?;
+        }
         pools.push((mean * Decimal::from(weight), weight, 1));
         // Merge while the last pool's mean violates monotonicity.
         while pools.len() >= 2 {
@@ -270,25 +277,53 @@ fn pava_pool_groups(group_means: &[Decimal], group_weights: &[u64]) -> Vec<(Deci
             if mean_a <= mean_b {
                 break;
             }
-            let (sum_b, n_b, groups_b) = pools.pop().expect("checked len >= 2 above");
-            let (sum_a, n_a, groups_a) = pools.pop().expect("checked len >= 2 above");
+            let Some((sum_b, n_b, groups_b)) = pools.pop() else {
+                return Err(ResearchError::ValidationMethodology {
+                    detail: "isotonic PAVA lost its right merge pool".to_owned(),
+                }
+                .into());
+            };
+            let Some((sum_a, n_a, groups_a)) = pools.pop() else {
+                return Err(ResearchError::ValidationMethodology {
+                    detail: "isotonic PAVA lost its left merge pool".to_owned(),
+                }
+                .into());
+            };
             pools.push((sum_a + sum_b, n_a + n_b, groups_a + groups_b));
         }
     }
-    pools
+    cancellation.check("isotonic PAVA pooled")?;
+    Ok(pools)
 }
 
 /// Expand merged PAVA pools back into one pooled mean per original input
 /// group (repeating a merged pool's mean for every group folded into it).
-fn expand_pava_pools(pools: &[(Decimal, u64, usize)]) -> Vec<Decimal> {
-    let mut out = Vec::with_capacity(pools.iter().map(|&(_, _, groups)| groups).sum());
+fn expand_pava_pools(
+    pools: &[(Decimal, u64, usize)],
+    output_len: usize,
+    cancellation: &CancellationProbe,
+) -> QuantResult<Vec<Decimal>> {
+    let mut out = Vec::with_capacity(output_len);
     for &(sum, weight, groups) in pools {
         let mean = (sum / Decimal::from(weight)).round_dp(RESEARCH_DECIMAL_SCALE);
         for _ in 0..groups {
+            if out.len() % 1_024 == 0 {
+                cancellation.check("isotonic PAVA expansion")?;
+            }
             out.push(mean);
         }
     }
-    out
+    cancellation.check("isotonic PAVA expansion completion")?;
+    if out.len() != output_len {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!(
+                "isotonic PAVA expanded {} groups; expected {output_len}",
+                out.len()
+            ),
+        }
+        .into());
+    }
+    Ok(out)
 }
 
 /// Pool-adjacent-violators isotonic regression producing a non-decreasing
@@ -298,19 +333,29 @@ fn expand_pava_pools(pools: &[(Decimal, u64, usize)]) -> Vec<Decimal> {
 /// ([`crate::model::calibrator::isotonic`]) and available generically to any
 /// other monotone-regression need in this crate — one shared implementation
 /// rather than a per-caller PAVA.
-#[must_use]
-pub fn pava_non_decreasing(values: &[Decimal]) -> Vec<Decimal> {
+pub fn pava_non_decreasing(
+    values: &[Decimal],
+    cancellation: &CancellationProbe,
+) -> QuantResult<Vec<Decimal>> {
     let weights = vec![1_u64; values.len()];
-    expand_pava_pools(&pava_pool_groups(values, &weights))
+    expand_pava_pools(
+        &pava_pool_groups(values, &weights, cancellation)?,
+        values.len(),
+        cancellation,
+    )
 }
 
 /// Isotonic regression producing a non-increasing series (PAVA on the reverse).
-#[must_use]
-pub fn pava_non_increasing(values: &[Decimal]) -> Vec<Decimal> {
+pub fn pava_non_increasing(
+    values: &[Decimal],
+    cancellation: &CancellationProbe,
+) -> QuantResult<Vec<Decimal>> {
+    cancellation.check("decreasing PAVA reverse")?;
     let reversed: Vec<Decimal> = values.iter().rev().copied().collect();
-    let mut out = pava_non_decreasing(&reversed);
+    let mut out = pava_non_decreasing(&reversed, cancellation)?;
     out.reverse();
-    out
+    cancellation.check("decreasing PAVA completion")?;
+    Ok(out)
 }
 
 /// Weighted, grouped pool-adjacent-violators regression.
@@ -322,9 +367,15 @@ pub fn pava_non_increasing(values: &[Decimal]) -> Vec<Decimal> {
 /// PAVA treating each tied sample as an independent unit-weight point.
 /// Returns one pooled, non-decreasing mean per input group (same
 /// length/order as `group_means`).
-#[must_use]
-pub fn pava_non_decreasing_grouped(group_means: &[Decimal], group_weights: &[u64]) -> Vec<Decimal> {
-    expand_pava_pools(&pava_pool_groups(group_means, group_weights))
+pub fn pava_non_decreasing_grouped(
+    group_means: &[Decimal],
+    group_weights: &[u64],
+    cancellation: &CancellationProbe,
+) -> QuantResult<Vec<Decimal>> {
+    cancellation.check("isotonic PAVA start")?;
+    let pools = pava_pool_groups(group_means, group_weights, cancellation)?;
+    cancellation.check("isotonic PAVA expansion")?;
+    expand_pava_pools(&pools, group_means.len(), cancellation)
 }
 
 #[cfg(test)]
@@ -336,11 +387,12 @@ mod calibration_stat_tests {
         kurtosis, normal_cdf, normal_inverse_cdf, pava_non_decreasing, pava_non_decreasing_grouped,
         pava_non_increasing, skewness, stddev, variance, wilson_interval, wilson_z,
     };
+    use crate::model::CancellationProbe;
 
     #[test]
     fn pava_enforces_non_decreasing() {
         let values = vec![dec!(1), dec!(3), dec!(2), dec!(5), dec!(4)];
-        let out = pava_non_decreasing(&values);
+        let out = pava_non_decreasing(&values, &CancellationProbe::default()).expect("PAVA");
         for window in out.windows(2) {
             assert!(window[0] <= window[1]);
         }
@@ -349,7 +401,8 @@ mod calibration_stat_tests {
     #[test]
     fn pava_non_increasing_order() {
         let values = vec![dec!(5), dec!(2), dec!(3), dec!(1)];
-        let out = pava_non_increasing(&values);
+        let out =
+            pava_non_increasing(&values, &CancellationProbe::default()).expect("reverse PAVA");
         for window in out.windows(2) {
             assert!(window[0] >= window[1]);
         }
@@ -403,7 +456,12 @@ mod calibration_stat_tests {
         // instead pool into something else entirely.
         let group_means = vec![dec!(0), dec!(0.5), dec!(1)];
         let group_weights = vec![1_u64, 2, 1];
-        let pooled = pava_non_decreasing_grouped(&group_means, &group_weights);
+        let pooled = pava_non_decreasing_grouped(
+            &group_means,
+            &group_weights,
+            &CancellationProbe::default(),
+        )
+        .expect("grouped PAVA");
         assert_eq!(pooled, vec![dec!(0), dec!(0.5), dec!(1)]);
     }
 
@@ -415,7 +473,12 @@ mod calibration_stat_tests {
         // (1*1 + 0.4*3) / 4 = 0.55, applied to both merged groups.
         let group_means = vec![dec!(0), dec!(1), dec!(0.4)];
         let group_weights = vec![1_u64, 1, 3];
-        let pooled = pava_non_decreasing_grouped(&group_means, &group_weights);
+        let pooled = pava_non_decreasing_grouped(
+            &group_means,
+            &group_weights,
+            &CancellationProbe::default(),
+        )
+        .expect("weighted grouped PAVA");
         assert_eq!(pooled, vec![dec!(0), dec!(0.55), dec!(0.55)]);
     }
 
@@ -424,8 +487,9 @@ mod calibration_stat_tests {
         let values = vec![dec!(1), dec!(3), dec!(2), dec!(5), dec!(4)];
         let weights = vec![1_u64; values.len()];
         assert_eq!(
-            pava_non_decreasing_grouped(&values, &weights),
-            pava_non_decreasing(&values)
+            pava_non_decreasing_grouped(&values, &weights, &CancellationProbe::default(),)
+                .expect("grouped PAVA"),
+            pava_non_decreasing(&values, &CancellationProbe::default()).expect("PAVA")
         );
     }
 

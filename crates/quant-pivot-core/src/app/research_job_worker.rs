@@ -17,7 +17,12 @@
 
 use std::{
     collections::HashMap,
-    sync::Arc,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -36,10 +41,10 @@ use quant_pivot_models::{
         },
         ports::{
             BacktestPort, CalibratedModelSealCommand, CalibrationArtifactFitPort,
-            CandidateRecipePlanExecutionPort, CandidateRecipePlanExecutionResult,
-            CandidateRecipePlanJobParams, CommittedPolicyApplyPort, CpcvBacktestPort,
-            FeatureParityExecutionOutcome, FeatureParityExecutionPort,
-            FeedbackAttributionJobParams, FeedbackCalibrationJobParams,
+            CalibrationRunFinalization, CandidateRecipePlanExecutionPort,
+            CandidateRecipePlanExecutionResult, CandidateRecipePlanJobParams,
+            CommittedPolicyApplyPort, CpcvBacktestPort, FeatureParityExecutionOutcome,
+            FeatureParityExecutionPort, FeedbackAttributionJobParams, FeedbackCalibrationJobParams,
             FeedbackComparisonExecutionPort, FeedbackComparisonExecutionResult,
             FeedbackComparisonJobParams, FeedbackCoverageExecutionPort, FeedbackCpcvJobParams,
             FeedbackDatasetSealJobParams, FeedbackDecisionExecutionPort,
@@ -51,17 +56,19 @@ use quant_pivot_models::{
             ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
             ModelGovernancePort, ModelTrainingPort, ShadowBindingExecutionPort,
             ShadowBindingExecutionResult, ShadowBindingJobParams, TradePolicyPort,
-            TrainingDatasetPort,
+            TrainingDatasetPort, TrainingRunFinalization,
         },
         quant::{
-            JobProgressSink, ResearchJobArtifactRef, ResearchJobFinalization, ResearchJobInfo,
-            ResearchJobResultRef,
+            JobProgressSink, NoopProgressSink, ResearchJobArtifactRef, ResearchJobFinalization,
+            ResearchJobInfo, ResearchJobResultRef,
         },
     },
     enums::quant::{
         ResearchJobErrorCode, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
     },
-    types::{DatasetCoverage, ResearchJobError, ResearchJobParams, ResearchJobProgress},
+    types::{
+        DatasetCoverage, ModelVersionId, ResearchJobError, ResearchJobParams, ResearchJobProgress,
+    },
 };
 use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
@@ -78,9 +85,9 @@ use quant_pivot_repository::{
     },
 };
 use tokio::{
-    sync::watch::{self, Sender},
+    sync::watch::{self, Receiver, Sender},
     task::JoinSet,
-    time::interval,
+    time::{Interval, interval},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -168,6 +175,9 @@ const ALL_KINDS: [ResearchJobKind; 23] = [
     ResearchJobKind::FeedbackShadow,
     ResearchJobKind::FeedbackDecision,
 ];
+const COMMITTED_MODEL_READBACK_PREFIX: &str = "committed_model_readback";
+const OPERATOR_CANCEL_TERMINAL_PREFIX: &str = "operator_cancel_terminalization";
+const RETRY_EXHAUSTION_TERMINAL_PHASE: &str = "retry_exhaustion_terminalization";
 
 fn lease_deadline(lease_ttl_secs: i64) -> DateTime<Utc> {
     Utc::now() + ChronoDuration::seconds(lease_ttl_secs)
@@ -187,6 +197,16 @@ enum JobDisposition {
         progress: ResearchJobProgress,
         retry_after: Duration,
     },
+}
+
+enum JobRunFinalization {
+    Terminalized,
+    CommitWon,
+}
+
+enum RetryPreparation {
+    Continue(String),
+    Complete,
 }
 
 /// Owns the standalone calibration-job invariant: a successful raw fit is not
@@ -640,6 +660,230 @@ impl ResearchJobExecutor {
         .into())
     }
 
+    async fn cancel_job_runs(&self, job: &ResearchJobInfo) -> QuantResult<JobRunFinalization> {
+        let reason = "research job cancelled by operator";
+        match &job.params_json {
+            ResearchJobParams::ModelTrain(params) => {
+                let outcome = self
+                    .training
+                    .cancel_run(&params.model_run_id, reason.to_owned())
+                    .await?;
+                Self::training_finalization(outcome, params.model_version_id)
+            }
+            ResearchJobParams::FeedbackTraining(params) => {
+                let mut finalization = JobRunFinalization::CommitWon;
+                for command in &params.commands {
+                    let outcome = self
+                        .training
+                        .cancel_run(&command.params.model_run_id, reason.to_owned())
+                        .await?;
+                    if matches!(
+                        Self::training_finalization(outcome, command.params.model_version_id)?,
+                        JobRunFinalization::Terminalized
+                    ) {
+                        finalization = JobRunFinalization::Terminalized;
+                    }
+                }
+                Ok(finalization)
+            }
+            ResearchJobParams::ModelCalibrationFit(params) => {
+                let outcome = self
+                    .model_calibration
+                    .fitter
+                    .cancel_run(&params.model_run_id, reason.to_owned())
+                    .await?;
+                Ok(Self::calibration_finalization(outcome))
+            }
+            ResearchJobParams::FeedbackCalibration(params) => {
+                let mut finalization = JobRunFinalization::CommitWon;
+                for command in &params.commands {
+                    let outcome = self
+                        .model_calibration
+                        .fitter
+                        .cancel_run(&command.params.model_run_id, reason.to_owned())
+                        .await?;
+                    if matches!(
+                        Self::calibration_finalization(outcome),
+                        JobRunFinalization::Terminalized
+                    ) {
+                        finalization = JobRunFinalization::Terminalized;
+                    }
+                }
+                Ok(finalization)
+            }
+            _ => Ok(JobRunFinalization::Terminalized),
+        }
+    }
+
+    async fn fail_job_runs(
+        &self,
+        job: &ResearchJobInfo,
+        reason: String,
+    ) -> QuantResult<JobRunFinalization> {
+        match &job.params_json {
+            ResearchJobParams::ModelTrain(params) => {
+                let outcome = self.training.fail_run(&params.model_run_id, reason).await?;
+                Self::training_finalization(outcome, params.model_version_id)
+            }
+            ResearchJobParams::FeedbackTraining(params) => {
+                let mut finalization = JobRunFinalization::CommitWon;
+                for command in &params.commands {
+                    let outcome = self
+                        .training
+                        .fail_run(&command.params.model_run_id, reason.clone())
+                        .await?;
+                    if matches!(
+                        Self::training_finalization(outcome, command.params.model_version_id)?,
+                        JobRunFinalization::Terminalized
+                    ) {
+                        finalization = JobRunFinalization::Terminalized;
+                    }
+                }
+                Ok(finalization)
+            }
+            ResearchJobParams::ModelCalibrationFit(params) => {
+                let outcome = self
+                    .model_calibration
+                    .fitter
+                    .fail_run(&params.model_run_id, reason)
+                    .await?;
+                Ok(Self::calibration_finalization(outcome))
+            }
+            ResearchJobParams::FeedbackCalibration(params) => {
+                let mut finalization = JobRunFinalization::CommitWon;
+                for command in &params.commands {
+                    let outcome = self
+                        .model_calibration
+                        .fitter
+                        .fail_run(&command.params.model_run_id, reason.clone())
+                        .await?;
+                    if matches!(
+                        Self::calibration_finalization(outcome),
+                        JobRunFinalization::Terminalized
+                    ) {
+                        finalization = JobRunFinalization::Terminalized;
+                    }
+                }
+                Ok(finalization)
+            }
+            _ => Ok(JobRunFinalization::Terminalized),
+        }
+    }
+
+    fn training_finalization(
+        outcome: TrainingRunFinalization,
+        expected_model_version_id: ModelVersionId,
+    ) -> QuantResult<JobRunFinalization> {
+        match outcome {
+            TrainingRunFinalization::Terminalized => Ok(JobRunFinalization::Terminalized),
+            TrainingRunFinalization::CommitWon { model_version_id }
+                if model_version_id == expected_model_version_id =>
+            {
+                Ok(JobRunFinalization::CommitWon)
+            }
+            TrainingRunFinalization::CommitWon { model_version_id } => {
+                Err(ResearchError::InvalidModelArtifact {
+                    detail: format!(
+                        "training commit winner returned model {model_version_id}, expected {expected_model_version_id}"
+                    ),
+                }
+                .into())
+            }
+        }
+    }
+
+    const fn calibration_finalization(outcome: CalibrationRunFinalization) -> JobRunFinalization {
+        match outcome {
+            CalibrationRunFinalization::Terminalized => JobRunFinalization::Terminalized,
+            CalibrationRunFinalization::CommitWon => JobRunFinalization::CommitWon,
+        }
+    }
+
+    async fn recover_job_commit(&self, job: &ResearchJobInfo) -> QuantResult<JobOutcome> {
+        match job.params_json.clone() {
+            ResearchJobParams::ModelTrain(params) => {
+                let expected_model_version_id = params.model_version_id;
+                let expected_model_run_id = params.model_run_id;
+                let view = self
+                    .training
+                    .train(params, Arc::new(NoopProgressSink), CancellationToken::new())
+                    .await?;
+                if view.model_version_id != expected_model_version_id
+                    || view.model_run_id != Some(expected_model_run_id)
+                {
+                    return Err(ResearchError::InvalidModelArtifact {
+                        detail: "training commit recovery returned another model or run".to_owned(),
+                    }
+                    .into());
+                }
+                Ok(JobOutcome {
+                    result: Some(ResearchJobResultRef {
+                        kind: ResearchJobResultKind::ModelVersion,
+                        id: view.model_version_id.as_uuid(),
+                    }),
+                    artifact: None,
+                    coverage: None,
+                })
+            }
+            ResearchJobParams::FeedbackTraining(params) => {
+                self.execute_feedback_training(
+                    params,
+                    Arc::new(NoopProgressSink),
+                    CancellationToken::new(),
+                )
+                .await
+            }
+            ResearchJobParams::ModelCalibrationFit(params) => {
+                self.model_calibration
+                    .execute(params, Arc::new(NoopProgressSink), CancellationToken::new())
+                    .await
+            }
+            ResearchJobParams::FeedbackCalibration(params) => {
+                self.execute_feedback_calibration(
+                    params,
+                    Arc::new(NoopProgressSink),
+                    CancellationToken::new(),
+                )
+                .await
+            }
+            _ => Err(ResearchError::Serialization {
+                detail: "job without a recoverable model run reported commit-won".to_owned(),
+            }
+            .into()),
+        }
+    }
+
+    async fn resolve_operator_terminal(
+        &self,
+        job: &ResearchJobInfo,
+        terminal: Terminal,
+    ) -> Terminal {
+        let terminal = terminal.after_operator_cancel();
+        let Terminal::Cancelled = terminal else {
+            return terminal;
+        };
+        match self.cancel_job_runs(job).await {
+            Ok(JobRunFinalization::Terminalized) => Terminal::Cancelled,
+            Ok(JobRunFinalization::CommitWon) => match self.recover_job_commit(job).await {
+                Ok(outcome) => Terminal::Succeeded(Box::new(outcome)),
+                Err(error) => {
+                    warn!(
+                        job_id = %job.job_id,
+                        %error,
+                        "committed model-producing result awaits exact operator-cancel read-back"
+                    );
+                    Terminal::Retryable(format!("{COMMITTED_MODEL_READBACK_PREFIX}: {error}"))
+                }
+            },
+            Err(error) if is_transient_error(&error) => {
+                Terminal::Retryable(format!("{OPERATOR_CANCEL_TERMINAL_PREFIX}: {error}"))
+            }
+            Err(error) => Terminal::Failed(format!(
+                "operator model-run cancellation did not commit: {error}"
+            )),
+        }
+    }
+
     async fn execute_feedback_job(
         &self,
         params: ResearchJobParams,
@@ -853,7 +1097,7 @@ impl FeedbackExecutionPorts {
         backtests: Arc<CoreBacktestPort>,
         cpcv: Arc<dyn CpcvBacktestPort>,
     ) -> QuantResult<Self> {
-        let signals = Arc::new(FeedbackSignalService::new(FeedbackSignalServiceDeps {
+        let signals = Arc::new(FeedbackSignalService::try_new(FeedbackSignalServiceDeps {
             cycles: Arc::clone(&context.infra.repos.feedback_cycle)
                 as Arc<dyn FeedbackCycleRepository>,
             models: Arc::clone(&context.research.model_registry_repo)
@@ -867,12 +1111,14 @@ impl FeedbackExecutionPorts {
             factor_repository: Arc::clone(&context.research.factor_repo)
                 as Arc<dyn FactorRepository>,
             artifact_store: Arc::clone(&context.research.artifact_store),
-        }));
+            compute: Arc::clone(&context.compute),
+        })?);
         Ok(Self {
             coverage: Arc::clone(&signals) as Arc<dyn FeedbackCoverageExecutionPort>,
             drift: signals as Arc<dyn FeedbackDriftExecutionPort>,
             recipe: Arc::new(CandidateRecipePlanExecutionService::new(
                 CandidateRecipePlanExecutionDeps {
+                    compute: Arc::clone(&context.compute),
                     cycles: Arc::clone(&context.infra.repos.feedback_cycle)
                         as Arc<dyn FeedbackCycleRepository>,
                     templates: Arc::clone(&context.infra.repos.feedback_recipe_template)
@@ -935,7 +1181,7 @@ impl FeedbackExecutionPorts {
                     metrics: Arc::clone(&context.infra.metrics),
                 },
             )),
-            learning: Arc::new(FeedbackLearningExecutionService::new(
+            learning: Arc::new(FeedbackLearningExecutionService::try_new(
                 FeedbackLearningExecutionDeps {
                     datasets,
                     training,
@@ -944,8 +1190,9 @@ impl FeedbackExecutionPorts {
                     cpcv,
                     governance: Arc::clone(&context.research.model_governance),
                     artifacts: Arc::clone(&context.research.artifact_store),
+                    compute: Arc::clone(&context.compute),
                 },
-            )),
+            )?),
             comparison: Arc::new(FeedbackComparisonExecutionService::new(
                 FeedbackComparisonExecutionDeps {
                     backtests,
@@ -997,6 +1244,7 @@ impl ResearchJobExecutor {
                 Arc::clone(&bias_tables),
                 Arc::clone(&context.research.model_run_repo),
                 Arc::clone(&runtime_config),
+                Arc::clone(&context.compute),
             ));
         let recipe_datasets = Arc::new(CoreTrainingDatasetPort::from_research(
             &context.research,
@@ -1304,10 +1552,30 @@ impl AppContext {
         let coordinator = FeedbackCoordinator::from_context(self, engine.clone(), config.as_ref())?;
         let scheduler = self.build_feedback_scheduler(&engine, config.as_ref())?;
         let metrics = Arc::clone(&self.infra.metrics);
+        let stop_intake = self.shutdown.clone();
         let worker_engine = engine;
         let worker_config = Arc::clone(&config);
-        runner.spawn(TaskId::ResearchJobWorker, move |token| async move {
-            run_worker(worker_engine, executor, worker_config, metrics, token).await;
+        runner.spawn(TaskId::ResearchJobWorker, move |stage_token| async move {
+            // Root cancellation stops leasing immediately. The stage token
+            // remains a bounded-drain backstop when the registry reaches
+            // Analytics; both converge on the one token observed by leases and
+            // in-flight jobs.
+            let worker_shutdown = CancellationToken::new();
+            let worker = run_worker(
+                worker_engine,
+                executor,
+                worker_config,
+                metrics,
+                worker_shutdown.clone(),
+            );
+            tokio::pin!(worker);
+            tokio::select! {
+                () = stop_intake.cancelled() => {}
+                () = stage_token.cancelled() => {}
+                () = &mut worker => return,
+            }
+            worker_shutdown.cancel();
+            worker.await;
         });
         runner.spawn(TaskId::FeedbackCoordinator, move |token| async move {
             coordinator.run(token).await;
@@ -1342,44 +1610,52 @@ async fn run_worker(
         Err(error) => warn!(%error, "research-job boot recovery sweep failed"),
     }
 
-    let mut tasks: JoinSet<ResearchJobKind> = JoinSet::new();
-    let mut inflight: HashMap<ResearchJobKind, usize> = HashMap::new();
+    let mut tasks: JoinSet<()> = JoinSet::new();
+    let inflight = Arc::new(InflightTracker::default());
 
     loop {
         if token.is_cancelled() {
             break;
         }
-        drain_finished(&mut tasks, &mut inflight);
+        drain_finished(&mut tasks);
 
-        let eligible = eligible_kinds(&inflight, config.as_ref());
+        let eligible = inflight.eligible(config.as_ref());
         if eligible.is_empty() {
-            wait_for_slot(&token, &mut tasks, &mut inflight, poll).await;
+            wait_for_slot(&token, &mut tasks, poll).await;
             continue;
         }
 
-        match engine
+        let lease = engine
             .repo()
             .lease_next(
                 &eligible,
                 engine.instance_id(),
                 lease_deadline(config.lease_ttl_secs),
             )
-            .await
-        {
-            Ok(Some(job)) => {
-                *inflight.entry(job.kind).or_insert(0) += 1;
-                let engine = engine.clone();
-                let executor = executor.clone();
-                let metrics = Arc::clone(&metrics);
-                let shutdown = token.clone();
-                let config = Arc::clone(&config);
-                tasks.spawn(async move {
-                    let kind = job.kind;
-                    run_one(engine, executor, job, config, metrics, shutdown).await;
-                    kind
-                });
-            }
-            Ok(None) => wait_for_slot(&token, &mut tasks, &mut inflight, poll).await,
+            .await;
+        match lease {
+            Ok(leased) => match LeaseDecision::resolve(&token, leased) {
+                // A lease won concurrently with root cancellation remains owned
+                // by this boot epoch and is reclaimed by `requeue_inflight`
+                // below without ever spawning or publishing a false start.
+                LeaseDecision::Stop => break,
+                LeaseDecision::Idle => {
+                    wait_for_slot(&token, &mut tasks, poll).await;
+                }
+                LeaseDecision::Run(job) => {
+                    let permit = InflightTracker::acquire(&inflight, job.kind);
+                    let engine = engine.clone();
+                    let executor = executor.clone();
+                    let metrics = Arc::clone(&metrics);
+                    let shutdown = token.clone();
+                    let config = Arc::clone(&config);
+                    tasks.spawn(async move {
+                        let _permit = permit;
+                        run_one(engine, executor, job, config, metrics, shutdown).await;
+                    });
+                }
+            },
+            Err(_) if token.is_cancelled() => break,
             Err(error) => {
                 warn!(%error, "research-job lease failed; backing off");
                 sleep_or_cancel(&token, poll).await;
@@ -1418,35 +1694,95 @@ async fn run_worker(
     info!("research-job worker stopped");
 }
 
-fn eligible_kinds(
-    inflight: &HashMap<ResearchJobKind, usize>,
-    config: &ResearchJobsConfig,
-) -> Vec<ResearchJobKind> {
-    let total: usize = inflight.values().sum();
-    if total >= config.global_concurrency {
-        return Vec::new();
-    }
-    ALL_KINDS
-        .into_iter()
-        .filter(|kind| inflight.get(kind).copied().unwrap_or(0) < config.kind_concurrency(*kind))
-        .collect()
+enum LeaseDecision<T> {
+    Stop,
+    Idle,
+    Run(T),
 }
 
-fn drain_finished(
-    tasks: &mut JoinSet<ResearchJobKind>,
-    inflight: &mut HashMap<ResearchJobKind, usize>,
-) {
+impl<T> LeaseDecision<T> {
+    fn resolve(shutdown: &CancellationToken, leased: Option<T>) -> Self {
+        if shutdown.is_cancelled() {
+            Self::Stop
+        } else {
+            leased.map_or(Self::Idle, Self::Run)
+        }
+    }
+}
+
+struct InflightTracker {
+    total: AtomicUsize,
+    by_kind: HashMap<ResearchJobKind, AtomicUsize>,
+}
+
+impl Default for InflightTracker {
+    fn default() -> Self {
+        Self {
+            total: AtomicUsize::new(0),
+            by_kind: ALL_KINDS
+                .into_iter()
+                .map(|kind| (kind, AtomicUsize::new(0)))
+                .collect(),
+        }
+    }
+}
+
+impl InflightTracker {
+    fn acquire(tracker: &Arc<Self>, kind: ResearchJobKind) -> InflightPermit {
+        tracker.total.fetch_add(1, Ordering::AcqRel);
+        if let Some(count) = tracker.by_kind.get(&kind) {
+            count.fetch_add(1, Ordering::AcqRel);
+        }
+        InflightPermit {
+            tracker: Arc::clone(tracker),
+            kind,
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.total.load(Ordering::Acquire)
+    }
+
+    fn kind(&self, kind: ResearchJobKind) -> usize {
+        self.by_kind
+            .get(&kind)
+            .map_or(0, |count| count.load(Ordering::Acquire))
+    }
+
+    fn eligible(&self, config: &ResearchJobsConfig) -> Vec<ResearchJobKind> {
+        if self.total() >= config.global_concurrency {
+            return Vec::new();
+        }
+        ALL_KINDS
+            .into_iter()
+            .filter(|kind| self.kind(*kind) < config.kind_concurrency(*kind))
+            .collect()
+    }
+}
+
+struct InflightPermit {
+    tracker: Arc<InflightTracker>,
+    kind: ResearchJobKind,
+}
+
+impl Drop for InflightPermit {
+    fn drop(&mut self) {
+        self.tracker.total.fetch_sub(1, Ordering::AcqRel);
+        if let Some(count) = self.tracker.by_kind.get(&self.kind) {
+            count.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+fn drain_finished(tasks: &mut JoinSet<()>) {
     while let Some(joined) = tasks.try_join_next() {
-        decrement(inflight, joined.ok());
+        if let Err(join_error) = joined {
+            error!(%join_error, "research-job supervisor task exited unexpectedly");
+        }
     }
 }
 
-async fn wait_for_slot(
-    token: &CancellationToken,
-    tasks: &mut JoinSet<ResearchJobKind>,
-    inflight: &mut HashMap<ResearchJobKind, usize>,
-    poll: Duration,
-) {
+async fn wait_for_slot(token: &CancellationToken, tasks: &mut JoinSet<()>, poll: Duration) {
     if tasks.is_empty() {
         sleep_or_cancel(token, poll).await;
         return;
@@ -1454,19 +1790,11 @@ async fn wait_for_slot(
     tokio::select! {
         () = token.cancelled() => {}
         joined = tasks.join_next() => {
-            if let Some(joined) = joined {
-                decrement(inflight, joined.ok());
+            if let Some(Err(join_error)) = joined {
+                error!(%join_error, "research-job supervisor task exited unexpectedly");
             }
         }
         () = tokio::time::sleep(poll) => {}
-    }
-}
-
-fn decrement(inflight: &mut HashMap<ResearchJobKind, usize>, kind: Option<ResearchJobKind>) {
-    if let Some(kind) = kind
-        && let Some(count) = inflight.get_mut(&kind)
-    {
-        *count = count.saturating_sub(1);
     }
 }
 
@@ -1477,10 +1805,136 @@ async fn sleep_or_cancel(token: &CancellationToken, duration: Duration) {
     }
 }
 
+impl ResearchJobEngine {
+    async fn renew_job_lease(
+        &self,
+        job: &ResearchJobInfo,
+        config: &ResearchJobsConfig,
+        progress: Option<ResearchJobProgress>,
+        metrics: &MetricsHub,
+    ) -> bool {
+        let source = if progress.is_some() {
+            "progress"
+        } else {
+            "periodic"
+        };
+        let surfaced = progress
+            .as_ref()
+            .map(|progress| (progress.phase.clone(), progress.pct()));
+        match self
+            .repo()
+            .heartbeat(
+                &job.job_id,
+                self.instance_id(),
+                lease_deadline(config.lease_ttl_secs),
+                progress,
+            )
+            .await
+        {
+            Ok(true) => {
+                metrics.record_research_heartbeat(source, "renewed");
+                if let Some((phase, pct)) = surfaced {
+                    self.publish_progress(
+                        &job.job_id,
+                        job.kind,
+                        None,
+                        ResearchJobStatus::Running,
+                        Some(phase),
+                        pct,
+                    );
+                }
+                true
+            }
+            Ok(false) => {
+                metrics.record_research_heartbeat(source, "lease_lost");
+                false
+            }
+            Err(error) => {
+                metrics.record_research_heartbeat(source, "storage_error");
+                warn!(job_id = %job.job_id, %error, source, "research-job heartbeat failed closed");
+                false
+            }
+        }
+    }
+
+    async fn resume_job_terminal(
+        &self,
+        executor: &ResearchJobExecutor,
+        job: &ResearchJobInfo,
+        config: &ResearchJobsConfig,
+        metrics: &MetricsHub,
+    ) -> bool {
+        let resumes_operator_cancel = job
+            .error_json
+            .as_ref()
+            .is_some_and(|error| error.message.starts_with(OPERATOR_CANCEL_TERMINAL_PREFIX))
+            || job
+                .progress_json
+                .as_ref()
+                .is_some_and(|progress| progress.phase == OPERATOR_CANCEL_TERMINAL_PREFIX);
+        if resumes_operator_cancel {
+            let terminal = executor
+                .resolve_operator_terminal(job, Terminal::Cancelled)
+                .await;
+            settle(self, executor, job, terminal, config, metrics).await;
+            return true;
+        }
+        if job
+            .progress_json
+            .as_ref()
+            .is_some_and(|progress| progress.phase == RETRY_EXHAUSTION_TERMINAL_PHASE)
+        {
+            self.settle_retry(
+                executor,
+                job,
+                "retry exhaustion model-run terminalization".to_owned(),
+                config,
+                metrics,
+            )
+            .await;
+            return true;
+        }
+        false
+    }
+}
+
 /// Supervise one leased job: spawn its execution (which offloads CPU-bound work
 /// to the governed executor and polls `cancel`), then `select!` over completion,
 /// throttled progress-heartbeats drained from the sink channel, periodic lease
 /// renewal, and graceful shutdown.
+enum SupervisorEvent<T> {
+    Completed(T),
+    Progress(bool),
+    Heartbeat,
+    OperatorCancel,
+    Shutdown,
+}
+
+impl<T> SupervisorEvent<T> {
+    async fn next<F>(
+        mut execution: Pin<&mut F>,
+        progress_rx: &mut Receiver<Option<ResearchJobProgress>>,
+        progress_open: bool,
+        heartbeat: &mut Interval,
+        cancel: &CancellationToken,
+        operator_cancel_draining: bool,
+        shutdown: &CancellationToken,
+    ) -> Self
+    where
+        F: Future<Output = T>,
+    {
+        tokio::select! {
+            result = execution.as_mut() => Self::Completed(result),
+            changed = progress_rx.changed(), if progress_open => {
+                Self::Progress(changed.is_ok())
+            }
+            _ = heartbeat.tick() => Self::Heartbeat,
+            () = cancel.cancelled(), if !operator_cancel_draining => Self::OperatorCancel,
+            () = shutdown.cancelled() => Self::Shutdown,
+        }
+    }
+}
+
 async fn run_one(
     engine: ResearchJobEngine,
     executor: ResearchJobExecutor,
@@ -1490,6 +1944,15 @@ async fn run_one(
     shutdown: CancellationToken,
 ) {
     let job_id = job.job_id;
+    if shutdown.is_cancelled() {
+        return;
+    }
+    if engine
+        .resume_job_terminal(&executor, &job, config.as_ref(), metrics.as_ref())
+        .await
+    {
+        return;
+    }
     let cancel = CancellationToken::new();
     engine.register_cancel(&job_id, cancel.clone());
     engine.publish_progress(
@@ -1504,7 +1967,7 @@ async fn run_one(
     // Synchronous latest-value slot: blocking execution can publish without an
     // await, while bursty intermediate snapshots are structurally coalesced.
     let (tx, mut progress_rx) = watch::channel::<Option<ResearchJobProgress>>(None);
-    let progress_reset = tx.clone();
+    let progress_slot = tx.clone();
     let sink: Arc<dyn JobProgressSink> = Arc::new(ChannelProgressSink {
         tx,
         metrics: Arc::clone(&metrics),
@@ -1517,73 +1980,67 @@ async fn run_one(
     let mut heartbeat = interval(Duration::from_secs(config.heartbeat_secs));
     heartbeat.tick().await; // consume the immediate first tick
     let mut progress_open = true;
+    let mut operator_cancel_draining = false;
 
     let terminal = loop {
-        tokio::select! {
-            result = &mut execution => break Terminal::from_result(result),
-            changed = progress_rx.changed(), if progress_open => {
-                if changed.is_err() {
+        match SupervisorEvent::next(
+            execution.as_mut(),
+            &mut progress_rx,
+            progress_open,
+            &mut heartbeat,
+            &cancel,
+            operator_cancel_draining,
+            &shutdown,
+        )
+        .await
+        {
+            SupervisorEvent::Completed(result) => break Terminal::from_result(result),
+            SupervisorEvent::Progress(open) => {
+                if !open {
                     progress_open = false;
                     continue;
                 }
                 drop(progress_rx.borrow_and_update());
-                let Some(progress) = progress_reset.send_replace(None) else {
+                let mut latest = None;
+                progress_slot.send_if_modified(|slot| {
+                    latest = slot.take();
+                    false
+                });
+                let Some(progress) = latest else {
                     continue;
                 };
                 // Coalesce bursty per-section reports; each surfaced report also
                 // renews the lease (doubles as a liveness heartbeat).
-                if throttle.should_emit() {
-                    let pct = progress.pct();
-                    let phase = progress.phase.clone();
-                    match engine
-                        .repo()
-                        .heartbeat(&job_id, engine.instance_id(), lease_deadline(config.lease_ttl_secs), Some(progress))
+                if throttle.should_emit()
+                    && !engine
+                        .renew_job_lease(&job, config.as_ref(), Some(progress), metrics.as_ref())
                         .await
-                    {
-                        Ok(true) => {
-                            metrics.record_research_heartbeat("progress", "renewed");
-                            engine.publish_progress(&job_id, job.kind, None, ResearchJobStatus::Running, Some(phase), pct);
-                        }
-                        Ok(false) => {
-                            metrics.record_research_heartbeat("progress", "lease_lost");
-                            cancel.cancel();
-                            engine.clear_cancel(&job_id);
-                            return;
-                        }
-                        Err(error) => {
-                            metrics.record_research_heartbeat("progress", "storage_error");
-                            warn!(%job_id, %error, "research-job progress heartbeat failed closed");
-                            cancel.cancel();
-                            engine.clear_cancel(&job_id);
-                            return;
-                        }
-                    }
+                {
+                    cancel.cancel();
+                    let _ = (&mut execution).await;
+                    engine.clear_cancel(&job_id);
+                    return;
                 }
             }
-            _ = heartbeat.tick() => {
-                match engine
-                    .repo()
-                    .heartbeat(&job_id, engine.instance_id(), lease_deadline(config.lease_ttl_secs), None)
+            SupervisorEvent::Heartbeat => {
+                if !engine
+                    .renew_job_lease(&job, config.as_ref(), None, metrics.as_ref())
                     .await
                 {
-                    Ok(true) => metrics.record_research_heartbeat("periodic", "renewed"),
-                    Ok(false) => {
-                        metrics.record_research_heartbeat("periodic", "lease_lost");
-                        cancel.cancel();
-                        engine.clear_cancel(&job_id);
-                        return;
-                    }
-                    Err(error) => {
-                        metrics.record_research_heartbeat("periodic", "storage_error");
-                        warn!(%job_id, %error, "research-job periodic heartbeat failed closed");
-                        cancel.cancel();
-                        engine.clear_cancel(&job_id);
-                        return;
-                    }
+                    cancel.cancel();
+                    let _ = (&mut execution).await;
+                    engine.clear_cancel(&job_id);
+                    return;
                 }
             }
-            () = cancel.cancelled() => break Terminal::Cancelled,
-            () = shutdown.cancelled() => {
+            SupervisorEvent::OperatorCancel => {
+                // Keep the normal supervisor loop alive while the operation
+                // drains. Progress and periodic heartbeats continue renewing
+                // this exact lease, so a committed result can still win the
+                // cancellation race without becoming a stale finalization.
+                operator_cancel_draining = true;
+            }
+            SupervisorEvent::Shutdown => {
                 // Signal cooperative cancellation and leave the row `running`.
                 // The worker owns the one global drain deadline; after it expires
                 // the task is aborted before the repository re-queues this epoch.
@@ -1595,7 +2052,21 @@ async fn run_one(
         }
     };
 
-    settle(&engine, &job, terminal, config.as_ref(), &metrics).await;
+    let terminal = if operator_cancel_draining {
+        executor.resolve_operator_terminal(&job, terminal).await
+    } else {
+        terminal
+    };
+
+    settle(
+        &engine,
+        &executor,
+        &job,
+        terminal,
+        config.as_ref(),
+        &metrics,
+    )
+    .await;
     engine.clear_cancel(&job_id);
 }
 
@@ -1611,6 +2082,14 @@ enum Terminal {
 }
 
 impl Terminal {
+    fn after_operator_cancel(self) -> Self {
+        match self {
+            Self::Succeeded(outcome) => Self::Succeeded(outcome),
+            Self::Failed(message) => Self::Failed(message),
+            Self::AwaitingEvidence { .. } | Self::Retryable(_) | Self::Cancelled => Self::Cancelled,
+        }
+    }
+
     fn from_result(result: QuantResult<JobDisposition>) -> Self {
         match result {
             Ok(JobDisposition::Completed(outcome)) => Self::Succeeded(outcome),
@@ -1640,6 +2119,7 @@ fn is_transient_error(error: &QuantError) -> bool {
 
 async fn settle(
     engine: &ResearchJobEngine,
+    executor: &ResearchJobExecutor,
     job: &ResearchJobInfo,
     terminal: Terminal,
     config: &ResearchJobsConfig,
@@ -1673,7 +2153,9 @@ async fn settle(
             return;
         }
         Terminal::Retryable(message) => {
-            engine.settle_retry(job, message, config, metrics).await;
+            engine
+                .settle_retry(executor, job, message, config, metrics)
+                .await;
             return;
         }
         Terminal::Cancelled => ResearchJobFinalization::cancelled(ResearchJobError::new(
@@ -1681,32 +2163,36 @@ async fn settle(
             "cancelled by operator",
         )),
     };
-    let status = finalization.status();
-    match engine
-        .repo()
-        .finalize(&job_id, engine.instance_id(), finalization)
-        .await
-    {
-        Ok(info) => {
-            let pct = if status == ResearchJobStatus::Succeeded {
-                Some(1.0)
-            } else {
-                None
-            };
-            engine.publish(&info, Some("finalize".to_owned()), pct);
-        }
-        Err(StorageError::StateConflict { .. }) => {
-            warn!(
-                %job_id,
-                kind = %kind,
-                "stale worker skipped finalize after lease loss or double-finalize"
-            );
-        }
-        Err(error) => error!(%error, kind = %kind, "failed to finalize research job"),
-    }
+    engine.finalize_job(job, finalization).await;
 }
 
 impl ResearchJobEngine {
+    async fn finalize_job(&self, job: &ResearchJobInfo, finalization: ResearchJobFinalization) {
+        let status = finalization.status();
+        match self
+            .repo()
+            .finalize(&job.job_id, self.instance_id(), finalization)
+            .await
+        {
+            Ok(info) => {
+                let pct = if status == ResearchJobStatus::Succeeded {
+                    Some(1.0)
+                } else {
+                    None
+                };
+                self.publish(&info, Some("finalize".to_owned()), pct);
+            }
+            Err(StorageError::StateConflict { .. }) => {
+                warn!(
+                    job_id = %job.job_id,
+                    kind = %job.kind,
+                    "stale worker skipped finalize after lease loss or double-finalize"
+                );
+            }
+            Err(error) => error!(%error, kind = %job.kind, "failed to finalize research job"),
+        }
+    }
+
     async fn settle_evidence_wait(
         &self,
         job: &ResearchJobInfo,
@@ -1714,6 +2200,7 @@ impl ResearchJobEngine {
         retry_after: Duration,
         metrics: &MetricsHub,
     ) {
+        let phase = progress.phase.clone();
         match self
             .repo()
             .await_evidence(&job.job_id, self.instance_id(), progress, retry_after)
@@ -1721,7 +2208,7 @@ impl ResearchJobEngine {
         {
             Ok(info) => {
                 metrics.record_research_heartbeat("evidence_wait", "scheduled");
-                self.publish(&info, Some("pending_materialization".to_owned()), None);
+                self.publish(&info, Some(phase), None);
             }
             Err(StorageError::StateConflict { .. }) => {
                 metrics.record_research_heartbeat("evidence_wait", "lease_lost");
@@ -1743,16 +2230,209 @@ impl ResearchJobEngine {
         }
     }
 
-    async fn settle_retry(
+    async fn prepare_operator_retry(
         &self,
+        executor: &ResearchJobExecutor,
         job: &ResearchJobInfo,
         message: String,
+        config: &ResearchJobsConfig,
+        metrics: &MetricsHub,
+    ) -> RetryPreparation {
+        let exhausted = job.recovery_attempt >= job.max_recovery_attempts;
+        match executor.cancel_job_runs(job).await {
+            Ok(JobRunFinalization::Terminalized) => {
+                self.finalize_job(
+                    job,
+                    ResearchJobFinalization::cancelled(ResearchJobError::new(
+                        ResearchJobErrorCode::Cancelled,
+                        "cancelled by operator",
+                    )),
+                )
+                .await;
+                RetryPreparation::Complete
+            }
+            Ok(JobRunFinalization::CommitWon) => match executor.recover_job_commit(job).await {
+                Ok(outcome) => {
+                    self.finalize_job(
+                        job,
+                        ResearchJobFinalization::succeeded(
+                            outcome.result,
+                            outcome.artifact,
+                            outcome.coverage,
+                        ),
+                    )
+                    .await;
+                    RetryPreparation::Complete
+                }
+                Err(error) if !exhausted => RetryPreparation::Continue(format!(
+                    "{COMMITTED_MODEL_READBACK_PREFIX}: {error}"
+                )),
+                Err(error) => {
+                    let _ = self
+                        .renew_job_lease(
+                            job,
+                            config,
+                            Some(ResearchJobProgress::indeterminate(
+                                COMMITTED_MODEL_READBACK_PREFIX,
+                                0,
+                            )),
+                            metrics,
+                        )
+                        .await;
+                    error!(
+                        job_id = %job.job_id,
+                        kind = %job.kind,
+                        %error,
+                            "committed model-producing read-back remains unavailable at retry cap"
+                    );
+                    RetryPreparation::Complete
+                }
+            },
+            Err(error) if is_transient_error(&error) && !exhausted => {
+                RetryPreparation::Continue(message)
+            }
+            Err(error) if is_transient_error(&error) => {
+                let _ = self
+                    .renew_job_lease(
+                        job,
+                        config,
+                        Some(ResearchJobProgress::indeterminate(
+                            OPERATOR_CANCEL_TERMINAL_PREFIX,
+                            0,
+                        )),
+                        metrics,
+                    )
+                    .await;
+                error!(
+                    job_id = %job.job_id,
+                    kind = %job.kind,
+                    %error,
+                    "operator model-run terminalization remains unavailable at retry cap"
+                );
+                RetryPreparation::Complete
+            }
+            Err(error) => {
+                self.finalize_job(
+                    job,
+                    ResearchJobFinalization::failed(ResearchJobError::new(
+                        ResearchJobErrorCode::ExecutionFailed,
+                        format!("operator model-run terminalization failed: {error}"),
+                    )),
+                )
+                .await;
+                RetryPreparation::Complete
+            }
+        }
+    }
+
+    async fn prepare_exhausted_retry(
+        &self,
+        executor: &ResearchJobExecutor,
+        job: &ResearchJobInfo,
+        message: &str,
+        config: &ResearchJobsConfig,
+        metrics: &MetricsHub,
+    ) -> bool {
+        match executor
+            .fail_job_runs(
+                job,
+                format!("research job transient retries exhausted: {message}"),
+            )
+            .await
+        {
+            Ok(JobRunFinalization::Terminalized) => false,
+            Ok(JobRunFinalization::CommitWon) => {
+                match executor.recover_job_commit(job).await {
+                    Ok(outcome) => {
+                        metrics.record_research_heartbeat("execution_retry", "commit_recovered");
+                        self.finalize_job(
+                            job,
+                            ResearchJobFinalization::succeeded(
+                                outcome.result,
+                                outcome.artifact,
+                                outcome.coverage,
+                            ),
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        metrics
+                            .record_research_heartbeat("execution_retry", "commit_readback_wait");
+                        let _ = self
+                            .renew_job_lease(
+                                job,
+                                config,
+                                Some(ResearchJobProgress::indeterminate(
+                                    COMMITTED_MODEL_READBACK_PREFIX,
+                                    0,
+                                )),
+                                metrics,
+                            )
+                            .await;
+                        warn!(
+                            job_id = %job.job_id,
+                            kind = %job.kind,
+                            %error,
+                            "committed model-producing result awaits exact retry-exhaustion read-back"
+                        );
+                    }
+                }
+                true
+            }
+            Err(error) => {
+                let _ = self
+                    .renew_job_lease(
+                        job,
+                        config,
+                        Some(ResearchJobProgress::indeterminate(
+                            RETRY_EXHAUSTION_TERMINAL_PHASE,
+                            0,
+                        )),
+                        metrics,
+                    )
+                    .await;
+                metrics.record_research_heartbeat("execution_retry", "model_run_terminal_error");
+                error!(
+                    job_id = %job.job_id,
+                    kind = %job.kind,
+                    %error,
+                    "research job retry exhaustion could not terminalize its model run"
+                );
+                true
+            }
+        }
+    }
+
+    async fn settle_retry(
+        &self,
+        executor: &ResearchJobExecutor,
+        job: &ResearchJobInfo,
+        mut message: String,
         config: &ResearchJobsConfig,
         metrics: &MetricsHub,
     ) {
         let job_id = job.job_id;
         let kind = job.kind;
         let retry_after = Duration::from_secs(config.execution_retry_delay(job.recovery_attempt));
+        let retries_exhausted = job.recovery_attempt >= job.max_recovery_attempts;
+        let operator_terminalization = message.starts_with(OPERATOR_CANCEL_TERMINAL_PREFIX);
+        if operator_terminalization {
+            match self
+                .prepare_operator_retry(executor, job, message, config, metrics)
+                .await
+            {
+                RetryPreparation::Continue(next) => message = next,
+                RetryPreparation::Complete => return,
+            }
+        }
+        if retries_exhausted
+            && !operator_terminalization
+            && self
+                .prepare_exhausted_retry(executor, job, &message, config, metrics)
+                .await
+        {
+            return;
+        }
         match self
             .repo()
             .retry_transient(&job_id, self.instance_id(), message.clone(), retry_after)
@@ -1800,12 +2480,17 @@ impl ResearchJobEngine {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        future,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use quant_pivot_error::{QuantResult, research::ResearchError};
     use quant_pivot_models::{
+        config::ResearchJobsConfig,
         domain::{
             api::{
                 FitModelCalibratorRequest, GatePreviewIntent, ModelCalibrationFitPreflightView,
@@ -1813,27 +2498,179 @@ mod tests {
             },
             ports::{
                 BootstrapQualityGateEvidence, BootstrapQualityGateInput,
-                CalibratedModelSealCommand, CandidateQualityGateEvidence, GovernanceActor,
-                ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
-                ModelGovernancePort,
+                CalibratedModelSealCommand, CalibrationRunFinalization,
+                CandidateQualityGateEvidence, GovernanceActor, ModelCalibrationFitJobParams,
+                ModelCalibrationFitOutcome, ModelCalibrationFitPort, ModelGovernancePort,
             },
             quant::{JobProgressSink, ModelVersionInfo, NoopProgressSink, ResearchJobResultRef},
         },
-        enums::quant::{CalibrationMethod, DownsideSource, ResearchJobResultKind},
+        enums::quant::{CalibrationMethod, DownsideSource, ResearchJobKind, ResearchJobResultKind},
         types::{
             BacktestReportId, CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId,
             ModelRunId, ModelVersionId, ResearchJobProgress, TrainingDatasetId,
             model_quality::QualityGateReport,
         },
     };
-    use tokio::sync::watch;
+    use tokio::{
+        sync::{oneshot, watch},
+        task::JoinSet,
+        time::interval,
+    };
     use tokio_util::sync::CancellationToken;
 
-    use super::{ChannelProgressSink, MetricsHub, ModelCalibrationJobExecutor, is_transient_error};
+    use super::{
+        ChannelProgressSink, InflightTracker, LeaseDecision, MetricsHub,
+        ModelCalibrationJobExecutor, SupervisorEvent, Terminal, is_transient_error,
+    };
     use crate::service::model_serving_test_support::{model_artifact, model_version};
 
     struct CalibrationFitFixture {
         outcome: ModelCalibrationFitOutcome,
+    }
+
+    #[test]
+    fn cancelled_lease_stops() {
+        let shutdown = CancellationToken::new();
+        assert!(matches!(
+            LeaseDecision::resolve(&shutdown, Some(7_u8)),
+            LeaseDecision::Run(7)
+        ));
+        assert!(matches!(
+            LeaseDecision::<u8>::resolve(&shutdown, None),
+            LeaseDecision::Idle
+        ));
+        shutdown.cancel();
+
+        assert!(matches!(
+            LeaseDecision::resolve(&shutdown, Some(7_u8)),
+            LeaseDecision::Stop
+        ));
+    }
+
+    #[test]
+    fn operator_cancel_beats_retry() {
+        let terminal = Terminal::Retryable("object transport retry".to_owned());
+        assert!(matches!(
+            terminal.after_operator_cancel(),
+            Terminal::Cancelled
+        ));
+    }
+
+    #[tokio::test]
+    async fn join_failure_releases_slots() {
+        let inflight = Arc::new(InflightTracker::default());
+        let kind = ResearchJobKind::ModelTrain;
+        let mut tasks: JoinSet<()> = JoinSet::new();
+        let panic_permit = InflightTracker::acquire(&inflight, kind);
+        tasks.spawn(async move {
+            let _permit = panic_permit;
+            panic!("research worker panic fixture");
+        });
+        assert!(
+            tasks
+                .join_next()
+                .await
+                .is_some_and(|joined| joined.is_err())
+        );
+        assert_eq!(inflight.total(), 0);
+        assert_eq!(inflight.kind(kind), 0);
+
+        let abort_permit = InflightTracker::acquire(&inflight, kind);
+        tasks.spawn(async move {
+            let _permit = abort_permit;
+            future::pending::<()>().await;
+        });
+        tasks.abort_all();
+        assert!(
+            tasks
+                .join_next()
+                .await
+                .is_some_and(|joined| joined.is_err())
+        );
+        assert_eq!(inflight.total(), 0);
+        assert_eq!(inflight.kind(kind), 0);
+        assert!(
+            inflight
+                .eligible(&ResearchJobsConfig::default())
+                .contains(&kind)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_drain_keeps_events() {
+        let cancel = CancellationToken::new();
+        let shutdown = CancellationToken::new();
+        let (progress_tx, mut progress_rx) = watch::channel(None);
+        let (complete_tx, complete_rx) = oneshot::channel();
+        let execution = complete_rx;
+        tokio::pin!(execution);
+        let mut heartbeat = interval(Duration::from_mins(1));
+        heartbeat.tick().await;
+
+        cancel.cancel();
+        assert!(matches!(
+            SupervisorEvent::next(
+                execution.as_mut(),
+                &mut progress_rx,
+                true,
+                &mut heartbeat,
+                &cancel,
+                false,
+                &shutdown,
+            )
+            .await,
+            SupervisorEvent::OperatorCancel
+        ));
+
+        progress_tx.send_replace(Some(ResearchJobProgress::with_total("draining", 1, 2)));
+        assert!(matches!(
+            SupervisorEvent::next(
+                execution.as_mut(),
+                &mut progress_rx,
+                true,
+                &mut heartbeat,
+                &cancel,
+                true,
+                &shutdown,
+            )
+            .await,
+            SupervisorEvent::Progress(true)
+        ));
+        heartbeat.reset_after(Duration::from_millis(1));
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                SupervisorEvent::next(
+                    execution.as_mut(),
+                    &mut progress_rx,
+                    true,
+                    &mut heartbeat,
+                    &cancel,
+                    true,
+                    &shutdown,
+                ),
+            )
+            .await
+            .expect("cancel drain must retain periodic heartbeat"),
+            SupervisorEvent::Heartbeat
+        ));
+
+        complete_tx
+            .send(7_u8)
+            .expect("complete cancel-drain execution fixture");
+        assert!(matches!(
+            SupervisorEvent::next(
+                execution.as_mut(),
+                &mut progress_rx,
+                true,
+                &mut heartbeat,
+                &cancel,
+                true,
+                &shutdown,
+            )
+            .await,
+            SupervisorEvent::Completed(Ok(7))
+        ));
     }
 
     #[async_trait]
@@ -1845,6 +2682,22 @@ mod tests {
             _cancel: CancellationToken,
         ) -> QuantResult<ModelCalibrationFitOutcome> {
             Ok(self.outcome)
+        }
+
+        async fn cancel_run(
+            &self,
+            _model_run_id: &ModelRunId,
+            _reason: String,
+        ) -> QuantResult<CalibrationRunFinalization> {
+            Ok(CalibrationRunFinalization::Terminalized)
+        }
+
+        async fn fail_run(
+            &self,
+            _model_run_id: &ModelRunId,
+            _reason: String,
+        ) -> QuantResult<CalibrationRunFinalization> {
+            Ok(CalibrationRunFinalization::Terminalized)
         }
 
         async fn preflight(
@@ -1964,10 +2817,19 @@ mod tests {
             .await
             .expect("progress sender remains open");
         drop(receiver.borrow_and_update());
-        let latest = reset
-            .send_replace(None)
-            .expect("latest progress remains in the single slot");
+        let mut latest = None;
+        reset.send_if_modified(|slot| {
+            latest = slot.take();
+            false
+        });
+        let latest = latest.expect("latest progress remains in the single slot");
         assert_eq!(latest.phase, "second");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), receiver.changed())
+                .await
+                .is_err(),
+            "consuming the progress slot must not self-notify the supervisor"
+        );
         sink.report(ResearchJobProgress::with_total("third", 3, 3));
         assert_eq!(
             metrics.research_progress_coalesced_total.get(),

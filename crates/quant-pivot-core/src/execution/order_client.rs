@@ -24,7 +24,7 @@ use quant_pivot_models::{
         quant::ExecutionIdentityRefs,
     },
     enums::{
-        common::{OrderType, Side},
+        common::{OrderType, Side, TickSize},
         execution::{ReconciliationResult, VenueOrderStatus},
     },
     types::{
@@ -38,11 +38,15 @@ use quant_pivot_models::{
 pub struct VenueOrder {
     pub market_id: MarketId,
     pub token_id: TokenId,
+    pub tick_size: TickSize,
+    pub minimum_order_size: Shares,
+    pub neg_risk: bool,
+    pub clob_market_info_payload_hash: ContentHash,
     /// Opening entries are always [`Side::Buy`]; kept general for reuse.
     pub side: Side,
-    /// Hard limit price.
-    pub price: Price,
-    /// Tagged venue amount (USD spend for aggressive BUY; shares otherwise).
+    /// Exact signed limit price.
+    pub limit_price: Price,
+    /// Tagged venue amount (fee-exclusive principal for aggressive BUY; shares otherwise).
     pub amount: VenueOrderAmount,
     /// Time-in-force / order type (`Fok` | `Gtc` | `Gtd { expiration }`).
     pub order_type: OrderType,
@@ -303,10 +307,14 @@ impl PolymarketOrderClient for ClobOrderClient {
         let request = OrderRequest {
             market_id: order.market_id.clone(),
             token_id: order.token_id.clone(),
+            expected_tick_size: order.tick_size,
+            expected_minimum_order_size: order.minimum_order_size,
+            expected_neg_risk: order.neg_risk,
+            expected_clob_market_info_payload_hash: order.clob_market_info_payload_hash,
             side: order.side,
             amount: order.amount,
             expected_fee: order.expected_fee,
-            price: order.price,
+            price: order.limit_price,
             order_type: order.order_type,
             post_only: order.post_only,
         };

@@ -1,9 +1,11 @@
 //! Web-facing dependency-inversion ports.
 
 pub mod account_read;
+mod account_recovery_control;
 pub mod backtest;
 pub mod backtest_path_set;
 pub mod calibration_artifact;
+mod economic_feedback;
 pub mod exchange_history_progress;
 pub mod execution_read;
 pub mod execution_recovery;
@@ -33,12 +35,15 @@ pub mod trade_policy;
 pub mod training_dataset;
 
 pub use account_read::{AccountReadPort, LiveAccountInfo};
+pub use account_recovery_control::AccountRecoveryControlPort;
 pub use backtest::BacktestPort;
 pub use backtest_path_set::CpcvBacktestPort;
 pub use calibration_artifact::{
     BiasTableFitJobParams, BiasTableFitOutcome, CalibrationArtifactFitPort,
-    ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+    CalibrationRunFinalization, ModelCalibrationFitJobParams, ModelCalibrationFitOutcome,
+    ModelCalibrationFitPort,
 };
+pub use economic_feedback::EconomicFeedbackPort;
 pub use exchange_history_progress::ExchangeHistoryProgressPort;
 pub use execution_read::ExecutionReadPort;
 pub use execution_recovery::ExecutionRecoveryPort;
@@ -94,7 +99,7 @@ pub use model_governance::{
     CandidateQualityGateEvidence, GovernanceActor, ModelGovernancePort,
 };
 pub use model_spec::{CreateModelSpecCommand, ModelSpecPort};
-pub use model_training::ModelTrainingPort;
+pub use model_training::{ModelTrainingPort, TrainingRunFinalization};
 pub use order_intent::{
     ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand, ExecutionSubmitPort,
     OrderIntentPort, RejectIntentCommand,

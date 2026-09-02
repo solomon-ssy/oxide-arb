@@ -34,9 +34,9 @@ pub enum QpAccountExecutionAssociationKind {
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
-    enum_name = "qp_account_pause_submission_state"
+    enum_name = "qp_account_pause_operation_state"
 )]
-pub enum QpAccountPauseSubmissionState {
+pub enum QpAccountPauseOperationState {
     #[sea_orm(string_value = "prepared")]
     Prepared,
     #[sea_orm(string_value = "dispatched")]
@@ -2645,4 +2645,52 @@ pub enum QpFeedbackDriftAssessment {
 pub enum QpFeedbackEvaluationPurpose {
     #[sea_orm(string_value = "promotion_comparison")]
     PromotionComparison,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "String",
+    db_type = "Enum",
+    enum_name = "qp_account_pause_operation_kind"
+)]
+pub enum QpAccountPauseOperationKind {
+    #[sea_orm(string_value = "pause")]
+    Pause,
+    #[sea_orm(string_value = "unpause")]
+    Unpause,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "String",
+    db_type = "Enum",
+    enum_name = "qp_recommendation_economic_outcome_state"
+)]
+pub enum QpRecommendationEconomicOutcomeState {
+    #[sea_orm(string_value = "entry_not_triggered")]
+    EntryNotTriggered,
+    #[sea_orm(string_value = "entry_unfilled")]
+    EntryUnfilled,
+    #[sea_orm(string_value = "policy_exited")]
+    PolicyExited,
+    #[sea_orm(string_value = "horizon_liquidated")]
+    HorizonLiquidated,
+    #[sea_orm(string_value = "resolved_before_horizon")]
+    ResolvedBeforeHorizon,
+    #[sea_orm(string_value = "censored")]
+    Censored,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "String",
+    db_type = "Enum",
+    enum_name = "qp_route_economic_health_state"
+)]
+pub enum QpRouteEconomicHealthState {
+    #[sea_orm(string_value = "insufficient_evidence")]
+    InsufficientEvidence,
+    #[sea_orm(string_value = "healthy")]
+    Healthy,
+    #[sea_orm(string_value = "degraded")]
+    Degraded,
+    #[sea_orm(string_value = "data_incomplete")]
+    DataIncomplete,
 }

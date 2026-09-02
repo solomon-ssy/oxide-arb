@@ -191,6 +191,22 @@ impl ResearchJobRepository for PgResearchJobRepository {
             .map(|row| row.map(Into::into))
     }
 
+    async fn find_by_ids(
+        &self,
+        job_ids: &[ResearchJobId],
+    ) -> Result<Vec<ResearchJobInfo>, StorageError> {
+        if job_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Entity::find()
+            .filter(Column::JobId.is_in(job_ids.iter().copied()))
+            .order_by_asc(Column::JobId)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
     async fn page(
         &self,
         query: ResearchJobListQuery,

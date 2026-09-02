@@ -4,7 +4,7 @@
 > **Deployment contract**
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `pre_deployment_behavior`: 允许 clean-break 与唯一 fresh terminal bootstrap rewrite；任何真实数据销毁仍需操作者单独授权。
 > - `post_deployment_behavior`: 本次实现只交付唯一终态 clean-install contract；不设计升级、降级、旧版本共存或历史数据转换。
 > - `rollback_and_data_verification`: 仅在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置需要操作者另行授权。
 
@@ -464,10 +464,10 @@ portfolio-solver = ["dep:highs"]
 原则：
 
 - `quant-pivot-core` 启用 `quant-pivot-research/dataframe`（3.5 `DatasetParquetCodec`）——
-  **report_only 二进制因此链接 polars**；research crate `default = []` 不变。
+  **runtime binary 因此链接 polars**；research crate `default = []` 不变。
 - `quant-pivot-bin` production profile 只启用需要的 features。
 - CI 分 job 测试 heavy features。
-- report_only 基础服务不应强制链接 ONNX/DL native runtime；Polars 仅 dataset/offline 路径。
+- runtime 基础服务不应强制链接 ONNX/DL native runtime；Polars 仅 dataset/offline 路径。
 
 ## 11. 训练流程中的 crate 使用图
 
@@ -618,7 +618,7 @@ pub trait ClassicalPredictor {
 
 ### 15.3 Artifact 设计
 
-Classical artifact 必须可复现、可 hash、可迁移：
+Classical artifact 必须可复现、可 hash、可从当前 typed contract 重建：
 
 ```rust
 pub struct ClassicalModelArtifact {
@@ -666,7 +666,7 @@ TrainingDatasetArtifact
 - missing feature handling。
 - training coverage。
 
-如果模型无法解释到 recommendation level，只能作为 shadow model，不能进入 auto execution。
+如果模型无法解释到 recommendation level，只能作为 shadow model，不能获得 `PolicyAutomatic` execution authority ceiling。
 
 ### 15.6 Production Guardrails
 
@@ -781,7 +781,7 @@ FeatureVector
 - 最新 `ort` 可能要求 MSRV 1.88；当前 workspace 是 1.91（已覆盖）。
 - ONNX Runtime 可能引入 binary/native runtime。
 - CUDA/TensorRT 等 execution provider 不能默认启用。
-- report_only 不应强制加载 ONNX runtime。
+- report generation 不应强制加载 ONNX runtime。
 - session 初始化必须可失败降级。
 
 ### 17.7 引入门槛

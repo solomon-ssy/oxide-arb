@@ -229,17 +229,22 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
+        table: "quant_account_clean_funder_blocker",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
         table: "quant_account_execution_association",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "quant_account_pause_submission",
+        table: "quant_account_pause_operation",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "quant_account_pause_submission",
+        table: "quant_account_pause_operation",
         column: "updated_at",
         value: DefaultValue::StatementTimestamp,
     },
@@ -251,10 +256,25 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     ColumnDefaultSpec {
         table: "quant_account_recovery_incident",
         column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_account_recovery_manifest",
+        column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
         table: "quant_account_snapshot",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_recommendation_economic_outcome",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_route_economic_health",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },
@@ -773,6 +793,26 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     ColumnDefaultSpec {
         table: "quant_execution_attempt_reconciliation_task",
         column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_economic_outcome_reconciliation_task",
+        column: "status",
+        value: DefaultValue::PostgresLiteral("'pending'::qp_outcome_reconciliation_task_status"),
+    },
+    ColumnDefaultSpec {
+        table: "quant_economic_outcome_reconciliation_task",
+        column: "attempt_count",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_economic_outcome_reconciliation_task",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_economic_outcome_reconciliation_task",
+        column: "updated_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {

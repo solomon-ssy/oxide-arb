@@ -8,10 +8,11 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookMicrostructureRow, ChDecimal64, ChDigest, ChPrice, ChSchemaVersion,
-        ChShares, ChUsd, EntryConditionEvaluationEventRow, ExchangeHistoryAcceptanceRow,
-        ExecutionParticipantRow, MarketExecutionRow, MarketResolutionFactInput,
-        MarketResolutionRow, QuantFeatureParityEventRow, QuantReportRecommendationFactRow,
-        ReportMarketFunnelRow, WeatherForecastFactRow, WeatherObservationFactRow,
+        ChShares, ChUsd, CryptoPriceReportRow, EntryConditionEvaluationEventRow,
+        ExchangeHistoryAcceptanceRow, ExecutionParticipantRow, MarketExecutionRow,
+        MarketResolutionFactInput, MarketResolutionRow, QuantFeatureParityEventRow,
+        QuantReportRecommendationFactRow, ReportMarketFunnelRow, WeatherForecastFactRow,
+        WeatherObservationFactRow,
     },
     domain::{
         api::FeatureParityEventListQuery,
@@ -32,18 +33,21 @@ use quant_pivot_repository::{
     clickhouse::{
         ChFeatureParityEventRepository, ChNativeReadRepository, ChQuantFactReadRepository,
     },
-    traits::{FeatureParityEventRepository, QuantFactReadRepository},
+    traits::{
+        CryptoReportFrontierQuery, CryptoReportsAvailableQuery, FeatureParityEventRepository,
+        QuantFactReadRepository,
+    },
 };
-use quant_pivot_storage::clickhouse::{ClickHousePool, apply_offline_schema_migrations};
+use quant_pivot_storage::clickhouse::{ClickHousePool, bootstrap_schema};
 use quant_pivot_system_tests::resources::fresh_clickhouse_config;
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
 async fn setup_clickhouse() -> (Arc<ClickHousePool>, Client, ()) {
     let config = fresh_clickhouse_config("repository_reads");
-    apply_offline_schema_migrations(&config)
+    bootstrap_schema(&config)
         .await
-        .expect("schema deploy");
+        .expect("fresh schema bootstrap");
     let pool = Arc::new(ClickHousePool::connect(&config).await.expect("connect"));
     pool.verify_schema().await.expect("schema verify");
     let client = pool.client().clone();
@@ -70,6 +74,44 @@ async fn insert_executions(client: &Client, rows: &[MarketExecutionRow]) {
         insert.write(row).await.expect("write execution");
     }
     insert.end().await.expect("end execution insert");
+}
+
+async fn insert_crypto(client: &Client, rows: &[CryptoPriceReportRow]) {
+    let mut insert = client
+        .insert::<CryptoPriceReportRow>("quant_crypto_price_report")
+        .await
+        .expect("insert Crypto reports");
+    for row in rows {
+        insert.write(row).await.expect("write Crypto report");
+    }
+    insert.end().await.expect("end Crypto report insert");
+}
+
+fn crypto_row(
+    gap_generation: u64,
+    source_sequence: u64,
+    published_at: i64,
+    available_at: i64,
+    hash_seed: char,
+) -> CryptoPriceReportRow {
+    CryptoPriceReportRow {
+        source_id: DomainSourceId::binance_agg_trade(),
+        instrument_key: DomainInstrumentKey::new("BINANCE_AGG_TRADE:BTCUSDT"),
+        gap_generation,
+        source_sequence,
+        price: ChDecimal64::from(Decimal::new(50_000, 0)),
+        quantity: None,
+        event_time: published_at,
+        published_at,
+        available_at,
+        valid_from: None,
+        observations_timestamp: None,
+        expires_at: None,
+        report_hash: ContentHash::parse(&format!("blake3:{}", hash_seed.to_string().repeat(64)))
+            .expect("report hash"),
+        raw_report: hash_seed.to_string(),
+        schema_version: ChSchemaVersion::FIRST,
+    }
 }
 
 async fn insert_acceptances(client: &Client, rows: &[ExchangeHistoryAcceptanceRow]) {
@@ -1308,6 +1350,88 @@ async fn assert_weather_forecast_pit(
     );
 }
 
+async fn assert_invalid_seals(
+    read: &ChQuantFactReadRepository,
+    seal_chunks: &[HistorySealChunkRef],
+) {
+    let mut zero_revision = seal_chunks.to_vec();
+    zero_revision[0].state_revision = 0;
+    let invalid_revision = read.validate_execution_history_chunks(zero_revision).await;
+    assert!(
+        matches!(
+            invalid_revision,
+            Err(StorageError::InvariantViolation { .. })
+        ),
+        "a sealed chunk revision must be positive"
+    );
+    let next_chunk = HistorySealChunkRef {
+        chunk_id: Uuid::now_v7(),
+        frontier: ExchangeHistoryFrontier::Retention,
+        state_revision: 1,
+        from_block: 102,
+        to_block: 102,
+    };
+    let invalid_gap = read
+        .validate_execution_history_chunks(vec![seal_chunks[0].clone(), next_chunk.clone()])
+        .await;
+    assert!(
+        matches!(invalid_gap, Err(StorageError::InvariantViolation { .. })),
+        "sealed chunks must not contain a block-range gap"
+    );
+    let invalid_overlap = read
+        .validate_execution_history_chunks(vec![
+            seal_chunks[0].clone(),
+            HistorySealChunkRef {
+                from_block: 100,
+                ..next_chunk
+            },
+        ])
+        .await;
+    assert!(
+        matches!(
+            invalid_overlap,
+            Err(StorageError::InvariantViolation { .. })
+        ),
+        "sealed chunks must not overlap even when their frontier changes"
+    );
+    let mut terminal_range = seal_chunks[0].clone();
+    terminal_range.to_block = i64::MAX;
+    let invalid_overflow = read
+        .validate_execution_history_chunks(vec![
+            terminal_range,
+            HistorySealChunkRef {
+                chunk_id: Uuid::now_v7(),
+                frontier: ExchangeHistoryFrontier::Retention,
+                state_revision: 1,
+                from_block: i64::MAX,
+                to_block: i64::MAX,
+            },
+        ])
+        .await;
+    assert!(
+        matches!(
+            invalid_overflow,
+            Err(StorageError::InvariantViolation { .. })
+        ),
+        "sealed chunk continuity must fail closed on block-range overflow"
+    );
+
+    let mut wrong_range = seal_chunks.to_vec();
+    wrong_range[0].to_block = 101;
+    let invalid_range = read.validate_execution_history_chunks(wrong_range).await;
+    assert!(
+        matches!(invalid_range, Err(StorageError::StateConflict { .. })),
+        "a sealed chunk range must match its active acceptance exactly"
+    );
+    let mut wrong_frontier = seal_chunks.to_vec();
+    wrong_frontier[0].frontier = ExchangeHistoryFrontier::Retention;
+    let invalid_frontier = read.validate_execution_history_chunks(wrong_frontier).await;
+    assert!(
+        matches!(invalid_frontier, Err(StorageError::StateConflict { .. })),
+        "a sealed chunk frontier must match its active acceptance exactly"
+    );
+}
+
 pub async fn revoked_chunk_is_hidden() {
     let (pool, client, _container) = setup_clickhouse().await;
     let read = ChQuantFactReadRepository::new(Arc::clone(&pool));
@@ -1319,6 +1443,18 @@ pub async fn revoked_chunk_is_hidden() {
     let execution = execution_row(
         &market_id, &token_id, event_time, event_time, chunk_id, digest,
     );
+    let outside_digest = ChDigest::new([5_u8; 32]);
+    let mut outside_execution = execution_row(
+        &market_id,
+        &token_id,
+        event_time,
+        event_time,
+        chunk_id,
+        outside_digest,
+    );
+    outside_execution.block_number = 101;
+    outside_execution.transaction_hash = format!("0x{}", "5".repeat(64));
+    outside_execution.log_index = 1;
     let participant = ExecutionParticipantRow {
         execution_id: digest,
         market_id: market_id.clone(),
@@ -1332,16 +1468,23 @@ pub async fn revoked_chunk_is_hidden() {
         chunk_id,
         schema_version: ExecutionParticipantRow::SCHEMA_VERSION,
     };
+    let outside_participant = ExecutionParticipantRow {
+        execution_id: outside_digest,
+        participant_address: format!("0x{}", "5".repeat(40)),
+        ..participant.clone()
+    };
     let acceptance = acceptance_row(chunk_id, event_time, digest);
-    insert_executions(&client, slice::from_ref(&execution)).await;
+    insert_executions(&client, &[execution, outside_execution]).await;
     let mut participant_insert = client
         .insert::<ExecutionParticipantRow>("quant_execution_participant")
         .await
         .expect("insert participant");
-    participant_insert
-        .write(&participant)
-        .await
-        .expect("write participant");
+    for row in [&participant, &outside_participant] {
+        participant_insert
+            .write(row)
+            .await
+            .expect("write participant");
+    }
     participant_insert.end().await.expect("end participant");
     insert_acceptances(&client, slice::from_ref(&acceptance)).await;
     let seal_chunks = vec![HistorySealChunkRef {
@@ -1363,6 +1506,41 @@ pub async fn revoked_chunk_is_hidden() {
         .await
         .expect("read accepted execution");
     assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].execution_id, digest);
+
+    let executions = read
+        .market_executions_between(
+            vec![market_id.clone()],
+            seal_chunks.clone(),
+            event_time - 1,
+            event_time + 1,
+            event_time + 1,
+        )
+        .await
+        .expect("read range-bound executions");
+    assert_eq!(executions.len(), 1);
+    assert_eq!(executions[0].execution_id, digest);
+    let participants = read
+        .execution_participants_between(
+            vec![market_id.clone()],
+            seal_chunks.clone(),
+            event_time - 1,
+            event_time + 1,
+            event_time + 1,
+        )
+        .await
+        .expect("read range-bound participants");
+    assert_eq!(participants.len(), 1);
+    assert_eq!(participants[0].execution_id, digest);
+    let latest = read
+        .last_executions(vec![token_id], event_time - 1, event_time + 1, 10)
+        .await
+        .expect("read range-bound latest executions");
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].execution_id, digest);
+
+    assert_invalid_seals(&read, &seal_chunks).await;
+
     let mut revoked = acceptance;
     revoked.active = 0;
     revoked.state_revision = 2;
@@ -1379,5 +1557,99 @@ pub async fn revoked_chunk_is_hidden() {
     assert!(
         matches!(invalidated, Err(StorageError::StateConflict { .. })),
         "revoking a sealed chunk must invalidate the read rather than look like an empty window"
+    );
+}
+
+pub async fn crypto_reads_committed_prefix() {
+    let (pool, client, _stack) = setup_clickhouse().await;
+    let base = Utc::now().timestamp_millis();
+    let mut rows = vec![
+        crypto_row(1, 1, base, base, 'a'),
+        crypto_row(2, 2, base + 1, base + 1, 'b'),
+        crypto_row(2, 3, base + 2, base + 2, 'c'),
+        crypto_row(3, 4, base + 3, base + 3, 'd'),
+    ];
+    rows.push(CryptoPriceReportRow {
+        source_id: DomainSourceId::binance_futures_trade(),
+        report_hash: ContentHash::parse(&format!("blake3:{}", "e".repeat(64)))
+            .expect("other source hash"),
+        raw_report: "other-source".to_owned(),
+        ..crypto_row(2, 2, base + 1, base + 1, 'e')
+    });
+    insert_crypto(&client, &rows).await;
+    let read = ChQuantFactReadRepository::new(pool);
+    let instrument = DomainInstrumentKey::new("BINANCE_AGG_TRADE:BTCUSDT");
+
+    let committed = read
+        .crypto_reports_between(CryptoReportsAvailableQuery {
+            source_id: DomainSourceId::binance_agg_trade(),
+            instrument_key: instrument.clone(),
+            gap_generation: 2,
+            committed_source_sequence: 2,
+            committed_published_at_ms: i64::MAX,
+            available_from_ms: base,
+            available_to_ms: base + 10,
+            decision_at_ms: base + 10,
+        })
+        .await
+        .expect("read committed generation");
+    assert_eq!(committed.len(), 1);
+    assert_eq!(committed[0].source_id, DomainSourceId::binance_agg_trade());
+    assert_eq!(committed[0].gap_generation, 2);
+    assert_eq!(committed[0].source_sequence, 2);
+
+    let baseline = read
+        .crypto_price_reports_at(CryptoReportFrontierQuery {
+            source_id: DomainSourceId::binance_agg_trade(),
+            instrument_key: instrument.clone(),
+            gap_generation: 2,
+            committed_source_sequence: 2,
+            committed_published_at_ms: i64::MAX,
+            source_timestamp_ms: base + 10,
+            decision_at_ms: base + 10,
+        })
+        .await
+        .expect("read committed baseline");
+    assert_eq!(baseline.len(), 1);
+    assert_eq!(baseline[0].gap_generation, 2);
+    assert_eq!(baseline[0].source_sequence, 2);
+
+    insert_crypto(&client, &[crypto_row(2, 2, base + 1, base + 4, 'f')]).await;
+    let equivocation = read
+        .crypto_price_reports_at(CryptoReportFrontierQuery {
+            source_id: DomainSourceId::binance_agg_trade(),
+            instrument_key: instrument.clone(),
+            gap_generation: 2,
+            committed_source_sequence: 2,
+            committed_published_at_ms: i64::MAX,
+            source_timestamp_ms: base + 10,
+            decision_at_ms: base + 10,
+        })
+        .await
+        .expect("read equal-key reports");
+    assert_eq!(equivocation.len(), 2);
+
+    let overflow_rows = (0_u64..15)
+        .map(|seed| CryptoPriceReportRow {
+            report_hash: ContentHash::parse(&format!("blake3:{:064x}", seed + 100))
+                .expect("overflow report hash"),
+            raw_report: format!("overflow-{seed}"),
+            ..crypto_row(2, 2, base + 1, base + 5, 'a')
+        })
+        .collect::<Vec<_>>();
+    insert_crypto(&client, &overflow_rows).await;
+    assert!(
+        read.crypto_price_reports_at(CryptoReportFrontierQuery {
+            source_id: DomainSourceId::binance_agg_trade(),
+            instrument_key: instrument,
+            gap_generation: 2,
+            committed_source_sequence: 2,
+            committed_published_at_ms: i64::MAX,
+            source_timestamp_ms: base + 10,
+            decision_at_ms: base + 10,
+        })
+        .await
+        .is_err(),
+        "more than sixteen equal-key hashes must fail by bounded query overflow"
     );
 }

@@ -28,6 +28,8 @@ use tracing::{debug, warn};
 
 use crate::cache::{CacheKey, TieredCache};
 
+const INVALIDATION_BATCH_SIZE: usize = 256;
+
 /// Resolved per-domain cache behavior (computed from config at construction time).
 #[derive(Debug, Clone)]
 pub struct DomainCachePolicy {
@@ -187,6 +189,54 @@ impl CacheManager {
                     timeout_ms = policy.operation_timeout.as_millis(),
                     "Cache invalidate timed out (fail-open)"
                 );
+            }
+        }
+    }
+
+    /// Invalidate a large projection update in bounded domain-homogeneous
+    /// batches. One Redis round trip per batch prevents fresh-boot catalog
+    /// fanout from monopolizing the shared connection pool.
+    pub async fn invalidate_many(&self, keys: &[CacheKey]) {
+        let Some(cache) = self.cache.as_ref() else {
+            return;
+        };
+        let mut grouped = HashMap::<&'static str, Vec<String>>::new();
+        for key in keys {
+            let policy = self
+                .domain_policies
+                .get(key.domain())
+                .unwrap_or(&self.default_policy);
+            if policy.enabled {
+                grouped.entry(key.domain()).or_default().push(key.as_str());
+            }
+        }
+        for (domain, domain_keys) in grouped {
+            let policy = self
+                .domain_policies
+                .get(domain)
+                .unwrap_or(&self.default_policy);
+            for batch in domain_keys.chunks(INVALIDATION_BATCH_SIZE) {
+                match timeout(policy.operation_timeout, cache.invalidate_many(batch)).await {
+                    Ok(Ok(())) => {
+                        debug!(domain, count = batch.len(), "Cache entries invalidated");
+                    }
+                    Ok(Err(error)) => {
+                        warn!(
+                            domain,
+                            count = batch.len(),
+                            %error,
+                            "Cache invalidation batch failed (fail-open)"
+                        );
+                    }
+                    Err(_elapsed) => {
+                        warn!(
+                            domain,
+                            count = batch.len(),
+                            timeout_ms = policy.operation_timeout.as_millis(),
+                            "Cache invalidation batch timed out (fail-open)"
+                        );
+                    }
+                }
             }
         }
     }

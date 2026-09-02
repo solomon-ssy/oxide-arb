@@ -814,7 +814,9 @@ impl ResearchProfileSpec {
             ServingAuthority::AnalysisOnlyWithLiveL2
         ) && self.feature_contract.requires_l2()
         {
-            return Err("report-only bootstrap authority requires an L2-free contract".to_owned());
+            return Err(
+                "analysis-only bootstrap authority requires an L2-free contract".to_owned(),
+            );
         }
         if matches!(
             self.serving_authority,
@@ -824,7 +826,8 @@ impl ResearchProfileSpec {
             ResearchAvailabilityPolicy::FinalizedBlockConfirmation { .. }
         ) {
             return Err(
-                "report-only bootstrap authority requires finalized block availability".to_owned(),
+                "analysis-only bootstrap authority requires finalized block availability"
+                    .to_owned(),
             );
         }
         if self.allowed_cash_budget_tiers.is_empty()
@@ -1270,11 +1273,11 @@ mod tests {
         );
         assert_eq!(
             crypto.profile_ref.content_hash.to_string(),
-            "blake3:61657584a6794a28447389ba9f75ab5c2cf2be580cc8d081aadde67da4bdd49a"
+            "blake3:af0417240db40d44224ffa18682556804af15dcc3e2d23b8c2bef0ade0e5e5ee"
         );
         assert_eq!(
             weather.profile_ref.content_hash.to_string(),
-            "blake3:3b2eacbcf3ab5015afea2fb997a47ed9b5a8da0a8cff477d80ca43e27e55315e"
+            "blake3:c2729a5c8bba2b909c596d0f0b21f79d0d5ccc3b425d5d5cb109ed3b911b51f0"
         );
         assert_eq!(pooled.spec.feedback_policy.feedback_cadence_secs, 86_400);
         assert_eq!(
@@ -1368,13 +1371,13 @@ mod tests {
             );
             let expected_hash = match bootstrap_id {
                 POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID => {
-                    "blake3:1f047f98bc5e190699807adc17a97b3423cebd642d99be6d45c09b00783b893c"
+                    "blake3:a54f4b7b8ea1cce839c682d22c90f310bd6ba14d55f7730a218fb10c869bc7d6"
                 }
                 CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID => {
-                    "blake3:2781adf5aca31683001926b6b8300fdb6fb4a41bb36fe88aee1a9735a4a27ea5"
+                    "blake3:a21cedf3bcabb59dac6543fb7f6c33e64d17ba8952bac76a2beb3a2cbb213807"
                 }
                 WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID => {
-                    "blake3:1d020798301ffef16d89408155de6a8bd4fad8b54b3f49ef9b3cfe09213ac49e"
+                    "blake3:9e60999927401ab6cbb5da39a0a23f5cd8d06984da3532fa72e42f803b60ac42"
                 }
                 _ => unreachable!("closed bootstrap profile registry"),
             };

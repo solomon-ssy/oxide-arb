@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use quant_pivot_compute::ComputeExecutor;
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
@@ -17,8 +17,10 @@ use quant_pivot_repository::traits::{
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{
-    AppContext, ports::research_job::CoreResearchJobPort, research_job::ResearchJobEngine,
-    task_registry::AppRunner,
+    AppContext,
+    ports::research_job::CoreResearchJobPort,
+    research_job::ResearchJobEngine,
+    task_registry::{AppRunner, ShutdownBudget, ShutdownStage},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +41,7 @@ impl From<Option<&AccountRecoveryIncidentInfo>> for StartupExecutionScope {
 
 pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> QuantResult<()> {
     let shutdown = CancellationToken::new();
-    let ctx = AppContext::build(deploy, shutdown.clone(), compute).await?;
+    let mut ctx = AppContext::build(deploy, shutdown.clone(), compute).await?;
 
     // Recovery-only startup gate: finalized account executions are projected,
     // associated, and any unknown external execution latches ExitOnly before
@@ -113,6 +115,7 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
     ctx.register_web_services(&mut runner, order_intents, research_jobs, feedback_wake)
         .await?;
     ctx.register_fact_writer_tasks(&mut runner);
+    ctx.governance.register_policy_reconciler(&mut runner)?;
 
     tracing::info!(
         mode = ?ctx.runtime_controls().entry_authorization_policy(),
@@ -122,10 +125,27 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
 
     let result = runner.run().await;
     ctx.research.runtime_registry.shutdown().await;
+    let close_budget = ShutdownBudget::execution().stage(ShutdownStage::DbClose);
+    let postgres_result = tokio::time::timeout(close_budget, ctx.infra.pg.close())
+        .await
+        .unwrap_or_else(|_| {
+            Err(StorageError::Timeout {
+                operation: "postgres_pool.close".to_owned(),
+                duration: close_budget,
+            })
+        });
+    match &postgres_result {
+        Ok(()) => tracing::info!("shared PostgreSQL pool closed"),
+        Err(error) => tracing::error!(%error, "shared PostgreSQL pool close failed"),
+    }
     ctx.infra.redis.close();
     drop(ctx);
     tracing::info!("shared Redis pool closed");
-    result
+    // Cleanup always runs. Preserve the original runtime failure when both
+    // fail, with the independent close failure already emitted above.
+    result?;
+    postgres_result?;
+    Ok(())
 }
 
 #[cfg(test)]

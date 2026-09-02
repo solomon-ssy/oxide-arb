@@ -10,7 +10,7 @@ use crate::{
     domain::market::fee::{BuilderFeeAttribution, MarketFeeSchedule},
     enums::common::TickSize,
     hashing::CanonicalDigest,
-    types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId, TokenId},
+    types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId, Shares, TokenId},
 };
 
 /// V2 platform-fee parameters returned in the CLOB `fd` payload.
@@ -43,7 +43,7 @@ pub struct ClobMarketInfoVersion {
     pub market_id: MarketId,
     pub tokens: Vec<ClobTokenDescriptor>,
     pub tick_size: TickSize,
-    pub minimum_order_size: Decimal,
+    pub minimum_order_size: Shares,
     pub neg_risk: bool,
     pub taker_order_delay_enabled: bool,
     pub minimum_order_age_secs: Option<u64>,
@@ -64,7 +64,7 @@ impl ClobMarketInfoVersion {
                 .tokens
                 .iter()
                 .any(|token| token.outcome.trim().is_empty())
-            || self.minimum_order_size <= Decimal::ZERO
+            || !self.minimum_order_size.is_positive()
         {
             return Err("CLOB market info has invalid tokens or minimum order size".to_owned());
         }
@@ -112,7 +112,7 @@ mod tests {
     use crate::{
         enums::common::TickSize,
         hashing::CanonicalDigest,
-        types::{ClobMarketInfoVersionId, MarketId, TokenId},
+        types::{ClobMarketInfoVersionId, MarketId, Shares, TokenId},
     };
 
     #[test]
@@ -135,7 +135,7 @@ mod tests {
                 },
             ],
             tick_size: TickSize::Hundredth,
-            minimum_order_size: dec!(1),
+            minimum_order_size: Shares::new(dec!(1)),
             neg_risk: false,
             taker_order_delay_enabled: false,
             minimum_order_age_secs: None,
@@ -177,7 +177,7 @@ mod tests {
                 },
             ],
             tick_size: TickSize::Hundredth,
-            minimum_order_size: dec!(1),
+            minimum_order_size: Shares::new(dec!(1)),
             neg_risk: false,
             taker_order_delay_enabled: false,
             minimum_order_age_secs: None,

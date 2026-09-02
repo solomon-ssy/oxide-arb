@@ -4,7 +4,7 @@
 > **Deployment contract**
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `pre_deployment_behavior`: 允许 clean-break 与唯一 fresh terminal bootstrap rewrite；任何真实数据销毁仍需操作者单独授权。
 > - `post_deployment_behavior`: 本次重构只交付并验证唯一终态 schema；不设计旧版本共存、升级或降级路径。
 > - `rollback_and_data_verification`: 仅在 disposable 空数据库执行 fresh-install 验证；任何真实数据库重置需要操作者另行授权。
 
@@ -14,10 +14,16 @@
 >
 > 兼容策略：零兼容。删除旧 Endgame、DryRun/Paper/Live、旧 runtime-config shape、旧命名和 re-export。
 >
-> **Phase 12 clean break**：`report_only / semi_auto / auto_execution` 及整个
-> `QuantRuntimeMode` 轴正在由 [`phase-12/README.md`](phase-12/README.md) 破坏式取代。
-> Phase 12 是执行授权、账户单写者、break-glass 恢复和快速经济反馈的唯一 current owner；
-> 下列早期 Phase 文档中的 runtime-mode 文字在完成迁移前仅用于 deletion inventory。
+> **Phase 12 clean break**：旧全局运行模式轴已删除。
+> [`phase-12/README.md`](phase-12/README.md) 是执行授权、账户单写者、break-glass 恢复和快速经济反馈的唯一 current owner；早期 Phase 文档中的旧模式文字仅属于删除清单，不再具有设计效力。
+>
+> **Implementation plan supersession**：当前实施状态、恢复入口和退出证据只认
+> [`phase-12/12.1-implementation-ledger.md`](phase-12/12.1-implementation-ledger.md)。任何旧 global/Phase
+> plan 中把真实 venue、chain、relayer 或 controlled canary 作为 Implementation Closure 条件的文字均已
+> superseded；真实资金动作只属于另行精确授权的 Operational Activation。
+>
+> 当前运维操作只认 [`../../operations/runbook.md`](../../operations/runbook.md) 与
+> [`../../operations/README.md`](../../operations/README.md)；同路径的 Endgame-era 历史内容已被现文件完全取代。
 
 ## 0. 决策摘要
 
@@ -44,13 +50,13 @@ Polymarket facts -> represented routes -> route-specific model/calibration/trade
 
 按以下顺序阅读和实现：
 
-1. [`00-quant-pivot-architecture.md`](00-quant-pivot-architecture.md)：目标产品、生产不变量、运行模式、完整业务闭环。
+1. [`00-quant-pivot-architecture.md`](00-quant-pivot-architecture.md)：目标产品、生产不变量、执行授权和完整业务闭环。
 2. [`01-domain-model-and-schema.md`](01-domain-model-and-schema.md)：新领域词汇、Postgres 表、ClickHouse facts、旧 schema 替换映射。
 3. [`02-crate-refactor-and-deletion-plan.md`](02-crate-refactor-and-deletion-plan.md)：crate、模块、配置、文档、脚本、测试的删除、合并、保留、重命名清单。
 4. [`03-data-factor-model-pipeline.md`](03-data-factor-model-pipeline.md)：数据、特征、因子、模型、训练、point-in-time 验证平面（概念规格）。可执行的子phase实施契约（3.0–3.7）见 [`phase-03/README.md`](phase-03/README.md)。
 5. [`04-topn-report-and-recommendation.md`](04-topn-report-and-recommendation.md)：TopN 报告 payload，明确买什么、什么时候买、买多少、什么时候卖、卖多少、入场触发、止盈、止损、出场节点。
-6. [`05-execution-risk-and-governance.md`](05-execution-risk-and-governance.md)：`report_only`、`semi_auto`、`auto_execution` 的语义、审批、OrderIntent、组合风险、审计规则。
-7. [`06-config-deploy-and-ops.md`](06-config-deploy-and-ops.md)：Deploy Config、六类 boot typed policy、CI、migration、Docker、observability、runbook 调整。
+6. [`phase-12/12.0-execution-authority-account-recovery-fast-feedback.md`](phase-12/12.0-execution-authority-account-recovery-fast-feedback.md)：执行授权、OrderIntent、账户恢复、组合风险、经济反馈与审计规则。
+7. [`06-config-deploy-and-ops.md`](06-config-deploy-and-ops.md)：Deploy Config、六类 boot typed policy、CI、fresh bootstrap、Docker、observability、runbook 调整。
 8. [`phase-05/05.8-portfolio-optimization-highs.md`](phase-05/05.8-portfolio-optimization-highs.md)：跨 Route 统一经济层级、联合场景、唯一 MILP 与 exact verification。
 9. [`08-third-party-crates-and-ml-stack.md`](08-third-party-crates-and-ml-stack.md)：第三方 crate、模型训练、推理、优化、依赖引入顺序和 MSRV/native 风险。
 10. [`09-account-capital-position-reconciliation.md`](09-account-capital-position-reconciliation.md)：账户/资本/持仓/对账平面——`AccountSnapshot`、planner 资金感知签名、资金状态机、对账证据链、Polymarket 余额/持仓数据源（设计先行，实现分相位到 Phase 4/5/6）。
@@ -100,7 +106,6 @@ Polymarket facts -> represented routes -> route-specific model/calibration/trade
 - `docs/plans/phase7.3-business-markets-opportunities-trades.md`
 - `docs/plans/phase7.4-risk.md`
 - `docs/plans/phase7.5-analytics.md`
-- `docs/operations/runbook.md`
 - `docs/operations/live-production-guide.md`
 - `docs/operations/bankroll-and-risk-metrics.md`
 
@@ -109,10 +114,10 @@ Polymarket facts -> represented routes -> route-specific model/calibration/trade
 以下基础能力可以保留，但必须改名、改语义、改边界：
 
 - `quant-pivot-models` 中的 typed IDs 和 Decimal money newtypes。
-- deploy-only、只追加且带 artifact checksum 的 `SeaORM` PostgreSQL migrations，以及规范化 schema manifest。
+- deploy-only 的唯一 PostgreSQL v1 fresh-bootstrap snapshot、bootstrap checksum evidence 与规范化 schema manifest；不存在升级 migration chain。
 - DTO 三层契约：request/query、persistence DTO、view/response。
 - Postgres、Redis、ClickHouse storage 基础设施。
-- RBAC、Casbin、operation log、单 active HS256 JWT signing key、原子 refresh family 与受治理 runtime config 机制。
+- RBAC、Casbin、operation log、单 active HS256 JWT signing key、原子 refresh family 与六类受治理 typed policy resource。
 - Polymarket Gamma、CLOB market data、L2 book ingest。
 - `BookStore` published snapshot 模式。
 - ClickHouse fact writer 与 async writer 模式。

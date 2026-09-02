@@ -332,7 +332,7 @@ mod tests {
             frame_bytes: metrics.ws_hub_frame_bytes.clone(),
         });
         let shutdown = CancellationToken::new();
-        let hub_task = tokio::spawn(hub.run(shutdown.clone()));
+        let hub_task = tokio::spawn(hub.run(shutdown.clone(), shutdown.clone()));
         for id in subscribed {
             subscribe_market(&sessions, id).await;
         }

@@ -27,7 +27,9 @@ use quant_pivot_repository::traits::{
 use rust_decimal::Decimal;
 
 use crate::{
-    execution::account_pause::AccountPauseCoordinator,
+    execution::{
+        account_pause::AccountPauseCoordinator, account_recovery_service::AccountRecoveryService,
+    },
     observability::alert_dispatcher::{Alert, AlertDispatcher},
 };
 
@@ -43,6 +45,7 @@ pub struct AccountChainExecutionProjector {
     kill_switch: Arc<dyn KillSwitchPort>,
     alerts: Arc<AlertDispatcher>,
     pause: Arc<AccountPauseCoordinator>,
+    recovery_service: Arc<AccountRecoveryService>,
 }
 
 pub struct AccountChainExecutionProjectorDeps {
@@ -54,6 +57,7 @@ pub struct AccountChainExecutionProjectorDeps {
     pub kill_switch: Arc<dyn KillSwitchPort>,
     pub alerts: Arc<AlertDispatcher>,
     pub pause: Arc<AccountPauseCoordinator>,
+    pub recovery_service: Arc<AccountRecoveryService>,
 }
 
 impl AccountChainExecutionProjector {
@@ -68,6 +72,7 @@ impl AccountChainExecutionProjector {
             kill_switch: deps.kill_switch,
             alerts: deps.alerts,
             pause: deps.pause,
+            recovery_service: deps.recovery_service,
         }
     }
 
@@ -79,7 +84,7 @@ impl AccountChainExecutionProjector {
         {
             latch_exit_only(self.kill_switch.as_ref(), &incident).await?;
             self.pause.pause_incident(&incident, &self.funder).await?;
-            let _ = self.pause.confirm_incident(&incident, &self.funder).await?;
+            self.recovery_service.advance_incident(&incident).await?;
         }
         let cursor = self
             .executions
@@ -289,7 +294,7 @@ impl AccountChainProjectionInput<'_> {
             maker_amount_raw: event.maker_amount.clone(),
             taker_amount_raw: event.taker_amount.clone(),
             account_side: Some(side),
-            account_token_id: Some(token_id.clone()),
+            account_token_id: Some(token_id),
             shares: Some(Shares::new(share_count)),
             principal_usd: Some(Usd::new(principal)),
             exact_fee_usd: Some(Usd::new(fee)),

@@ -29,6 +29,11 @@ use quant_pivot_core::{
             ExecutionOutcomeBackfillSummary, ResolutionOutcomeBackfillSummary,
         },
     },
+    service::recommendation_economic_outcome::{
+        EconomicReplayDeferCause, RecommendationEconomicReplayAdapter,
+        RecommendationEconomicReplayAttempt, RecommendationEconomicReplayBinding,
+        RecommendationEconomicReplaySource,
+    },
 };
 use quant_pivot_error::{
     QuantError,
@@ -40,8 +45,9 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, ExecutionParticipantFactRow,
-        ExecutionParticipantRow, MarketExecutionRow, MarketResolutionRow, MidPriceBucketRow,
+        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, DomainObservationRow,
+        ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
+        MarketResolutionRow, MidPriceBucketRow, QuantSignalCandidateEventRow,
     },
     domain::{
         data_plane::{
@@ -49,53 +55,75 @@ use quant_pivot_models::{
             HistorySealChunkRef, UpsertDomainSourceCursor,
         },
         quant::{
-            ExecutionAttemptBarrier, ExecutionAttemptOutcomeInfo,
-            ExecutionAttemptReconciliationResult, ExecutionAttemptTaskClaim,
-            InsertResolutionOutcomeResult, OutcomeTaskSettlement,
-            RecommendationResolutionOutcomeInfo,
+            EconomicOutcomeCensorReason, EconomicOutcomeTaskClaim, ExecutionAttemptBarrier,
+            ExecutionAttemptOutcomeInfo, ExecutionAttemptReconciliationResult,
+            ExecutionAttemptTaskClaim, InsertResolutionOutcomeResult, OutcomeTaskSettlement,
+            RecommendationEconomicStateDetail, RecommendationResolutionOutcomeInfo,
         },
     },
-    enums::market::MarketStatus,
+    entities::{
+        quant_economic_outcome_reconciliation_task::Entity as EconomicTaskEntity,
+        quant_execution_attempt_reconciliation_task::Entity as ExecutionTaskEntity,
+        quant_recommendation::Entity as RecommendationEntity,
+        quant_recommendation_report::Entity as ReportEntity,
+        quant_report_route_run::Entity as RouteRunEntity,
+    },
+    enums::{
+        market::MarketStatus,
+        quant::{OutcomeReconciliationTaskStatus, OutcomeSide, RecommendationEconomicOutcomeState},
+    },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, DomainInstrumentKey, DomainSourceId, EvmAddress, EvmBlockHash,
-        EvmTransactionHash, MarketId, OrderIntentId, Price, RecommendationId, TokenId, WorkerId,
+        Bps, ContentHash, DomainInstrumentKey, DomainSourceId, EvmAddress, EvmBlockHash,
+        EvmTransactionHash, MarketId, ModelVersionId, OrderIntentId, Price, RecommendationId,
+        Shares, TokenId, TradePolicyReplayGap, Usd, WorkerId,
+        trade_policy_evidence::TradePolicyEvidenceCoverage,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgDomainSourceCursorRepository, PgExecutionAttemptOutcomeRepository,
         PgExecutionSubmissionRepository, PgMarketRepository,
-        PgRecommendationExecutionRollupRepository, PgRecommendationResolutionOutcomeRepository,
-        PgResolutionObservationRepository,
+        PgRecommendationEconomicOutcomeRepository, PgRecommendationExecutionRollupRepository,
+        PgRecommendationResolutionOutcomeRepository, PgResolutionObservationRepository,
     },
     traits::{
         DomainSourceCursorRepository, ExecutionAttemptOutcomeRepository, FactWriter,
-        MarketRepository, QuantFactReadRepository, RecommendationResolutionOutcomeRepository,
+        MarketRepository, QuantFactReadRepository, RecommendationEconomicOutcomeRepository,
+        RecommendationResolutionOutcomeRepository,
     },
 };
+use quant_pivot_research::policy_replay::{PolicyReplayLatency, PolicyReplayOutcome};
 use quant_pivot_system_tests::{
     postgres::{self, PostgresClock, setup_pg},
-    support::execution_pg_seed::{
-        ExecutionTxnIds, ReportSeedConfig, SharedDemoInfra, close_position_full,
-        fixture_profile_ref, seed_approved_intent, seed_report_fixture, seed_report_on_infra,
-        seed_settlement_report_fixture, seed_shared_demo_infra,
+    support::{
+        economic_outcome_fixtures::seed_report_at,
+        execution_pg_seed::{
+            ExecutionTxnIds, ReportSeedConfig, SharedDemoInfra, close_position_full,
+            fixture_profile_ref, seed_approved_intent, seed_intent_account_fees,
+            seed_report_fixture, seed_report_on_infra, seed_settlement_report_fixture,
+            seed_shared_demo_infra,
+        },
     },
 };
 use rust_decimal_macros::dec;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Statement};
+use uuid::Uuid;
+
+#[path = "outcome_reconciliation_producer/no_side.rs"]
+mod no_side;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn outcome_reconciliation_producer_contracts() {
     Box::pin(postgres::with_postgres_suite(async {
         payout_vector_boundaries().await;
-        crash_after_recovers_fact().await;
+        Box::pin(crash_after_recovers_fact()).await;
         missing_fact_defers().await;
         deferred_runtime_rotates_fairly().await;
         disorder_never_advances_cursor().await;
         mismatch_never_advances_cursor().await;
         execution_backlog_reconciled_owner().await;
-        complete_backfill_replays_exactly().await;
+        Box::pin(complete_backfill_replays_exactly()).await;
         execution_never_blocks_resolution().await;
         resolution_late_allows_execution().await;
     }))
@@ -103,11 +131,266 @@ async fn outcome_reconciliation_producer_contracts() {
     .expect("start outcome-reconciliation producer PostgreSQL suite");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn economic_reconciliation_contracts() {
+    Box::pin(postgres::with_postgres_suite(async {
+        Box::pin(economic_late_source_retries()).await;
+        Box::pin(economic_cutoff_censors()).await;
+        Box::pin(economic_replay_crash_recovers()).await;
+        Box::pin(economic_future_clock_fenced()).await;
+        Box::pin(economic_early_resolution_bound()).await;
+        Box::pin(economic_lost_lease_recovers()).await;
+        Box::pin(economic_capacity_retries_fairly()).await;
+    }))
+    .await
+    .expect("start economic-reconciliation PostgreSQL suite");
+}
+
 #[derive(Default)]
 struct MemoryResolutionFacts {
     rows: Mutex<Vec<MarketResolutionRow>>,
+    books: Mutex<Vec<BookL2LedgerRow>>,
+    sessions: Mutex<Vec<BookStreamSessionRow>>,
+    signals: Mutex<Vec<QuantSignalCandidateEventRow>>,
+    book_reads: Mutex<Vec<TokenId>>,
     fail_after_next_persist: AtomicBool,
     write_attempts: AtomicUsize,
+}
+
+struct UnexpectedEconomicReplaySource;
+
+#[async_trait]
+impl RecommendationEconomicReplaySource for UnexpectedEconomicReplaySource {
+    async fn replay(
+        &self,
+        _claim: EconomicOutcomeTaskClaim,
+        _available_through: DateTime<Utc>,
+    ) -> Result<RecommendationEconomicReplayAttempt, QuantError> {
+        Err(QuantError::config(
+            "economic replay was not expected in this isolated lane test",
+        ))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EconomicSourceResponse {
+    CapacityDeferred,
+    Deferred,
+    Ready,
+    ExpiringDeferred,
+    ExpiringReady,
+}
+
+struct ScriptedEconomicReplaySource {
+    db: DatabaseConnection,
+    responses: Mutex<VecDeque<EconomicSourceResponse>>,
+    claims: Mutex<Vec<EconomicOutcomeTaskClaim>>,
+    calls: AtomicUsize,
+}
+
+impl ScriptedEconomicReplaySource {
+    fn new(
+        db: DatabaseConnection,
+        responses: impl IntoIterator<Item = EconomicSourceResponse>,
+    ) -> Self {
+        Self {
+            db,
+            responses: Mutex::new(responses.into_iter().collect()),
+            claims: Mutex::new(Vec::new()),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn claims(&self) -> Vec<EconomicOutcomeTaskClaim> {
+        self.claims.lock().expect("lock economic claims").clone()
+    }
+
+    async fn verify_capacity_retry(
+        &self,
+        outcomes: &dyn RecommendationEconomicOutcomeRepository,
+        recommendations: [RecommendationId; 2],
+        attempt: i32,
+        window: (DateTime<Utc>, DateTime<Utc>),
+        delay_secs: u64,
+    ) -> DateTime<Utc> {
+        let claims = self.claims();
+        assert_eq!(
+            claims.len(),
+            usize::try_from(attempt).expect("attempt count")
+        );
+        let first = claims[0];
+        let claim = *claims.last().expect("capacity claim");
+        assert_eq!(claim.recommendation_id, first.recommendation_id);
+        assert_eq!(claim.attempt_count, attempt);
+        assert_eq!(claim.horizon_at, first.horizon_at);
+        assert_eq!(claim.replay_until, first.replay_until);
+        assert_eq!(claim.resolution_outcome_hash, first.resolution_outcome_hash);
+        assert_eq!(claim.source_cutoff_at, first.source_cutoff_at);
+        assert_eq!(claim.source_available_until, first.source_available_until);
+        assert!(claim.source_cutoff_at < window.0);
+        assert_eq!(claim.source_available_until, claim.source_cutoff_at);
+        let delay = Duration::seconds(i64::try_from(delay_secs).expect("bounded capacity delay"));
+        let mut retry_at = None;
+        for id in recommendations {
+            assert!(
+                outcomes
+                    .find_by_id(&id)
+                    .await
+                    .expect("busy WORM read")
+                    .is_none()
+            );
+            let task = EconomicTaskEntity::find_by_id(id)
+                .one(&self.db)
+                .await
+                .expect("busy task read")
+                .expect("busy task exists");
+            assert!(task.claim_owner.is_none() && task.lease_expires_at.is_none());
+            assert!(task.completed_at.is_none());
+            if id == claim.recommendation_id {
+                assert_eq!(task.status, OutcomeReconciliationTaskStatus::Retrying);
+                assert_eq!(task.attempt_count, attempt);
+                assert_eq!(task.horizon_at, claim.horizon_at);
+                assert_eq!(task.replay_until, Some(claim.replay_until));
+                assert_eq!(task.resolution_outcome_hash, claim.resolution_outcome_hash);
+                assert_eq!(task.source_cutoff_at, Some(claim.source_cutoff_at));
+                assert_eq!(
+                    task.last_error.as_deref(),
+                    Some("ComputeCapacityUnavailable")
+                );
+                let due = task
+                    .next_attempt_at
+                    .expect("durable capacity retry deadline");
+                assert!(
+                    due >= window.0 + delay && due <= window.1 + delay,
+                    "capacity attempt {attempt} must retry within its {delay_secs}s cadence: before={} after={} due={due}",
+                    window.0,
+                    window.1
+                );
+                retry_at = Some(due);
+            } else {
+                assert_eq!(task.status, OutcomeReconciliationTaskStatus::Pending);
+                assert_eq!(task.attempt_count, 0);
+                assert!(task.replay_until.is_none() && task.source_cutoff_at.is_none());
+                assert!(task.resolution_outcome_hash.is_none());
+                assert!(task.next_attempt_at.is_none() && task.last_error.is_none());
+            }
+        }
+        retry_at.expect("blocked recommendation belongs to the fixture")
+    }
+}
+
+#[async_trait]
+impl RecommendationEconomicReplaySource for ScriptedEconomicReplaySource {
+    async fn replay(
+        &self,
+        claim: EconomicOutcomeTaskClaim,
+        available_through: DateTime<Utc>,
+    ) -> Result<RecommendationEconomicReplayAttempt, QuantError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            available_through, claim.source_available_until,
+            "worker must use the DB-clamped claim cutoff"
+        );
+        self.claims
+            .lock()
+            .expect("lock economic claims")
+            .push(claim);
+        let recommendation = RecommendationEntity::find_by_id(claim.recommendation_id)
+            .one(&self.db)
+            .await?
+            .expect("scripted recommendation");
+        let report = ReportEntity::find_by_id(recommendation.recommendation_report_id)
+            .one(&self.db)
+            .await?
+            .expect("scripted report");
+        let route = RouteRunEntity::find_by_id(recommendation.report_route_run_id)
+            .one(&self.db)
+            .await?
+            .expect("scripted Route run");
+        let binding = RecommendationEconomicReplayBinding {
+            recommendation_id: claim.recommendation_id,
+            recommendation_report_id: report.recommendation_report_id,
+            report_route_run_id: route.report_route_run_id,
+            decision_policy_snapshot_id: report.decision_policy_snapshot_id,
+            economic_tier_id: recommendation.economic_tier_id,
+            model_version_id: route.model_version_id.expect("route model"),
+            trade_policy_artifact_id: route.trade_policy_artifact_id.expect("route policy"),
+            research_profile_artifact_id: route
+                .research_profile_artifact_id
+                .expect("route profile"),
+            decision_at: report.decision_at,
+            horizon_at: claim.horizon_at,
+            replay_until: claim.replay_until,
+            resolution_outcome_hash: claim.resolution_outcome_hash,
+            source_cutoff_at: claim.source_cutoff_at,
+            source_available_until: claim.source_available_until,
+            replay_input_hash: ContentHash::from_bytes([61; 32]),
+            available_at: available_through,
+        };
+        let response = self
+            .responses
+            .lock()
+            .expect("lock economic responses")
+            .pop_front()
+            .unwrap_or(EconomicSourceResponse::Deferred);
+        if matches!(
+            response,
+            EconomicSourceResponse::ExpiringDeferred | EconomicSourceResponse::ExpiringReady
+        ) {
+            expire_economic_lease(&self.db).await;
+        }
+        Ok(match response {
+            EconomicSourceResponse::CapacityDeferred => {
+                RecommendationEconomicReplayAttempt::CapacityDeferred
+            }
+            EconomicSourceResponse::Deferred | EconomicSourceResponse::ExpiringDeferred => {
+                RecommendationEconomicReplayAttempt::Deferred {
+                    binding,
+                    token_id: recommendation.token_id,
+                    cause: EconomicReplayDeferCause::ResolutionFactUnavailable,
+                }
+            }
+            EconomicSourceResponse::Ready | EconomicSourceResponse::ExpiringReady => {
+                RecommendationEconomicReplayAttempt::Ready {
+                    binding,
+                    replay: Box::new(PolicyReplayOutcome {
+                        candidate_id: "economic-source-test".to_owned(),
+                        outcome_side: OutcomeSide::Yes,
+                        cash_budget: Usd::new(dec!(10)),
+                        latency: PolicyReplayLatency {
+                            base_delay_ms: 10,
+                            stress_multiplier: dec!(1),
+                        },
+                        entry_triggered_at: None,
+                        entered_at: None,
+                        terminal_at: None,
+                        terminal_reason: None,
+                        entry_fill_ratio: dec!(0),
+                        entry_fill_latency_ms: None,
+                        post_fill_markout_bps: None::<Bps>,
+                        exit_fill_ratio: dec!(0),
+                        entry_filled_shares: Shares::ZERO,
+                        exited_shares: Shares::ZERO,
+                        execution_fee_usd: Usd::ZERO,
+                        expected_maker_rebate_accrual_usd: Usd::ZERO,
+                        expected_net_return_bps: None,
+                        risk_net_return_bps: None,
+                        ambiguous_touch: false,
+                        full_l2_coverage: TradePolicyEvidenceCoverage::Covered,
+                        fee_covered: true,
+                        passive_rebate_evidence_coverage: TradePolicyEvidenceCoverage::NotRequired,
+                        passive_reconciled_trade_covered: None,
+                        gap: Some(TradePolicyReplayGap::EntryNotTriggered),
+                        fills: Vec::new(),
+                    }),
+                }
+            }
+        })
+    }
 }
 
 impl MemoryResolutionFacts {
@@ -257,11 +540,93 @@ impl QuantFactReadRepository for MemoryResolutionFacts {
 
     async fn book_ledger_snapshot_at(
         &self,
-        _token_id: &TokenId,
-        _source_cutoff_ms: i64,
-        _decision_at_ms: i64,
+        token_id: &TokenId,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Option<BookL2LedgerRow>, StorageError> {
-        Ok(None)
+        self.book_reads
+            .lock()
+            .expect("book read trace")
+            .push(token_id.clone());
+        Ok(self
+            .books
+            .lock()
+            .expect("book facts")
+            .iter()
+            .filter(|row| {
+                &row.token_id == token_id
+                    && row.venue_event_time <= source_cutoff_ms
+                    && row.persisted_time <= decision_at_ms
+            })
+            .max_by_key(|row| (row.venue_event_time, row.token_sequence))
+            .cloned())
+    }
+
+    async fn book_l2_ledger_between(
+        &self,
+        token_ids: Vec<TokenId>,
+        from_ms: i64,
+        to_ms: i64,
+        available_by_ms: i64,
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
+        self.book_reads
+            .lock()
+            .expect("book read trace")
+            .extend(token_ids.iter().cloned());
+        Ok(self
+            .books
+            .lock()
+            .expect("book facts")
+            .iter()
+            .filter(|row| {
+                token_ids.contains(&row.token_id)
+                    && row.venue_event_time >= from_ms
+                    && row.venue_event_time <= to_ms
+                    && row.persisted_time <= available_by_ms
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn book_stream_sessions(
+        &self,
+        ids: Vec<Uuid>,
+        available_by_ms: i64,
+    ) -> Result<Vec<BookStreamSessionRow>, StorageError> {
+        Ok(self
+            .sessions
+            .lock()
+            .expect("session facts")
+            .iter()
+            .filter(|row| {
+                ids.contains(&row.stream_session_id) && row.recorded_at <= available_by_ms
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn signal_candidates_between(
+        &self,
+        token_id: &TokenId,
+        model_id: &ModelVersionId,
+        from_ms: i64,
+        to_ms: i64,
+        available_by_ms: i64,
+    ) -> Result<Vec<QuantSignalCandidateEventRow>, StorageError> {
+        Ok(self
+            .signals
+            .lock()
+            .expect("signal facts")
+            .iter()
+            .filter(|row| {
+                &row.token_id == token_id
+                    && &row.model_version_id == model_id
+                    && row.event_time >= from_ms
+                    && row.event_time <= to_ms
+                    && row.ingestion_time <= available_by_ms
+            })
+            .cloned()
+            .collect())
     }
 
     async fn book_ledger_snapshots_between(
@@ -637,6 +1002,32 @@ async fn release_resolution_retries(db: &DatabaseConnection) {
     tokio::time::sleep(StdDuration::from_millis(5)).await;
 }
 
+async fn release_economic_retries(db: &DatabaseConnection) {
+    db.execute_raw(Statement::from_string(
+        DbBackend::Postgres,
+        "UPDATE quant_economic_outcome_reconciliation_task \
+         SET next_attempt_at = statement_timestamp() + interval '1 millisecond' \
+         WHERE status = 'retrying'"
+            .to_owned(),
+    ))
+    .await
+    .expect("release economic retries");
+    tokio::time::sleep(StdDuration::from_millis(10)).await;
+}
+
+async fn expire_economic_lease(db: &DatabaseConnection) {
+    db.execute_raw(Statement::from_string(
+        DbBackend::Postgres,
+        "UPDATE quant_economic_outcome_reconciliation_task \
+         SET lease_expires_at = statement_timestamp() + interval '1 millisecond' \
+         WHERE status = 'delivering'"
+            .to_owned(),
+    ))
+    .await
+    .expect("expire economic task lease");
+    tokio::time::sleep(StdDuration::from_millis(10)).await;
+}
+
 async fn release_projection_retries(db: &DatabaseConnection) {
     db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
@@ -845,6 +1236,8 @@ async fn deferred_runtime_rotates_fairly() {
             pass_started_at: db.statement_time().await,
             candidate_batch_size: 1,
             source_block_span: 1,
+            economic_source_lateness_secs: 300,
+            sweep_secs: 1,
         })
         .await
         .expect("defer first runtime candidate");
@@ -856,6 +1249,8 @@ async fn deferred_runtime_rotates_fairly() {
             pass_started_at: db.statement_time().await,
             candidate_batch_size: 1,
             source_block_span: 1,
+            economic_source_lateness_secs: 300,
+            sweep_secs: 1,
         })
         .await
         .expect("rotate to later runtime candidate");
@@ -875,6 +1270,8 @@ async fn deferred_runtime_rotates_fairly() {
             pass_started_at: db.statement_time().await,
             candidate_batch_size: 1,
             source_block_span: 1,
+            economic_source_lateness_secs: 300,
+            sweep_secs: 1,
         })
         .await
         .expect("wrap exhausted runtime cursor");
@@ -884,6 +1281,8 @@ async fn deferred_runtime_rotates_fairly() {
             pass_started_at: db.statement_time().await,
             candidate_batch_size: 1,
             source_block_span: 1,
+            economic_source_lateness_secs: 300,
+            sweep_secs: 1,
         })
         .await
         .expect("deferred runtime candidate remains outside its due time");
@@ -895,6 +1294,8 @@ async fn deferred_runtime_rotates_fairly() {
             pass_started_at: db.statement_time().await,
             candidate_batch_size: 1,
             source_block_span: 1,
+            economic_source_lateness_secs: 300,
+            sweep_secs: 1,
         })
         .await
         .expect("retry deferred runtime candidate after durable due time");
@@ -962,6 +1363,7 @@ async fn execution_backlog_reconciled_owner() {
         Some(Price::new(dec!(0.66))),
     )
     .await;
+    seed_intent_account_fees(&db, &intent_id).await;
     let block_time = fixed_time();
     let service = service(
         &db,
@@ -972,12 +1374,22 @@ async fn execution_backlog_reconciled_owner() {
         Arc::new(MemoryResolutionFacts::default()),
     );
 
+    tokio::time::sleep(StdDuration::from_secs(1)).await;
     let summary = service
         .run_execution_pass(pass_config(db.statement_time().await))
         .await
         .expect("reconcile execution backlog");
     assert_eq!(summary.execution_candidates, 1);
-    assert_eq!(summary.execution_inserted, 1);
+    let task = ExecutionTaskEntity::find_by_id(intent_id)
+        .one(&db)
+        .await
+        .expect("execution task diagnostic read")
+        .expect("execution task diagnostic exists");
+    assert_eq!(
+        summary.execution_inserted, 1,
+        "summary={summary:?}; last_error={:?}",
+        task.last_error
+    );
     assert!(
         PgExecutionAttemptOutcomeRepository::new(db)
             .find_by_intent(&intent_id)
@@ -1105,6 +1517,8 @@ async fn verify_resolution_backfill(
         pass_started_at: db.statement_time().await,
         candidate_batch_size: 1,
         source_block_span: 2,
+        economic_source_lateness_secs: 300,
+        sweep_secs: 1,
     };
     let source = reconciliation
         .run_resolution_backfill(source_config)
@@ -1126,6 +1540,8 @@ async fn verify_resolution_backfill(
         pass_started_at: cutoff,
         candidate_batch_size: 1,
         source_block_span: 2,
+        economic_source_lateness_secs: 300,
+        sweep_secs: 1,
     };
     let summary = reconciliation
         .run_resolution_backfill(config)
@@ -1227,8 +1643,10 @@ async fn seed_execution_backfill_catalog(
             Some(Price::new(dec!(0.66))),
         )
         .await;
+        seed_intent_account_fees(db, &intent_id).await;
         ids_by_intent.push((ids, intent_id));
     }
+    tokio::time::sleep(StdDuration::from_secs(1)).await;
     ids_by_intent
 }
 
@@ -1242,6 +1660,8 @@ async fn verify_execution_backfill(
         pass_started_at: cutoff,
         candidate_batch_size: 1,
         source_block_span: 2,
+        economic_source_lateness_secs: 300,
+        sweep_secs: 1,
     };
     let summary = reconciliation
         .run_execution_backfill(config)
@@ -1249,7 +1669,18 @@ async fn verify_execution_backfill(
         .expect("drain complete frozen execution backfill");
     assert_eq!(summary.outcome_pages, 3);
     assert_eq!(summary.totals.execution_candidates, 3);
-    assert_eq!(summary.totals.execution_inserted, 3);
+    let task_errors = ExecutionTaskEntity::find()
+        .all(db)
+        .await
+        .expect("execution backfill task diagnostics")
+        .into_iter()
+        .map(|task| (task.order_intent_id, task.last_error))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        summary.totals.execution_inserted, 3,
+        "summary={:?}; task_errors={task_errors:?}",
+        summary.totals
+    );
     assert_eq!(summary.totals.execution_deferred, 0);
 
     let repository = PgExecutionAttemptOutcomeRepository::new(db.clone());
@@ -1616,6 +2047,8 @@ async fn resolution_late_allows_execution() {
         Some(Price::new(dec!(0.66))),
     )
     .await;
+    seed_intent_account_fees(&db, &intent_id).await;
+    tokio::time::sleep(StdDuration::from_secs(1)).await;
     let block_time = fixed_time();
     seed_cursor(&db, 100, block_time).await;
     let worker = OutcomeReconciliationWorker::new(Arc::new(service(
@@ -1644,6 +2077,604 @@ async fn resolution_late_allows_execution() {
             .expect("read missing resolution outcome")
             .is_none()
     );
+}
+
+async fn economic_report(db: &DatabaseConnection, horizon_age: Duration) -> ExecutionTxnIds {
+    let infra = seed_shared_demo_infra(db).await;
+    let profile = fixture_profile_ref()
+        .resolve_builtin_research_profile()
+        .expect("economic fixture profile");
+    let horizon = Duration::seconds(
+        i64::try_from(profile.spec.target_horizon_secs).expect("economic fixture horizon"),
+    );
+    let decision_at = db.statement_time().await - horizon - horizon_age;
+    seed_report_at(db, &infra, decision_at)
+        .await
+        .expect("publish historical economic report")
+}
+
+async fn economic_late_source_retries() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = economic_report(&db, Duration::seconds(60)).await;
+    let task = EconomicTaskEntity::find_by_id(ids.recommendation)
+        .one(&db)
+        .await
+        .expect("economic task read")
+        .expect("economic task exists");
+    let economic_outcomes = Arc::new(PgRecommendationEconomicOutcomeRepository::new(db.clone()))
+        as Arc<dyn RecommendationEconomicOutcomeRepository>;
+    let economic_source = Arc::new(ScriptedEconomicReplaySource::new(
+        db.clone(),
+        [
+            EconomicSourceResponse::Deferred,
+            EconomicSourceResponse::Ready,
+        ],
+    ));
+    let service = service_with_economic_source(
+        &db,
+        Arc::new(ScriptedResolutionSource {
+            head: block(1, fixed_time(), 'e'),
+            scan: None,
+        }),
+        Arc::new(MemoryResolutionFacts::default()),
+        Arc::new(PgExecutionAttemptOutcomeRepository::new(db.clone())),
+        Arc::clone(&economic_outcomes),
+        Arc::clone(&economic_source) as Arc<dyn RecommendationEconomicReplaySource>,
+    );
+    let first = service
+        .run_economic_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("defer incomplete economic source");
+    assert_eq!(first.economic_deferred, 1);
+    let deferred = EconomicTaskEntity::find_by_id(ids.recommendation)
+        .one(&db)
+        .await
+        .expect("read deferred diagnostic")
+        .expect("deferred task exists");
+    let recommendation = RecommendationEntity::find_by_id(ids.recommendation)
+        .one(&db)
+        .await
+        .expect("read diagnostic recommendation")
+        .expect("diagnostic recommendation exists");
+    let claim = economic_source
+        .claims()
+        .first()
+        .copied()
+        .expect("source claim");
+    let detail = deferred
+        .last_error
+        .as_deref()
+        .expect("durable deferred cause");
+    for expected in [
+        "SourceIncompleteBeforeCutoff".to_owned(),
+        format!("recommendation_id={}", ids.recommendation),
+        format!("token_id={}", recommendation.token_id),
+        format!("replay_until={}", claim.replay_until),
+        format!("source_cutoff_at={}", claim.source_cutoff_at),
+        format!("source_available_until={}", claim.source_available_until),
+        "cause=ResolutionFactUnavailable".to_owned(),
+    ] {
+        assert!(
+            detail.contains(&expected),
+            "missing durable {expected}: {detail}"
+        );
+    }
+    assert!(detail.chars().count() <= 4_096);
+    assert!(
+        economic_outcomes
+            .find_by_id(&ids.recommendation)
+            .await
+            .expect("economic outcome after defer")
+            .is_none()
+    );
+    release_economic_retries(&db).await;
+    let second = service
+        .run_economic_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("late economic source recovers before cutoff");
+    assert_eq!(second.economic_inserted, 1);
+    let outcome = economic_outcomes
+        .find_by_id(&ids.recommendation)
+        .await
+        .expect("economic outcome after late source")
+        .expect("late source seals outcome");
+    assert_eq!(
+        outcome.state,
+        RecommendationEconomicOutcomeState::EntryNotTriggered
+    );
+    assert_eq!(economic_source.calls(), 2);
+    let claims = economic_source.claims();
+    assert!(
+        claims
+            .iter()
+            .all(|claim| claim.replay_until == task.horizon_at
+                && claim.resolution_outcome_hash.is_none()
+                && claim.source_available_until >= claim.replay_until
+                && claim.source_available_until < claim.source_cutoff_at)
+    );
+    assert_eq!(claims[0].source_cutoff_at, claims[1].source_cutoff_at);
+    assert_eq!(claims[1].attempt_count, claims[0].attempt_count + 1);
+    assert!(outcome.available_at >= claims[1].source_available_until);
+    assert!(outcome.available_at <= db.statement_time().await);
+}
+
+async fn economic_cutoff_censors() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = economic_report(&db, Duration::seconds(600)).await;
+    let task = EconomicTaskEntity::find_by_id(ids.recommendation)
+        .one(&db)
+        .await
+        .expect("economic task read")
+        .expect("economic task exists");
+    let economic_outcomes = Arc::new(PgRecommendationEconomicOutcomeRepository::new(db.clone()))
+        as Arc<dyn RecommendationEconomicOutcomeRepository>;
+    let economic_source = Arc::new(ScriptedEconomicReplaySource::new(
+        db.clone(),
+        [EconomicSourceResponse::Deferred],
+    ));
+    let service = service_with_economic_source(
+        &db,
+        Arc::new(ScriptedResolutionSource {
+            head: block(1, fixed_time(), 'f'),
+            scan: None,
+        }),
+        Arc::new(MemoryResolutionFacts::default()),
+        Arc::new(PgExecutionAttemptOutcomeRepository::new(db.clone())),
+        Arc::clone(&economic_outcomes),
+        Arc::clone(&economic_source) as Arc<dyn RecommendationEconomicReplaySource>,
+    );
+    let cutoff = task.horizon_at + Duration::seconds(300);
+    assert!(cutoff < db.statement_time().await);
+    let summary = service
+        .run_economic_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("censor source at frozen cutoff");
+    assert_eq!(summary.economic_censored, 1);
+    let outcome = economic_outcomes
+        .find_by_id(&ids.recommendation)
+        .await
+        .expect("censored economic outcome read")
+        .expect("cutoff seals censored outcome");
+    assert_eq!(outcome.state, RecommendationEconomicOutcomeState::Censored);
+    assert!(matches!(
+        outcome.payload_json.detail,
+        RecommendationEconomicStateDetail::Censored {
+            reason: EconomicOutcomeCensorReason::SourceUnavailable,
+            ..
+        }
+    ));
+    assert_eq!(economic_source.claims()[0].source_available_until, cutoff);
+    assert_eq!(outcome.source_available_until, cutoff);
+    assert!(outcome.available_at >= cutoff);
+}
+
+async fn economic_replay_crash_recovers() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = economic_report(&db, Duration::seconds(60)).await;
+    let task = EconomicTaskEntity::find_by_id(ids.recommendation)
+        .one(&db)
+        .await
+        .expect("economic task read")
+        .expect("economic task exists");
+    let economic_outcomes = Arc::new(PgRecommendationEconomicOutcomeRepository::new(db.clone()))
+        as Arc<dyn RecommendationEconomicOutcomeRepository>;
+    let economic_source = Arc::new(ScriptedEconomicReplaySource::new(
+        db.clone(),
+        [EconomicSourceResponse::Ready, EconomicSourceResponse::Ready],
+    ));
+    let crashed_worker = WorkerId::from_v7();
+    let claim = economic_outcomes
+        .claim_due(db.statement_time().await, crashed_worker, 60, 300, 1)
+        .await
+        .expect("claim economic task before simulated crash")
+        .pop()
+        .expect("economic claim exists");
+    let attempt = economic_source
+        .replay(claim, claim.source_available_until)
+        .await
+        .expect("build economic outcome before simulated crash");
+    let RecommendationEconomicReplayAttempt::Ready { binding, replay } = attempt else {
+        panic!("scripted source must be ready before simulated crash");
+    };
+    let uncommitted = RecommendationEconomicReplayAdapter::adapt(binding, &replay)
+        .expect("adapt outcome before crash, without publishing it");
+    assert_eq!(uncommitted.recommendation_id, ids.recommendation);
+    assert!(
+        economic_outcomes
+            .find_by_id(&ids.recommendation)
+            .await
+            .expect("read uncommitted outcome")
+            .is_none()
+    );
+    expire_economic_lease(&db).await;
+    let calls_before_recovery = economic_source.calls();
+    let service = service_with_economic_source(
+        &db,
+        Arc::new(ScriptedResolutionSource {
+            head: block(1, fixed_time(), '9'),
+            scan: None,
+        }),
+        Arc::new(MemoryResolutionFacts::default()),
+        Arc::new(PgExecutionAttemptOutcomeRepository::new(db.clone())),
+        Arc::clone(&economic_outcomes),
+        Arc::clone(&economic_source) as Arc<dyn RecommendationEconomicReplaySource>,
+    );
+    let summary = service
+        .run_economic_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("recover task after pre-commit replay crash");
+    assert_eq!(summary.economic_inserted, 1);
+    assert_eq!(
+        economic_source.calls(),
+        calls_before_recovery + 1,
+        "an uncommitted replay must be recomputed by the new lease owner",
+    );
+    let recovered = EconomicTaskEntity::find_by_id(ids.recommendation)
+        .one(&db)
+        .await
+        .expect("read recovered task")
+        .expect("recovered task exists");
+    assert_eq!(recovered.status, OutcomeReconciliationTaskStatus::Completed);
+    assert_eq!(recovered.attempt_count, claim.attempt_count + 1);
+    assert_eq!(recovered.replay_until, Some(task.horizon_at));
+    assert_eq!(recovered.source_cutoff_at, Some(claim.source_cutoff_at));
+    assert!(recovered.claim_owner.is_none() && recovered.lease_expires_at.is_none());
+}
+
+async fn economic_future_clock_fenced() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let task = EconomicTaskEntity::find_by_id(ids.recommendation)
+        .one(&db)
+        .await
+        .expect("future task read")
+        .expect("future task exists");
+    assert!(task.horizon_at > db.statement_time().await);
+    let outcomes = Arc::new(PgRecommendationEconomicOutcomeRepository::new(db.clone()))
+        as Arc<dyn RecommendationEconomicOutcomeRepository>;
+    let source = Arc::new(ScriptedEconomicReplaySource::new(
+        db.clone(),
+        [EconomicSourceResponse::Ready],
+    ));
+    let service = service_with_economic_source(
+        &db,
+        Arc::new(ScriptedResolutionSource {
+            head: block(1, fixed_time(), 'a'),
+            scan: None,
+        }),
+        Arc::new(MemoryResolutionFacts::default()),
+        Arc::new(PgExecutionAttemptOutcomeRepository::new(db.clone())),
+        Arc::clone(&outcomes),
+        Arc::clone(&source) as Arc<dyn RecommendationEconomicReplaySource>,
+    );
+    let summary = service
+        .run_economic_pass(pass_config(task.horizon_at + Duration::hours(1)))
+        .await
+        .expect("future caller clock cannot make a task mature");
+    assert_eq!(summary.economic_candidates, 0);
+    assert_eq!(source.calls(), 0);
+    assert!(
+        outcomes
+            .find_by_id(&ids.recommendation)
+            .await
+            .expect("future outcome read")
+            .is_none()
+    );
+    let untouched = EconomicTaskEntity::find_by_id(ids.recommendation)
+        .one(&db)
+        .await
+        .expect("untouched future task read")
+        .expect("future task remains");
+    assert_eq!(untouched.status, OutcomeReconciliationTaskStatus::Pending);
+    assert_eq!(untouched.attempt_count, 0);
+    assert!(untouched.replay_until.is_none() && untouched.source_cutoff_at.is_none());
+}
+
+async fn economic_early_resolution_bound() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let infra = seed_shared_demo_infra(&db).await;
+    let decision_at = db.statement_time().await - Duration::hours(1);
+    let ids = seed_report_at(&db, &infra, decision_at)
+        .await
+        .expect("early-resolution historical report");
+    let task = EconomicTaskEntity::find_by_id(ids.recommendation)
+        .one(&db)
+        .await
+        .expect("early task read")
+        .expect("early task exists");
+    let resolved_at = db.statement_time().await - Duration::minutes(30);
+    assert!(ids.decision_at < resolved_at && resolved_at < task.horizon_at);
+    settle_market(&db, &MarketId::new(&ids.market)).await;
+    seed_cursor(&db, 100, resolved_at - Duration::seconds(1)).await;
+    let outcomes = Arc::new(PgRecommendationEconomicOutcomeRepository::new(db.clone()))
+        as Arc<dyn RecommendationEconomicOutcomeRepository>;
+    let source = Arc::new(ScriptedEconomicReplaySource::new(
+        db.clone(),
+        [EconomicSourceResponse::Ready],
+    ));
+    let facts = Arc::new(MemoryResolutionFacts::default());
+    let service = service_with_economic_source(
+        &db,
+        Arc::new(ScriptedResolutionSource {
+            head: block(101, resolved_at + Duration::seconds(1), 'b'),
+            scan: Some(FinalizedResolutionScan {
+                from_block: 101,
+                to_block: 101,
+                to_block_hash: block_hash('b'),
+                to_block_time: resolved_at + Duration::seconds(1),
+                observations: vec![observation(&ids.market, 101, resolved_at, 'b', ["2", "0"])],
+            }),
+        }),
+        Arc::clone(&facts),
+        Arc::new(PgExecutionAttemptOutcomeRepository::new(db.clone())),
+        Arc::clone(&outcomes),
+        Arc::clone(&source) as Arc<dyn RecommendationEconomicReplaySource>,
+    );
+    let before = service
+        .run_economic_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("settled catalog alone cannot authorize early economic replay");
+    assert_eq!(before.economic_candidates, 0);
+    assert_eq!(source.calls(), 0);
+    service
+        .run_resolution_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("project canonical resolution source");
+    release_resolution_retries(&db).await;
+    let projected = service
+        .run_resolution_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("seal canonical recommendation resolution");
+    assert_eq!(projected.resolution_inserted, 1);
+    assert_eq!(facts.row_count(), 1);
+    let resolution = PgRecommendationResolutionOutcomeRepository::new(db.clone())
+        .find_by_recommendation(&ids.recommendation)
+        .await
+        .expect("canonical resolution read")
+        .expect("canonical resolution exists");
+    let context = outcomes
+        .replay_context(&ids.recommendation)
+        .await
+        .expect("early replay frozen feature context");
+    let lag =
+        Duration::from_std(context.decision_boundary.knowledge_lag()).expect("boundary lag range");
+    let replay_until = (resolution.resolved_at + lag).max(resolution.source_observed_at);
+    let summary = service
+        .run_economic_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("canonical resolution permits a bounded early replay");
+    assert_eq!(summary.economic_inserted, 1);
+    let claim = source.claims()[0];
+    assert_eq!(claim.horizon_at, task.horizon_at);
+    assert_eq!(claim.replay_until, replay_until);
+    assert!(claim.replay_until < claim.horizon_at);
+    assert_eq!(claim.resolution_outcome_hash, Some(resolution.outcome_hash));
+    assert_eq!(
+        claim.source_cutoff_at,
+        replay_until.max(resolution.available_at) + Duration::seconds(300)
+    );
+    let outcome = outcomes
+        .find_by_id(&ids.recommendation)
+        .await
+        .expect("early outcome read")
+        .expect("early outcome exists");
+    assert_eq!(
+        outcome.horizon_at, task.horizon_at,
+        "early completion never shortens the profile horizon"
+    );
+    assert!(outcome.available_at < task.horizon_at);
+    assert!(outcome.available_at >= claim.source_available_until);
+}
+
+async fn economic_lost_lease_recovers() {
+    for first_response in [
+        EconomicSourceResponse::ExpiringReady,
+        EconomicSourceResponse::ExpiringDeferred,
+    ] {
+        let (pool, _container) = setup_pg().await;
+        let db = pool.connection().clone();
+        let ids = economic_report(&db, Duration::seconds(60)).await;
+        let outcomes = Arc::new(PgRecommendationEconomicOutcomeRepository::new(db.clone()))
+            as Arc<dyn RecommendationEconomicOutcomeRepository>;
+        let source = Arc::new(ScriptedEconomicReplaySource::new(
+            db.clone(),
+            [first_response, EconomicSourceResponse::Ready],
+        ));
+        let service = service_with_economic_source(
+            &db,
+            Arc::new(ScriptedResolutionSource {
+                head: block(1, fixed_time(), 'c'),
+                scan: None,
+            }),
+            Arc::new(MemoryResolutionFacts::default()),
+            Arc::new(PgExecutionAttemptOutcomeRepository::new(db.clone())),
+            Arc::clone(&outcomes),
+            Arc::clone(&source) as Arc<dyn RecommendationEconomicReplaySource>,
+        );
+        let mut config = pass_config(db.statement_time().await);
+        config.candidate_batch_size = 1;
+        let first = service
+            .run_economic_pass(config)
+            .await
+            .expect("expired worker loses complete/retry authority");
+        assert_eq!(first.economic_inserted, 0);
+        assert_eq!(first.economic_censored, 0);
+        assert_eq!(first.economic_claim_lost, 1);
+        assert_eq!(first.economic_deferred, 0);
+        assert!(
+            outcomes
+                .find_by_id(&ids.recommendation)
+                .await
+                .expect("lost-lease outcome read")
+                .is_none()
+        );
+        let lost = EconomicTaskEntity::find_by_id(ids.recommendation)
+            .one(&db)
+            .await
+            .expect("lost lease task read")
+            .expect("lost lease task exists");
+        assert_eq!(lost.status, OutcomeReconciliationTaskStatus::Delivering);
+        assert_eq!(lost.attempt_count, 1);
+        let database_now = db.statement_time().await;
+        assert!(
+            lost.lease_expires_at
+                .is_some_and(|until| until <= database_now)
+        );
+        assert!(
+            lost.next_attempt_at.is_none(),
+            "stale deferred worker must not schedule a retry"
+        );
+        config.pass_started_at = db.statement_time().await;
+        let recovered = service
+            .run_economic_pass(config)
+            .await
+            .expect("new live attempt recovers expired work");
+        assert_eq!(recovered.economic_inserted, 1);
+        assert_eq!(source.calls(), 2);
+        let claims = source.claims();
+        assert_eq!(claims[1].attempt_count, claims[0].attempt_count + 1);
+        assert_eq!(claims[1].replay_until, claims[0].replay_until);
+        assert_eq!(claims[1].source_cutoff_at, claims[0].source_cutoff_at);
+    }
+}
+
+async fn economic_capacity_retries_fairly() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let infra = seed_shared_demo_infra(&db).await;
+    let profile = fixture_profile_ref()
+        .resolve_builtin_research_profile()
+        .expect("capacity fixture profile");
+    let horizon = Duration::seconds(
+        i64::try_from(profile.spec.target_horizon_secs).expect("capacity fixture horizon"),
+    );
+    let decision_at = db.statement_time().await - horizon - Duration::seconds(600);
+    let first = seed_report_at(&db, &infra, decision_at)
+        .await
+        .expect("first mature report");
+    let second = seed_report_at(&db, &infra, decision_at + Duration::seconds(1))
+        .await
+        .expect("second mature report");
+    let outcomes = Arc::new(PgRecommendationEconomicOutcomeRepository::new(db.clone()))
+        as Arc<dyn RecommendationEconomicOutcomeRepository>;
+    let source = Arc::new(ScriptedEconomicReplaySource::new(
+        db.clone(),
+        [EconomicSourceResponse::CapacityDeferred; 8]
+            .into_iter()
+            .chain([EconomicSourceResponse::Ready; 2]),
+    ));
+    let service = service_with_economic_source(
+        &db,
+        Arc::new(ScriptedResolutionSource {
+            head: block(1, fixed_time(), 'd'),
+            scan: None,
+        }),
+        Arc::new(MemoryResolutionFacts::default()),
+        Arc::new(PgExecutionAttemptOutcomeRepository::new(db.clone())),
+        Arc::clone(&outcomes),
+        Arc::clone(&source) as Arc<dyn RecommendationEconomicReplaySource>,
+    );
+    let mut invalid = pass_config(db.statement_time().await);
+    invalid.sweep_secs = 0;
+    let error = service
+        .run_economic_pass(invalid)
+        .await
+        .expect_err("zero capacity cadence must fail before any source claim");
+    assert!(matches!(
+        error,
+        QuantError::Execution(ExecutionError::OutcomeReconciliationInvariant { .. })
+    ));
+    assert_eq!(source.calls(), 0);
+    let cadences = [1, 2, 60, u64::MAX, 1, 1, 1, 1];
+    let mut final_due = None;
+    for (index, sweep_secs) in cadences.into_iter().enumerate() {
+        let before = db.statement_time().await;
+        let mut config = pass_config(before);
+        config.sweep_secs = sweep_secs;
+        let busy = service
+            .run_economic_pass(config)
+            .await
+            .expect("compute saturation must durably defer even after source cutoff");
+        let after = db.statement_time().await;
+        assert_eq!(
+            busy.economic_candidates, 1,
+            "busy pass must stop claiming further work"
+        );
+        assert_eq!(busy.economic_capacity_deferred, 1);
+        assert_eq!(busy.economic_inserted, 0);
+        assert_eq!(busy.economic_censored, 0);
+        assert_eq!(source.calls(), index + 1);
+        final_due = Some(
+            source
+                .verify_capacity_retry(
+                    outcomes.as_ref(),
+                    [first.recommendation, second.recommendation],
+                    i32::try_from(index + 1).expect("bounded capacity attempt"),
+                    (before, after),
+                    sweep_secs.min(60),
+                )
+                .await,
+        );
+        if index + 1 < cadences.len() {
+            // Accelerate test preparation only after checking the real durable delay.
+            release_economic_retries(&db).await;
+        }
+    }
+    let final_due = final_due.expect("eighth capacity retry deadline");
+    tokio::time::timeout(StdDuration::from_secs(3), async {
+        while db.statement_time().await < final_due {
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("final one-second capacity retry becomes genuinely due");
+    let blocked_claim = source.claims()[0];
+    let recovered = service
+        .run_economic_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("available compute permits complete both mature tasks");
+    assert_eq!(recovered.economic_inserted, 2);
+    assert_eq!(recovered.economic_capacity_deferred, 0);
+    assert_eq!(recovered.economic_censored, 0);
+    assert_eq!(recovered.economic_candidates, 2);
+    assert_eq!(source.calls(), 10);
+    let claims = source.claims();
+    let retry = claims
+        .iter()
+        .skip(8)
+        .find(|claim| claim.recommendation_id == blocked_claim.recommendation_id)
+        .expect("blocked task was retried");
+    assert_eq!(retry.attempt_count, blocked_claim.attempt_count + 8);
+    assert_eq!(retry.replay_until, blocked_claim.replay_until);
+    assert_eq!(retry.source_cutoff_at, blocked_claim.source_cutoff_at);
+    assert_eq!(
+        retry.source_available_until,
+        blocked_claim.source_available_until
+    );
+    for recommendation_id in [first.recommendation, second.recommendation] {
+        let outcome = outcomes
+            .find_by_id(&recommendation_id)
+            .await
+            .expect("recovered outcome read")
+            .expect("recovered outcome exists");
+        assert_eq!(
+            outcome.state,
+            RecommendationEconomicOutcomeState::EntryNotTriggered
+        );
+        assert!(outcome.available_at >= outcome.source_available_until);
+        let task = EconomicTaskEntity::find_by_id(recommendation_id)
+            .one(&db)
+            .await
+            .expect("completed task read")
+            .expect("completed task exists");
+        assert_eq!(task.status, OutcomeReconciliationTaskStatus::Completed);
+        assert!(task.claim_owner.is_none() && task.lease_expires_at.is_none());
+    }
 }
 
 async fn execution_never_blocks_resolution() {
@@ -1729,6 +2760,26 @@ fn service_with_execution_outcomes(
     facts: Arc<MemoryResolutionFacts>,
     execution_outcomes: Arc<dyn ExecutionAttemptOutcomeRepository>,
 ) -> OutcomeReconciliationService {
+    let economic_outcomes = Arc::new(PgRecommendationEconomicOutcomeRepository::new(db.clone()))
+        as Arc<dyn RecommendationEconomicOutcomeRepository>;
+    service_with_economic_source(
+        db,
+        source,
+        facts,
+        execution_outcomes,
+        economic_outcomes,
+        Arc::new(UnexpectedEconomicReplaySource),
+    )
+}
+
+fn service_with_economic_source(
+    db: &DatabaseConnection,
+    source: Arc<dyn ResolutionSourceReader>,
+    facts: Arc<MemoryResolutionFacts>,
+    execution_outcomes: Arc<dyn ExecutionAttemptOutcomeRepository>,
+    economic_outcomes: Arc<dyn RecommendationEconomicOutcomeRepository>,
+    economic_replay: Arc<dyn RecommendationEconomicReplaySource>,
+) -> OutcomeReconciliationService {
     let resolution_fact_writer = Arc::clone(&facts) as Arc<dyn FactWriter<MarketResolutionRow>>;
     let resolution_facts: Arc<dyn QuantFactReadRepository> = facts;
     OutcomeReconciliationService::new(OutcomeReconciliationServiceDeps {
@@ -1741,6 +2792,8 @@ fn service_with_execution_outcomes(
         resolution_outcomes: Arc::new(PgRecommendationResolutionOutcomeRepository::new(db.clone())),
         execution_outcomes,
         execution_rollups: Arc::new(PgRecommendationExecutionRollupRepository::new(db.clone())),
+        economic_outcomes,
+        economic_replay,
     })
 }
 
@@ -1749,6 +2802,8 @@ const fn pass_config(pass_started_at: DateTime<Utc>) -> OutcomeReconciliationPas
         pass_started_at,
         candidate_batch_size: 100,
         source_block_span: 32,
+        economic_source_lateness_secs: 300,
+        sweep_secs: 1,
     }
 }
 

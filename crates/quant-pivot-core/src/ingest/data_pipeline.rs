@@ -1,7 +1,10 @@
 use std::{
     array,
-    collections::{BTreeMap, HashMap, HashSet},
-    mem, slice,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    future::Future,
+    mem,
+    pin::Pin,
+    slice,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
@@ -21,8 +24,12 @@ use crate::{
     observability::{
         book_fact_writer::{
             BookFactWriter, CANONICAL_WRITE_TIMEOUT, MarketWsTradeFact, MicrostructureAccumulator,
+            SessionMicrostructureRow, microstructure_identity_weight, microstructure_row_weight,
         },
-        ledger_persistence::{LEDGER_PARTITION_COUNT, PartitionLedgerClient},
+        ledger_persistence::{
+            LEDGER_PARTITION_COUNT, LedgerPersistenceBudgets, LedgerPersistenceError,
+            PartitionLedgerClient,
+        },
         metrics_hub::MetricsHub,
     },
     service::system_status_nudge::SystemStatusNudge,
@@ -32,7 +39,11 @@ use chrono::{DateTime, Utc};
 use flume::{Receiver, Sender as FlumeSender};
 use parking_lot::Mutex;
 use quant_pivot_api::ws::{NormalizedIngressBatch, TransportRetirement, estimated_event_bytes};
-use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, storage::StorageError};
+use quant_pivot_error::{
+    QuantError, QuantResult,
+    infra::{CanonicalLedgerFailure, InfraError},
+    storage::StorageError,
+};
 use quant_pivot_models::{
     clickhouse::{BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChSchemaVersion},
     domain::{
@@ -50,6 +61,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{ContentHash, PartitionBatchId, PartitionId, Shares, TokenId, TokenKey},
 };
+use quant_pivot_storage::write::{DurableWriteError, DurableWriteReceipt};
 use tokio::{
     sync::{
         Notify, OwnedSemaphorePermit,
@@ -67,7 +79,31 @@ pub const PARTITION_COUNT: usize = LEDGER_PARTITION_COUNT;
 const PARTITION_MAILBOX_CAPACITY: usize = 256;
 const MAX_PARTITION_BATCH_EVENTS: usize = 1_024;
 const MAX_PARTITION_BATCH_BYTES: usize = 1_024 * 1_024;
-const BOOK_CHANNEL_TIMEOUT: Duration = Duration::from_millis(250);
+// A recoverable 12-second derived-fact ACK tail can complete one maximum
+// partition batch per second. Eight actors therefore retain at most 96 MiB of
+// queued rows plus one 1 MiB admitted batch each (104 MiB total), while all
+// canonical processing stays on the existing eight actor tasks.
+const MICROSTRUCTURE_OUTBOX_WINDOWS: usize = 12;
+const MAX_MICROSTRUCTURE_OUTBOX_ROWS: usize =
+    MAX_PARTITION_BATCH_EVENTS * MICROSTRUCTURE_OUTBOX_WINDOWS;
+const MAX_MICROSTRUCTURE_OUTBOX_BYTES: usize =
+    MAX_PARTITION_BATCH_BYTES * MICROSTRUCTURE_OUTBOX_WINDOWS;
+const PARTITION_CONTROL_TIMEOUT: Duration = Duration::from_millis(250);
+const LEDGER_RECONCILIATION_CEILING: Duration = Duration::from_secs(12);
+// The 250ms durable-publication p99 remains a performance gate. Two seconds is
+// the publication-quarantine boundary: once exceeded, the session is poisoned
+// and its projection is never published. The original immutable request may
+// reconcile for at most twelve seconds from submission before the client is
+// permanently fenced against an unknown durable outcome.
+const LEDGER_PERSISTENCE_BUDGETS: LedgerPersistenceBudgets = LedgerPersistenceBudgets::new(
+    PARTITION_CONTROL_TIMEOUT,
+    CANONICAL_WRITE_TIMEOUT,
+    LEDGER_RECONCILIATION_CEILING,
+);
+// A cold-path fence can sit behind final reconciliation of one in-flight
+// ledger commit. Queue admission remains governed by the 250ms control budget.
+const PARTITION_DRAIN_TIMEOUT: Duration =
+    LEDGER_RECONCILIATION_CEILING.saturating_add(PARTITION_CONTROL_TIMEOUT);
 const SHUTDOWN_DRAIN_QUIET_PERIOD: Duration = Duration::from_millis(250);
 const BACKPRESSURE_WARN_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CANONICAL_MICRO_BATCH_SIZE: usize = 256;
@@ -132,6 +168,33 @@ const fn pipeline_event_session(event: &PipelineEvent) -> Option<StreamSessionTi
         | PipelineEvent::StreamGap { session, .. } => Some(*session),
         PipelineEvent::MarketResolved { .. } | PipelineEvent::ShardStatus { .. } => None,
     }
+}
+
+fn microstructure_batch_reservation(
+    events: &[PipelineEvent],
+    market_registry: &MarketRegistry,
+    byte_limit: usize,
+) -> Option<(usize, usize)> {
+    let mut reserved_tokens = HashSet::new();
+    let mut resident_bytes = 0_usize;
+    for event in events {
+        let token = match event {
+            PipelineEvent::BookSnapshot(command) => command.token,
+            PipelineEvent::PriceDelta(command) => command.token,
+            _ => continue,
+        };
+        if !reserved_tokens.insert(token) {
+            continue;
+        }
+        let token_id = market_registry.token_id(token)?;
+        let market_id = market_registry.market_for_key(token);
+        let weight = microstructure_identity_weight(&token_id, market_id.as_ref());
+        if weight > byte_limit {
+            return None;
+        }
+        resident_bytes = resident_bytes.saturating_add(weight);
+    }
+    Some((reserved_tokens.len(), resident_bytes))
 }
 
 fn split_events_by_session(events: Vec<PipelineEvent>) -> Vec<Vec<PipelineEvent>> {
@@ -437,7 +500,7 @@ impl MicrostructureCommitBarrier for DataPipeline {
             response,
         };
         match timeout(
-            BOOK_CHANNEL_TIMEOUT,
+            PARTITION_CONTROL_TIMEOUT,
             self.microstructure_commit_tx.send_async(request),
         )
         .await
@@ -456,9 +519,10 @@ impl MicrostructureCommitBarrier for DataPipeline {
                 .into());
             }
         }
-        let response_timeout = CANONICAL_WRITE_TIMEOUT
-            .saturating_add(BOOK_CHANNEL_TIMEOUT)
-            .saturating_add(BOOK_CHANNEL_TIMEOUT);
+        let response_timeout = LEDGER_RECONCILIATION_CEILING
+            .saturating_add(PARTITION_CONTROL_TIMEOUT)
+            .saturating_add(PARTITION_CONTROL_TIMEOUT)
+            .saturating_add(PARTITION_CONTROL_TIMEOUT);
         match timeout(response_timeout, receive_response).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(InfraError::ChannelClosed {
@@ -532,7 +596,8 @@ impl DataPipeline {
                 sessions: Arc::clone(&self.sessions),
                 durable_publish_observer: self.durable_publish_observer.clone(),
                 books: AHashMap::new(),
-                microstructure_outbox: Vec::new(),
+                microstructure_outbox: MicrostructureOutbox::default(),
+                microstructure_write: MicrostructureWriteState::Idle,
                 delta_command_order: Vec::new(),
                 delta_scratch: BookDeltaScratch::default(),
                 delta_commands: Vec::new(),
@@ -558,6 +623,23 @@ impl DataPipeline {
                         )
                         .await
                         .err();
+                }
+
+                completed = partition_tasks.join_next(), if !partition_tasks.is_empty() => {
+                    let error = match completed {
+                        Some(Ok(Err(error))) => error,
+                        Some(Ok(Ok(()))) | None => InfraError::ChannelClosed {
+                            name: "partition_actor",
+                        }
+                        .into(),
+                        Some(Err(error)) => InfraError::BlockingTaskJoin {
+                            detail: format!("partition actor failed: {error}"),
+                        }
+                        .into(),
+                    };
+                    self.shutdown.cancel();
+                    partition_tasks.abort_all();
+                    break Some(error);
                 }
 
                 retirement = self.retirement_rx.recv_async() => {
@@ -606,6 +688,8 @@ impl DataPipeline {
                         )
                         .await
                     {
+                        self.shutdown.cancel();
+                        partition_tasks.abort_all();
                         break Some(error);
                     }
                 }
@@ -615,15 +699,20 @@ impl DataPipeline {
         drop(partition_senders);
         let mut failure = failure;
         while let Some(result) = partition_tasks.join_next().await {
-            if let Err(error) = result
-                && failure.is_none()
-            {
-                failure = Some(
-                    InfraError::BlockingTaskJoin {
-                        detail: format!("partition actor failed: {error}"),
-                    }
-                    .into(),
-                );
+            if failure.is_some() {
+                continue;
+            }
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failure = Some(error),
+                Err(error) => {
+                    failure = Some(
+                        InfraError::BlockingTaskJoin {
+                            detail: format!("partition actor failed: {error}"),
+                        }
+                        .into(),
+                    );
+                }
             }
         }
         failure.map_or(Ok(()), Err)
@@ -637,31 +726,31 @@ impl DataPipeline {
         let barrier = Arc::new(PartitionCommitBarrier::new(
             u8::try_from(partition_senders.len()).unwrap_or(u8::MAX),
         ));
-        let commit = async {
-            for sender in partition_senders {
-                sender
-                    .send(PartitionMessage::CommitMicrostructure {
-                        source_cutoff_ms,
-                        barrier: Arc::clone(&barrier),
-                    })
-                    .await
-                    .map_err(|_| {
-                        QuantError::from(InfraError::ChannelClosed {
-                            name: "partition_microstructure_commit",
-                        })
-                    })?;
-            }
-            Ok::<bool, QuantError>(barrier.wait().await)
-        };
-        let deadline = CANONICAL_WRITE_TIMEOUT.saturating_add(BOOK_CHANNEL_TIMEOUT);
-        match timeout(deadline, commit).await {
-            Ok(Ok(true)) => Ok(()),
-            Ok(Ok(false)) => Err(StorageError::InvariantViolation {
+        let partitions = array::from_fn(|partition| partition < partition_senders.len());
+        let permits = timeout(
+            PARTITION_CONTROL_TIMEOUT,
+            reserve_partition_controls(&partitions, partition_senders),
+        )
+        .await
+        .map_err(|_| InfraError::ChannelTimeout {
+            name: "partition_microstructure_commit_admission",
+        })?
+        .map_err(|_| InfraError::ChannelClosed {
+            name: "partition_microstructure_commit",
+        })?;
+        for (_, permit) in permits {
+            permit.send(PartitionMessage::CommitMicrostructure {
+                source_cutoff_ms,
+                barrier: Arc::clone(&barrier),
+            });
+        }
+        match timeout(PARTITION_DRAIN_TIMEOUT, barrier.wait()).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(StorageError::InvariantViolation {
                 entity: Some("book_microstructure_1s"),
                 detail: "one or more partitions failed the durable feature-fact commit".to_owned(),
             }
             .into()),
-            Ok(Err(error)) => Err(error),
             Err(_) => Err(InfraError::ChannelTimeout {
                 name: "partition_microstructure_commit",
             }
@@ -864,35 +953,29 @@ impl DataPipeline {
         let barrier = Arc::new(PartitionBarrier::new(
             u8::try_from(partition_count).unwrap_or(u8::MAX),
         ));
-        let retire = async {
-            let mut permits = Vec::with_capacity(partition_count);
-            for (partition, batch) in commands.iter().enumerate() {
-                if batch.is_empty() {
-                    continue;
-                }
-                let permit = partition_senders[partition]
-                    .clone()
-                    .reserve_owned()
-                    .await
-                    .map_err(|_| InfraError::ChannelClosed {
-                        name: "token_retirement_partition",
-                    })?;
-                permits.push((partition, permit));
-            }
-            for (partition, permit) in permits {
-                permit.send(PartitionMessage::Retire {
-                    tokens: mem::take(&mut commands[partition]),
-                    barrier: Arc::clone(&barrier),
-                });
-            }
-            barrier.wait().await;
-            Ok::<(), InfraError>(())
-        };
-        timeout(BOOK_CHANNEL_TIMEOUT, retire)
+        let partitions = array::from_fn(|partition| !commands[partition].is_empty());
+        let permits = timeout(
+            PARTITION_CONTROL_TIMEOUT,
+            reserve_partition_controls(&partitions, partition_senders),
+        )
+        .await
+        .map_err(|_| InfraError::ChannelTimeout {
+            name: "token_retirement_partition",
+        })?
+        .map_err(|_| InfraError::ChannelClosed {
+            name: "token_retirement_partition",
+        })?;
+        for (partition, permit) in permits {
+            permit.send(PartitionMessage::Retire {
+                tokens: mem::take(&mut commands[partition]),
+                barrier: Arc::clone(&barrier),
+            });
+        }
+        timeout(PARTITION_DRAIN_TIMEOUT, barrier.wait())
             .await
             .map_err(|_| InfraError::ChannelTimeout {
                 name: "token_retirement_barrier",
-            })??;
+            })?;
         self.book_store.mark_gap();
         Ok(())
     }
@@ -924,7 +1007,7 @@ impl DataPipeline {
             return Ok(());
         }
         match timeout(
-            BOOK_CHANNEL_TIMEOUT,
+            PARTITION_CONTROL_TIMEOUT,
             reserve_partition_mailboxes(&prepared, partition_senders),
         )
         .await
@@ -985,43 +1068,66 @@ impl DataPipeline {
         let barrier = Arc::new(PartitionBarrier::new(
             u8::try_from(partition_count).unwrap_or(u8::MAX),
         ));
-        let send_and_wait = async {
-            for (partition, included) in partitions.into_iter().enumerate() {
-                if !included {
-                    continue;
+        let permits = match timeout(
+            PARTITION_CONTROL_TIMEOUT,
+            reserve_partition_controls(&partitions, partition_senders),
+        )
+        .await
+        {
+            Ok(Ok(permits)) => permits,
+            Ok(Err(partition)) => {
+                return Err(InfraError::ChannelClosed {
+                    name: if partition < PARTITION_COUNT {
+                        "partition_barrier"
+                    } else {
+                        "partition_actor"
+                    },
                 }
-                partition_senders[partition]
-                    .send(PartitionMessage::Barrier(Arc::clone(&barrier)))
-                    .await
-                    .map_err(|_| partition)?;
+                .into());
             }
-            barrier.wait().await;
-            Ok::<(), usize>(())
-        };
-        match timeout(BOOK_CHANNEL_TIMEOUT, send_and_wait).await {
-            Ok(Ok(())) => Ok(true),
-            Ok(Err(partition)) => Err(InfraError::ChannelClosed {
-                name: if partition < PARTITION_COUNT {
-                    "partition_barrier"
-                } else {
-                    "partition_actor"
-                },
-            }
-            .into()),
             Err(_) => {
                 let partition = partitions
                     .iter()
-                    .position(|included| *included)
-                    .unwrap_or(0);
+                    .enumerate()
+                    .filter(|(_, included)| **included)
+                    .max_by_key(|(partition, _)| {
+                        partition_queue_depth(&partition_senders[*partition])
+                    })
+                    .map_or(0, |(partition, _)| partition);
                 self.handle_book_apply_timeout(
                     partition,
                     "stream_session_closed",
                     partition_queue_depth(&partition_senders[partition]),
                     backpressure_scope,
-                    "session drain barrier timed out",
+                    "session barrier mailbox reservation timed out",
                 );
-                Ok(false)
+                return Ok(false);
             }
+        };
+        for (_, permit) in permits {
+            permit.send(PartitionMessage::Barrier(Arc::clone(&barrier)));
+        }
+        if timeout(PARTITION_DRAIN_TIMEOUT, barrier.wait())
+            .await
+            .is_ok()
+        {
+            Ok(true)
+        } else {
+            let partition = partitions
+                .iter()
+                .position(|included| *included)
+                .unwrap_or(0);
+            self.handle_book_apply_timeout(
+                partition,
+                "stream_session_closed",
+                partition_queue_depth(&partition_senders[partition]),
+                backpressure_scope,
+                "session drain barrier timed out",
+            );
+            Err(InfraError::ChannelTimeout {
+                name: "partition_ledger_reconciliation",
+            }
+            .into())
         }
     }
 
@@ -1087,6 +1193,25 @@ async fn reserve_partition_mailboxes(
             .await
             .map_err(|_| item.partition)?;
         permits.push(permit);
+    }
+    Ok(permits)
+}
+
+async fn reserve_partition_controls(
+    partitions: &[bool; PARTITION_COUNT],
+    partition_senders: &[MpscSender<PartitionMessage>],
+) -> Result<Vec<(usize, MpscOwnedPermit<PartitionMessage>)>, usize> {
+    let mut permits = Vec::with_capacity(partitions.iter().filter(|included| **included).count());
+    for (partition, included) in partitions.iter().enumerate() {
+        if !included {
+            continue;
+        }
+        let permit = partition_senders[partition]
+            .clone()
+            .reserve_owned()
+            .await
+            .map_err(|_| partition)?;
+        permits.push((partition, permit));
     }
     Ok(permits)
 }
@@ -1187,38 +1312,64 @@ mod tests {
         slice,
         sync::{
             Arc,
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
         time::{Duration, Instant},
     };
 
     use ahash::AHashMap;
+    use chrono::Utc;
     use flume::Receiver;
     use quant_pivot_api::ws::NormalizedIngressBatch;
+    use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, storage::StorageError};
     use quant_pivot_models::{
-        domain::data_plane::pipeline::{IngressTrace, PipelineEvent, StreamSessionTicket},
-        enums::system::ShardConnectionStatus,
-        types::{TokenId, TokenKey},
+        clickhouse::{BookL2LedgerRow, BookMicrostructureRow},
+        domain::data_plane::pipeline::{
+            BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent, PriceDeltaCmd,
+            StreamSessionTicket,
+        },
+        enums::{clickhouse::ChBookEventType, system::ShardConnectionStatus},
+        types::{PartitionId, TokenId, TokenKey},
+    };
+    use quant_pivot_repository::traits::FactWriter;
+    use quant_pivot_storage::write::{
+        AsyncWriterObservability, DurableWriter, DurableWriterConfig,
     };
     use tokio::{
-        sync::{Semaphore, mpsc},
-        time::timeout,
+        sync::{
+            Notify, Semaphore,
+            mpsc::{self, Sender as MpscSender},
+        },
+        task::JoinHandle,
+        time::{sleep, timeout},
     };
+    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     use super::{
-        BackpressureScope, MAX_PARTITION_BATCH_BYTES, MAX_PARTITION_BATCH_EVENTS, MutableBookState,
-        PARTITION_COUNT, PARTITION_MAILBOX_CAPACITY, PartitionBarrier, PartitionCommitBarrier,
-        PartitionIngressBatch, PartitionMessage, PreparedPartitionBatch, RetireToken,
-        TokenStreamState, accept_token_sequence, partition_batch_would_overflow, partition_index,
-        reserve_partition_mailboxes, split_events_by_session, take_retired_mutable_book,
+        BackpressureScope, MAX_MICROSTRUCTURE_OUTBOX_BYTES, MAX_MICROSTRUCTURE_OUTBOX_ROWS,
+        MAX_PARTITION_BATCH_BYTES, MAX_PARTITION_BATCH_EVENTS, MicrostructureOutbox,
+        MicrostructureWriteState, MutableBookState, PARTITION_CONTROL_TIMEOUT, PARTITION_COUNT,
+        PARTITION_DRAIN_TIMEOUT, PARTITION_MAILBOX_CAPACITY, PartitionActor, PartitionBarrier,
+        PartitionCommitBarrier, PartitionIngressBatch, PartitionMessage, PreparedPartitionBatch,
+        RetireToken, SessionMicrostructureRow, TokenStreamState, accept_token_sequence,
+        microstructure_batch_reservation, partition_batch_would_overflow, partition_index,
+        reserve_partition_controls, reserve_partition_mailboxes, split_events_by_session,
+        take_retired_mutable_book,
     };
     use crate::{
         ingest::{
-            book_store::BookStore, data_plane_index::DataPlane, event_source::PipelineEventSource,
+            book_store::BookStore,
+            data_plane_index::{DataPlane, TokenSlotState},
+            event_source::PipelineEventSource,
             market_registry::MarketRegistry,
+            order_book::BookDeltaScratch,
+            session_directory::SessionDirectory,
         },
-        observability::metrics_hub::MetricsHub,
+        observability::{
+            book_fact_writer::BookFactWriter, ledger_persistence::LedgerPersistenceCoordinator,
+            metrics_hub::MetricsHub,
+        },
     };
 
     struct RecordingEventSource {
@@ -1251,6 +1402,348 @@ mod tests {
 
         fn invalidate_tokens(&self, _token_ids: &[TokenId]) {
             self.restarts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    struct ImmediateLedgerSink;
+
+    #[async_trait::async_trait]
+    impl FactWriter<BookL2LedgerRow> for ImmediateLedgerSink {
+        async fn write_batch(&self, _rows: Vec<BookL2LedgerRow>) -> Result<(), StorageError> {
+            Ok(())
+        }
+    }
+
+    fn micro_row(token_id: &TokenId, session: StreamSessionTicket) -> BookMicrostructureRow {
+        let mut state = MutableBookState::new(token_id.clone(), 0);
+        let snapshot = state.next_snapshot();
+        assert!(
+            state
+                .microstructure
+                .observe(
+                    token_id,
+                    None,
+                    &snapshot,
+                    session,
+                    ChBookEventType::Snapshot,
+                    0,
+                )
+                .is_none()
+        );
+        state
+            .microstructure
+            .flush()
+            .expect("seeded microstructure row")
+            .row
+    }
+
+    fn snapshot_event(
+        token: TokenKey,
+        session: StreamSessionTicket,
+        token_sequence: u64,
+    ) -> PipelineEvent {
+        let timestamp_ms = Utc::now().timestamp_millis();
+        PipelineEvent::BookSnapshot(BookSnapshotCmd {
+            token,
+            bids: BookSideData::empty(),
+            asks: BookSideData::empty(),
+            timestamp_ms: u64::try_from(timestamp_ms).unwrap_or(u64::MAX),
+            trace: IngressTrace {
+                mono: Instant::now(),
+                ingress_time_ms: timestamp_ms,
+                ws_timestamp_ms: u64::try_from(timestamp_ms).unwrap_or(u64::MAX),
+                session,
+                shard_id: 2,
+                token_sequence,
+            },
+        })
+    }
+
+    fn delta_event(
+        token: TokenKey,
+        session: StreamSessionTicket,
+        token_sequence: u64,
+    ) -> PipelineEvent {
+        let timestamp_ms = Utc::now().timestamp_millis();
+        PipelineEvent::PriceDelta(PriceDeltaCmd {
+            token,
+            changes: Arc::from([]),
+            timestamp_ms: u64::try_from(timestamp_ms).unwrap_or(u64::MAX),
+            trace: IngressTrace {
+                mono: Instant::now(),
+                ingress_time_ms: timestamp_ms,
+                ws_timestamp_ms: u64::try_from(timestamp_ms).unwrap_or(u64::MAX),
+                session,
+                shard_id: 2,
+                token_sequence,
+            },
+        })
+    }
+
+    struct MicroSinkControl {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+        released: Arc<AtomicBool>,
+    }
+
+    impl MicroSinkControl {
+        async fn wait_entered(&self) {
+            timeout(Duration::from_secs(2), self.entered.notified())
+                .await
+                .expect("microstructure sink entered");
+        }
+
+        fn release(&self) {
+            self.released.store(true, Ordering::Release);
+            self.release.notify_waiters();
+        }
+    }
+
+    struct MicroActorHarness {
+        sender: Option<MpscSender<PartitionMessage>>,
+        book_store: Arc<BookStore>,
+        source: Arc<RecordingEventSource>,
+        sessions: Arc<SessionDirectory>,
+        token_ids: Vec<TokenId>,
+        initial_session: StreamSessionTicket,
+        token_two: TokenKey,
+        token_ten: TokenKey,
+        control: MicroSinkControl,
+        published: Arc<AtomicU64>,
+        published_notify: Arc<Notify>,
+        actor_task: JoinHandle<QuantResult<()>>,
+        shutdowns: [CancellationToken; 3],
+        writer_tasks: [JoinHandle<()>; 3],
+    }
+
+    impl MicroActorHarness {
+        fn open_session(&self, epoch: u64) -> StreamSessionTicket {
+            let session = StreamSessionTicket::new(Uuid::new_v4(), epoch)
+                .expect("valid microstructure test session");
+            assert!(
+                self.sessions
+                    .open(session, Arc::from(self.token_ids.clone()))
+            );
+            session
+        }
+
+        async fn send(&self, event: PipelineEvent) {
+            let memory_permit = Arc::new(
+                Arc::new(Semaphore::new(1))
+                    .acquire_owned()
+                    .await
+                    .expect("partition memory permit"),
+            );
+            self.sender
+                .as_ref()
+                .expect("actor input remains open")
+                .send(PartitionMessage::Events(PartitionIngressBatch {
+                    events: vec![event],
+                    memory_permit,
+                }))
+                .await
+                .expect("send same-partition event");
+        }
+
+        async fn wait_published(&self, count: u64, deadline: Duration) -> bool {
+            let started = Instant::now();
+            loop {
+                let notified = self.published_notify.notified();
+                if self.published.load(Ordering::Acquire) >= count {
+                    return true;
+                }
+                let remaining = deadline.saturating_sub(started.elapsed());
+                if remaining.is_zero() || timeout(remaining, notified).await.is_err() {
+                    return false;
+                }
+            }
+        }
+
+        async fn wait_gap(&self) {
+            timeout(Duration::from_secs(2), async {
+                while self.book_store.gap_generation() == 0 {
+                    self.book_store.wait_for_update().await;
+                }
+            })
+            .await
+            .expect("microstructure failure invalidated continuity");
+        }
+
+        async fn wait_restarts(&self, count: u64) {
+            timeout(Duration::from_secs(2), async {
+                while self.source.restarts.load(Ordering::Acquire) < count {
+                    self.book_store.wait_for_update().await;
+                }
+            })
+            .await
+            .expect("microstructure failure restarted its source");
+        }
+
+        fn close_input(&mut self) {
+            self.sender = None;
+        }
+
+        async fn finish(&mut self) -> QuantResult<()> {
+            self.close_input();
+            self.control.release();
+            let actor_result = timeout(Duration::from_secs(2), &mut self.actor_task)
+                .await
+                .expect("partition actor drain")
+                .expect("partition actor task");
+            for shutdown in &self.shutdowns {
+                shutdown.cancel();
+            }
+            for task in &mut self.writer_tasks {
+                task.await.expect("fact writer shutdown");
+            }
+            actor_result
+        }
+    }
+
+    fn start_micro_actor(fail_microstructure: bool) -> MicroActorHarness {
+        let token_ids = (0..=10)
+            .map(|index| TokenId::new(index.to_string()))
+            .collect::<Vec<_>>();
+        let data_plane = Arc::new(DataPlane::new());
+        data_plane.register_test_tokens(&token_ids);
+        let metrics = Arc::new(MetricsHub::new());
+        let book_store = Arc::new(BookStore::new(
+            Arc::clone(&data_plane),
+            Arc::clone(&metrics),
+        ));
+        let registry = Arc::new(MarketRegistry::new(data_plane));
+        let sessions = book_store.session_directory();
+        let session =
+            StreamSessionTicket::new(Uuid::new_v4(), 1).expect("valid microstructure test session");
+        assert!(sessions.open(session, Arc::from(token_ids.clone())));
+
+        let (ledger, coordinator) = LedgerPersistenceCoordinator::new(
+            Arc::new(ImmediateLedgerSink),
+            AsyncWriterObservability::default(),
+        );
+        let ledger_shutdown = CancellationToken::new();
+        let ledger_task = tokio::spawn(coordinator.run(ledger_shutdown.clone()));
+        let (session_writer, session_worker) = DurableWriter::new(
+            DurableWriterConfig::new("partition-session-test"),
+            |_rows| Box::pin(async { Ok(()) }),
+            AsyncWriterObservability::default(),
+        );
+        let session_shutdown = CancellationToken::new();
+        let session_task = tokio::spawn(session_worker.run(session_shutdown.clone()));
+        let control = MicroSinkControl {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            released: Arc::new(AtomicBool::new(false)),
+        };
+        let entered = Arc::clone(&control.entered);
+        let release = Arc::clone(&control.release);
+        let released = Arc::clone(&control.released);
+        let fail_next = Arc::new(AtomicBool::new(fail_microstructure));
+        let fail = Arc::clone(&fail_next);
+        let (micro_writer, micro_worker) = DurableWriter::new(
+            DurableWriterConfig::new("partition-micro-test")
+                .capacity(16)
+                .max_batch_size(16)
+                .max_batch_delay(Duration::from_millis(1)),
+            move |_rows| {
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                let released = Arc::clone(&released);
+                let fail = Arc::clone(&fail);
+                Box::pin(async move {
+                    entered.notify_one();
+                    while !released.load(Ordering::Acquire) {
+                        release.notified().await;
+                    }
+                    if fail.swap(false, Ordering::AcqRel) {
+                        Err(StorageError::Connection(
+                            "injected microstructure failure".to_owned(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                })
+            },
+            AsyncWriterObservability::default(),
+        );
+        let micro_shutdown = CancellationToken::new();
+        let micro_task = tokio::spawn(micro_worker.run(micro_shutdown.clone()));
+        let fact_writer = Arc::new(BookFactWriter::new(
+            ledger.clone(),
+            Arc::new(session_writer),
+            Arc::new(micro_writer),
+        ));
+        let token_two = registry
+            .data_plane()
+            .token_key(&token_ids[2])
+            .expect("token two key");
+        let token_ten = registry
+            .data_plane()
+            .token_key(&token_ids[10])
+            .expect("token ten key");
+        assert_eq!(token_two.index() % PARTITION_COUNT, 2);
+        assert_eq!(token_ten.index() % PARTITION_COUNT, 2);
+        let source = Arc::new(RecordingEventSource::default());
+        let event_source = Arc::clone(&source);
+        let event_source: Arc<dyn PipelineEventSource> = event_source;
+        let published = Arc::new(AtomicU64::new(0));
+        let published_notify = Arc::new(Notify::new());
+        let observed_count = Arc::clone(&published);
+        let observed_notify = Arc::clone(&published_notify);
+        let mut microstructure_outbox = MicrostructureOutbox::default();
+        assert!(
+            microstructure_outbox
+                .push(
+                    token_two,
+                    SessionMicrostructureRow {
+                        row: micro_row(&token_ids[2], session),
+                        session,
+                    }
+                )
+                .is_ok()
+        );
+        let actor = PartitionActor {
+            partition_id: PartitionId::new(2),
+            book_store: Arc::clone(&book_store),
+            market_registry: registry,
+            metrics,
+            event_source,
+            book_fact_writer: fact_writer,
+            ledger: ledger
+                .partition(PartitionId::new(2))
+                .expect("partition ledger"),
+            next_batch_id: 0,
+            stream_state: HashMap::new(),
+            sessions: Arc::clone(&sessions),
+            durable_publish_observer: Some(Arc::new(move |_sample| {
+                observed_count.fetch_add(1, Ordering::AcqRel);
+                observed_notify.notify_one();
+            })),
+            books: AHashMap::new(),
+            microstructure_outbox,
+            microstructure_write: MicrostructureWriteState::Idle,
+            delta_command_order: Vec::new(),
+            delta_scratch: BookDeltaScratch::default(),
+            delta_commands: Vec::new(),
+        };
+        let (sender, receiver) = mpsc::channel(PARTITION_MAILBOX_CAPACITY);
+        let (recycle_tx, _recycle_rx) = flume::bounded(1);
+        let actor_task = tokio::spawn(actor.run(receiver, recycle_tx));
+        MicroActorHarness {
+            sender: Some(sender),
+            book_store,
+            source,
+            sessions,
+            token_ids,
+            initial_session: session,
+            token_two,
+            token_ten,
+            control,
+            published,
+            published_notify,
+            actor_task,
+            shutdowns: [micro_shutdown, session_shutdown, ledger_shutdown],
+            writer_tasks: [micro_task, session_task, ledger_task],
         }
     }
 
@@ -1432,6 +1925,87 @@ mod tests {
         waiter.await.expect("barrier waiter");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn drain_budget_covers_barrier() {
+        let delay = Duration::from_millis(300);
+        assert!(delay > PARTITION_CONTROL_TIMEOUT);
+        assert!(delay < PARTITION_DRAIN_TIMEOUT);
+        let (sender, mut receiver) = mpsc::channel(1);
+        let mut partitions = [false; PARTITION_COUNT];
+        partitions[0] = true;
+        let barrier = Arc::new(PartitionBarrier::new(1));
+        let worker = tokio::spawn(async move {
+            sleep(delay).await;
+            let barrier = match receiver.recv().await {
+                Some(PartitionMessage::Barrier(barrier)) => barrier,
+                Some(_) => panic!("partition received the wrong control message"),
+                None => panic!("partition control channel closed"),
+            };
+            barrier.arrive();
+        });
+        let permits = timeout(
+            PARTITION_CONTROL_TIMEOUT,
+            reserve_partition_controls(&partitions, slice::from_ref(&sender)),
+        )
+        .await
+        .expect("control reservation deadline")
+        .expect("control reservation");
+        drop(sender);
+        for (_, permit) in permits {
+            permit.send(PartitionMessage::Barrier(Arc::clone(&barrier)));
+        }
+
+        assert!(
+            timeout(PARTITION_DRAIN_TIMEOUT, barrier.wait())
+                .await
+                .is_ok()
+        );
+        worker.await.expect("partition worker");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn control_admission_is_atomic() {
+        let (first_tx, mut first_rx) = mpsc::channel(1);
+        let (second_tx, _second_rx) = mpsc::channel(1);
+        second_tx
+            .send(PartitionMessage::Barrier(Arc::new(PartitionBarrier::new(
+                1,
+            ))))
+            .await
+            .expect("fill second control mailbox");
+        let mut partitions = [false; PARTITION_COUNT];
+        partitions[0] = true;
+        partitions[1] = true;
+
+        assert!(
+            timeout(
+                PARTITION_CONTROL_TIMEOUT,
+                reserve_partition_controls(&partitions, &[first_tx.clone(), second_tx]),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(first_tx.capacity(), 1);
+        assert!(first_rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_timeout_fails_closed() {
+        let barrier = Arc::new(PartitionBarrier::new(1));
+        let delayed = Arc::clone(&barrier);
+        let worker = tokio::spawn(async move {
+            sleep(PARTITION_DRAIN_TIMEOUT + Duration::from_millis(1)).await;
+            delayed.arrive();
+        });
+
+        assert!(
+            timeout(PARTITION_DRAIN_TIMEOUT, barrier.wait())
+                .await
+                .is_err()
+        );
+        worker.await.expect("delayed partition worker");
+    }
+
     #[tokio::test]
     async fn commit_barrier_reports_failure() {
         let barrier = Arc::new(PartitionCommitBarrier::new(2));
@@ -1443,6 +2017,326 @@ mod tests {
         assert!(!waiter.is_finished());
         barrier.arrive(false);
         assert!(!waiter.await.expect("commit barrier waiter"));
+    }
+
+    #[tokio::test]
+    async fn actor_keeps_canonical_live() {
+        let mut harness = start_micro_actor(false);
+        harness.control.wait_entered().await;
+        harness
+            .send(snapshot_event(
+                harness.token_ten,
+                harness.open_session(2),
+                1,
+            ))
+            .await;
+        let remained_live = harness.wait_published(1, PARTITION_CONTROL_TIMEOUT).await;
+        harness.control.release();
+        let result = harness.finish().await;
+        drop(harness);
+        result.expect("partition actor result");
+        assert!(
+            remained_live,
+            "derived microstructure ACK blocked canonical same-partition publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_derived_receipt() {
+        let mut harness = start_micro_actor(false);
+        harness.control.wait_entered().await;
+        harness.close_input();
+        assert!(
+            timeout(PARTITION_CONTROL_TIMEOUT, &mut harness.actor_task)
+                .await
+                .is_err(),
+            "partition shutdown crossed an unacknowledged derived write"
+        );
+        harness.control.release();
+        let result = harness.finish().await;
+        drop(harness);
+        result.expect("drained partition actor");
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_derived_failure() {
+        let mut harness = start_micro_actor(true);
+        harness.control.wait_entered().await;
+        harness.close_input();
+        harness.control.release();
+        let result = harness.finish().await;
+        drop(harness);
+        assert!(matches!(
+            result,
+            Err(QuantError::Infra(InfraError::DerivedFactPersistence {
+                partition: 2
+            }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn old_failure_spares_successor() {
+        let mut harness = start_micro_actor(true);
+        harness.control.wait_entered().await;
+        let successor = harness.open_session(2);
+        harness
+            .send(snapshot_event(harness.token_two, successor, 1))
+            .await;
+        assert!(harness.wait_published(1, PARTITION_CONTROL_TIMEOUT).await);
+        harness.control.release();
+        harness.wait_gap().await;
+
+        let freshness = harness
+            .book_store
+            .freshness(harness.token_two)
+            .expect("successor token freshness");
+        assert_eq!(freshness.state, TokenSlotState::Fresh);
+        assert_eq!(freshness.session_generation, successor.epoch);
+        assert_eq!(harness.source.restarts.load(Ordering::Acquire), 0);
+        assert!(
+            harness
+                .book_store
+                .load_fresh_owned(harness.token_two)
+                .is_ok()
+        );
+
+        harness
+            .send(snapshot_event(harness.token_two, successor, 2))
+            .await;
+        assert!(harness.wait_published(2, PARTITION_CONTROL_TIMEOUT).await);
+        assert!(
+            harness
+                .book_store
+                .load_fresh_owned(harness.token_two)
+                .is_ok()
+        );
+        assert_eq!(harness.source.restarts.load(Ordering::Acquire), 0);
+        let result = harness.finish().await;
+        drop(harness);
+        result.expect("recovered partition actor");
+    }
+
+    #[tokio::test]
+    async fn current_failure_rejects_delta() {
+        let mut harness = start_micro_actor(true);
+        harness.control.wait_entered().await;
+        let current = harness.initial_session;
+        harness
+            .send(snapshot_event(harness.token_two, current, 1))
+            .await;
+        assert!(harness.wait_published(1, PARTITION_CONTROL_TIMEOUT).await);
+        harness.control.release();
+        harness.wait_restarts(1).await;
+        let version = harness.book_store.last_known_version(harness.token_two);
+        assert_eq!(
+            harness
+                .book_store
+                .freshness(harness.token_two)
+                .expect("failed token freshness")
+                .state,
+            TokenSlotState::Invalid
+        );
+
+        harness
+            .send(delta_event(harness.token_two, current, 2))
+            .await;
+        harness.wait_restarts(2).await;
+        assert_eq!(
+            harness.book_store.last_known_version(harness.token_two),
+            version,
+            "delta advanced a token after its derived fact failed"
+        );
+        let result = harness.finish().await;
+        drop(harness);
+        result.expect("invalidated partition actor");
+    }
+
+    #[tokio::test]
+    async fn commit_waits_derived_receipt() {
+        let mut harness = start_micro_actor(false);
+        harness.control.wait_entered().await;
+        let barrier = Arc::new(PartitionCommitBarrier::new(1));
+        harness
+            .sender
+            .as_ref()
+            .expect("actor input remains open")
+            .send(PartitionMessage::CommitMicrostructure {
+                source_cutoff_ms: Utc::now().timestamp_millis(),
+                barrier: Arc::clone(&barrier),
+            })
+            .await
+            .expect("send microstructure commit");
+        assert!(
+            timeout(PARTITION_CONTROL_TIMEOUT, barrier.wait())
+                .await
+                .is_err(),
+            "commit barrier crossed an unacknowledged derived write"
+        );
+        harness.control.release();
+        assert!(
+            timeout(Duration::from_secs(2), barrier.wait())
+                .await
+                .expect("commit barrier completion")
+        );
+        harness.close_input();
+        let result = harness.finish().await;
+        drop(harness);
+        result.expect("committed partition actor");
+    }
+
+    #[tokio::test]
+    async fn commit_reports_derived_failure() {
+        let mut harness = start_micro_actor(true);
+        harness.control.wait_entered().await;
+        harness
+            .send(snapshot_event(
+                harness.token_two,
+                harness.initial_session,
+                1,
+            ))
+            .await;
+        assert!(harness.wait_published(1, PARTITION_CONTROL_TIMEOUT).await);
+        let barrier = Arc::new(PartitionCommitBarrier::new(1));
+        harness
+            .sender
+            .as_ref()
+            .expect("actor input remains open")
+            .send(PartitionMessage::CommitMicrostructure {
+                source_cutoff_ms: Utc::now().timestamp_millis(),
+                barrier: Arc::clone(&barrier),
+            })
+            .await
+            .expect("send failing microstructure commit");
+        assert!(
+            timeout(PARTITION_CONTROL_TIMEOUT, barrier.wait())
+                .await
+                .is_err()
+        );
+        harness.control.release();
+        assert!(
+            !timeout(Duration::from_secs(2), barrier.wait())
+                .await
+                .expect("failed commit barrier completion")
+        );
+        harness.wait_restarts(1).await;
+        let result = harness.finish().await;
+        drop(harness);
+        result.expect("recovered partition actor");
+    }
+
+    #[tokio::test]
+    async fn retire_preserves_retired_state() {
+        let mut harness = start_micro_actor(true);
+        harness.control.wait_entered().await;
+        harness
+            .send(snapshot_event(
+                harness.token_two,
+                harness.initial_session,
+                1,
+            ))
+            .await;
+        assert!(harness.wait_published(1, PARTITION_CONTROL_TIMEOUT).await);
+        let barrier = Arc::new(PartitionBarrier::new(1));
+        harness
+            .sender
+            .as_ref()
+            .expect("actor input remains open")
+            .send(PartitionMessage::Retire {
+                tokens: vec![RetireToken {
+                    token: harness.token_two,
+                    through_epoch: harness.initial_session.epoch,
+                }],
+                barrier: Arc::clone(&barrier),
+            })
+            .await
+            .expect("send token retirement");
+        assert!(
+            timeout(PARTITION_CONTROL_TIMEOUT, barrier.wait())
+                .await
+                .is_err()
+        );
+        harness.control.release();
+        timeout(Duration::from_secs(2), barrier.wait())
+            .await
+            .expect("retirement barrier completion");
+        assert_eq!(
+            harness
+                .book_store
+                .freshness(harness.token_two)
+                .expect("retired token freshness")
+                .state,
+            TokenSlotState::Retired
+        );
+        assert_eq!(harness.source.restarts.load(Ordering::Acquire), 0);
+        let result = harness.finish().await;
+        drop(harness);
+        result.expect("retired partition actor");
+    }
+
+    #[test]
+    fn outbox_enforces_dual_budget() {
+        let outbox = MicrostructureOutbox::default();
+        assert!(outbox.can_reserve(
+            MAX_MICROSTRUCTURE_OUTBOX_ROWS,
+            MAX_MICROSTRUCTURE_OUTBOX_BYTES
+        ));
+        assert!(!outbox.can_reserve(MAX_MICROSTRUCTURE_OUTBOX_ROWS + 1, 0));
+        assert!(!outbox.can_reserve(0, MAX_MICROSTRUCTURE_OUTBOX_BYTES + 1));
+
+        let session =
+            StreamSessionTicket::new(Uuid::new_v4(), 1).expect("valid oversized row session");
+        let oversized = TokenId::new("1".repeat(MAX_PARTITION_BATCH_BYTES));
+        let mut outbox = MicrostructureOutbox::default();
+        assert!(
+            outbox
+                .push(
+                    TokenKey::new(0),
+                    SessionMicrostructureRow {
+                        row: micro_row(&oversized, session),
+                        session,
+                    }
+                )
+                .is_err()
+        );
+        assert!(outbox.rows.is_empty());
+    }
+
+    #[test]
+    fn capacity_counts_unique_tokens() {
+        let token_ids = [TokenId::new("1"), TokenId::new("2")];
+        let data_plane = Arc::new(DataPlane::new());
+        data_plane.register_test_tokens(&token_ids);
+        let registry = MarketRegistry::new(data_plane);
+        let session =
+            StreamSessionTicket::new(Uuid::new_v4(), 1).expect("valid reservation session");
+        let first = registry
+            .data_plane()
+            .token_key(&token_ids[0])
+            .expect("first reservation token");
+        let second = registry
+            .data_plane()
+            .token_key(&token_ids[1])
+            .expect("second reservation token");
+        let repeated = vec![
+            snapshot_event(first, session, 1),
+            delta_event(first, session, 2),
+            delta_event(first, session, 3),
+        ];
+        let distinct = vec![
+            snapshot_event(first, session, 1),
+            snapshot_event(second, session, 1),
+        ];
+
+        assert_eq!(
+            microstructure_batch_reservation(&repeated, &registry, MAX_PARTITION_BATCH_BYTES)
+                .map(|reservation| reservation.0),
+            Some(1)
+        );
+        assert_eq!(
+            microstructure_batch_reservation(&distinct, &registry, MAX_PARTITION_BATCH_BYTES)
+                .map(|reservation| reservation.0),
+            Some(2)
+        );
     }
 
     #[tokio::test]
@@ -1545,6 +2439,143 @@ mod tests {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct MicrostructureSource {
+    token: TokenKey,
+    session: StreamSessionTicket,
+}
+
+struct QueuedMicrostructureRow {
+    row: BookMicrostructureRow,
+    source: MicrostructureSource,
+    weight: usize,
+}
+
+#[derive(Default)]
+struct MicrostructureOutbox {
+    rows: VecDeque<QueuedMicrostructureRow>,
+    resident_bytes: usize,
+}
+
+impl MicrostructureOutbox {
+    fn can_reserve(&self, rows: usize, bytes: usize) -> bool {
+        self.rows.len().saturating_add(rows) <= MAX_MICROSTRUCTURE_OUTBOX_ROWS
+            && self.resident_bytes.saturating_add(bytes) <= MAX_MICROSTRUCTURE_OUTBOX_BYTES
+    }
+
+    fn push(
+        &mut self,
+        token: TokenKey,
+        completed: SessionMicrostructureRow,
+    ) -> Result<(), MicrostructureSource> {
+        let source = MicrostructureSource {
+            token,
+            session: completed.session,
+        };
+        let weight = microstructure_row_weight(&completed.row);
+        if weight > MAX_PARTITION_BATCH_BYTES || !self.can_reserve(1, weight) {
+            return Err(source);
+        }
+        self.rows.push_back(QueuedMicrostructureRow {
+            row: completed.row,
+            source,
+            weight,
+        });
+        self.resident_bytes = self.resident_bytes.saturating_add(weight);
+        Ok(())
+    }
+
+    fn take_batch(
+        &mut self,
+        row_limit: usize,
+        byte_limit: usize,
+    ) -> Result<Vec<QueuedMicrostructureRow>, MicrostructureSource> {
+        let Some(front) = self.rows.front() else {
+            return Ok(Vec::new());
+        };
+        if front.weight > byte_limit {
+            let source = front.source;
+            let Some(oversized) = self.rows.pop_front() else {
+                return Err(source);
+            };
+            self.resident_bytes = self.resident_bytes.saturating_sub(oversized.weight);
+            return Err(oversized.source);
+        }
+        let mut batch = Vec::with_capacity(row_limit.min(self.rows.len()));
+        let mut batch_bytes = 0_usize;
+        while batch.len() < row_limit {
+            let Some(next) = self.rows.front() else {
+                break;
+            };
+            if batch_bytes.saturating_add(next.weight) > byte_limit {
+                break;
+            }
+            let Some(next) = self.rows.pop_front() else {
+                break;
+            };
+            batch_bytes = batch_bytes.saturating_add(next.weight);
+            self.resident_bytes = self.resident_bytes.saturating_sub(next.weight);
+            batch.push(next);
+        }
+        Ok(batch)
+    }
+
+    fn remove_sources(&mut self, sources: &HashSet<MicrostructureSource>) {
+        self.rows.retain(|queued| !sources.contains(&queued.source));
+        self.resident_bytes = self
+            .rows
+            .iter()
+            .map(|queued| queued.weight)
+            .fold(0_usize, usize::saturating_add);
+    }
+
+    fn remove_sessions(&mut self, sessions: &HashSet<StreamSessionTicket>) {
+        self.rows
+            .retain(|queued| !sessions.contains(&queued.source.session));
+        self.resident_bytes = self
+            .rows
+            .iter()
+            .map(|queued| queued.weight)
+            .fold(0_usize, usize::saturating_add);
+    }
+
+    fn take_sources(&mut self) -> Vec<MicrostructureSource> {
+        let sources = self.rows.drain(..).map(|queued| queued.source).collect();
+        self.resident_bytes = 0;
+        sources
+    }
+}
+
+type MicrostructureAdmission =
+    Pin<Box<dyn Future<Output = Result<DurableWriteReceipt, DurableWriteError>> + Send + 'static>>;
+
+enum MicrostructureWriteState {
+    Idle,
+    Admitting {
+        future: MicrostructureAdmission,
+        affected: Vec<MicrostructureSource>,
+        row_count: usize,
+        resident_bytes: usize,
+    },
+    Acknowledging {
+        receipt: DurableWriteReceipt,
+        affected: Vec<MicrostructureSource>,
+        row_count: usize,
+        resident_bytes: usize,
+    },
+}
+
+enum MicrostructureTransition {
+    Admitted(Result<DurableWriteReceipt, DurableWriteError>),
+    Acknowledged(Result<(), DurableWriteError>),
+}
+
+impl MicrostructureWriteState {
+    const fn is_idle(&self) -> bool {
+        matches!(self, Self::Idle)
+    }
+}
+
 struct PartitionActor {
     partition_id: PartitionId,
     book_store: Arc<BookStore>,
@@ -1558,7 +2589,8 @@ struct PartitionActor {
     sessions: Arc<SessionDirectory>,
     durable_publish_observer: Option<DurableBookPublishObserver>,
     books: AHashMap<TokenKey, MutableBookState>,
-    microstructure_outbox: Vec<BookMicrostructureRow>,
+    microstructure_outbox: MicrostructureOutbox,
+    microstructure_write: MicrostructureWriteState,
     delta_command_order: Vec<usize>,
     delta_scratch: BookDeltaScratch,
     delta_commands: Vec<PriceDeltaCmd>,
@@ -1618,19 +2650,55 @@ struct SessionClose {
 }
 
 impl PartitionActor {
+    fn ledger_fail_stop(&self, error: LedgerPersistenceError) -> Option<QuantError> {
+        debug_assert!(!error.requires_fail_stop() || error.batch_id().is_some());
+        let (batch_id, failure) = match error {
+            LedgerPersistenceError::QueueClosed { batch_id } => {
+                (batch_id, CanonicalLedgerFailure::QueueClosed)
+            }
+            LedgerPersistenceError::CommitCursorClosed { batch_id } => {
+                (batch_id, CanonicalLedgerFailure::CursorClosed)
+            }
+            LedgerPersistenceError::ReconciliationTimeout { batch_id } => {
+                (batch_id, CanonicalLedgerFailure::ReconciliationTimeout)
+            }
+            LedgerPersistenceError::ClientFenced { batch_id } => {
+                (batch_id, CanonicalLedgerFailure::ClientFenced)
+            }
+            LedgerPersistenceError::QueueTimeout
+            | LedgerPersistenceError::PublicationQuarantined { .. }
+            | LedgerPersistenceError::CommitFailed { .. } => return None,
+        };
+        Some(
+            InfraError::CanonicalLedger {
+                partition: self.partition_id.get(),
+                batch_id: batch_id.get(),
+                failure,
+            }
+            .into(),
+        )
+    }
+
     async fn run(
         mut self,
         mut rx: MpscReceiver<PartitionMessage>,
         recycle_tx: FlumeSender<Vec<PipelineEvent>>,
-    ) {
+    ) -> QuantResult<()> {
         let mut telemetry_flush = interval(Duration::from_secs(1));
         telemetry_flush.set_missed_tick_behavior(MissedTickBehavior::Skip);
         telemetry_flush.tick().await;
         loop {
+            let persistence_active = !self.microstructure_write.is_idle();
             let Some(message) = (tokio::select! {
+                biased;
+                _ = self.progress_microstructure(), if persistence_active => {
+                    self.start_microstructure();
+                    continue;
+                }
                 message = rx.recv() => message,
                 _ = telemetry_flush.tick() => {
-                    self.flush_elapsed_microstructure().await;
+                    self.flush_elapsed_microstructure();
+                    self.start_microstructure();
                     continue;
                 }
             }) else {
@@ -1642,6 +2710,19 @@ impl PartitionActor {
                     memory_permit,
                 }) => (events, memory_permit),
                 PartitionMessage::Barrier(barrier) => {
+                    if let Err(error) = self.ledger.reconcile_outstanding().await {
+                        tracing::error!(
+                            ?error,
+                            partition = self.partition_id.get(),
+                            "canonical ledger reconciliation failed"
+                        );
+                        let fatal = self.ledger_fail_stop(error);
+                        barrier.arrive();
+                        if let Some(error) = fatal {
+                            return Err(error);
+                        }
+                        continue;
+                    }
                     barrier.arrive();
                     continue;
                 }
@@ -1654,7 +2735,7 @@ impl PartitionActor {
                     continue;
                 }
                 PartitionMessage::Retire { tokens, barrier } => {
-                    self.retire_tokens(&tokens).await;
+                    let _ = self.retire_tokens(&tokens).await;
                     barrier.arrive();
                     continue;
                 }
@@ -1671,44 +2752,83 @@ impl PartitionActor {
                 if canonical_identity(&event).is_some() {
                     canonical.push(event);
                     if canonical.len() == MAX_CANONICAL_MICRO_BATCH_SIZE {
-                        self.handle_canonical_batch(mem::take(&mut canonical)).await;
+                        self.handle_canonical_batch(mem::take(&mut canonical))
+                            .await?;
                     }
                     continue;
                 }
                 if !canonical.is_empty() {
-                    self.handle_canonical_batch(mem::take(&mut canonical)).await;
+                    self.handle_canonical_batch(mem::take(&mut canonical))
+                        .await?;
                 }
-                self.handle_event(event).await;
+                self.handle_event(event).await?;
             }
             if !canonical.is_empty() {
-                self.handle_canonical_batch(canonical).await;
+                self.handle_canonical_batch(canonical).await?;
             }
             events.clear();
             let _ = recycle_tx.try_send(events);
             drop(memory_permit);
+            self.start_microstructure();
         }
-        for state in self.books.values_mut() {
-            if let Some(row) = state.microstructure.flush() {
-                self.microstructure_outbox.push(row);
-            }
-        }
-        let _ = self.persist_microstructure().await;
+        let queued = self.flush_microstructure();
+        let persisted = self.drain_microstructure().await;
         self.metrics
             .mutable_book_count
             .sub(i64::try_from(self.books.len()).unwrap_or(i64::MAX));
+        if !queued || !persisted {
+            return Err(InfraError::DerivedFactPersistence {
+                partition: self.partition_id.get(),
+            }
+            .into());
+        }
+        Ok(())
     }
 
-    async fn flush_elapsed_microstructure(&mut self) {
+    fn flush_elapsed_microstructure(&mut self) -> bool {
         let now_ms = Utc::now().timestamp_millis();
-        for state in self.books.values_mut() {
-            if let Some(row) = state.microstructure.flush_elapsed(now_ms) {
-                self.microstructure_outbox.push(row);
+        let completed = self
+            .books
+            .iter_mut()
+            .filter_map(|(token, state)| {
+                state
+                    .microstructure
+                    .flush_elapsed(now_ms)
+                    .map(|row| (*token, row))
+            })
+            .collect::<Vec<_>>();
+        let mut queued = true;
+        for (token, row) in completed {
+            queued &= self.queue_microstructure(token, row);
+        }
+        queued
+    }
+
+    fn flush_microstructure(&mut self) -> bool {
+        let completed = self
+            .books
+            .iter_mut()
+            .filter_map(|(token, state)| state.microstructure.flush().map(|row| (*token, row)))
+            .collect::<Vec<_>>();
+        let mut queued = true;
+        for (token, row) in completed {
+            queued &= self.queue_microstructure(token, row);
+        }
+        queued
+    }
+
+    fn queue_microstructure(&mut self, token: TokenKey, row: SessionMicrostructureRow) -> bool {
+        match self.microstructure_outbox.push(token, row) {
+            Ok(()) => true,
+            Err(source) => {
+                self.fail_microstructure(DurableWriteError::CapacityExceeded, vec![source], 1, 0);
+                false
             }
         }
-        let _ = self.persist_microstructure().await;
     }
 
-    async fn retire_tokens(&mut self, tokens: &[RetireToken]) {
+    async fn retire_tokens(&mut self, tokens: &[RetireToken]) -> bool {
+        let mut queued = true;
         for command in tokens {
             if let Some(mut state) = take_retired_mutable_book(
                 &self.book_store,
@@ -1718,48 +2838,315 @@ impl PartitionActor {
             ) {
                 self.metrics.mutable_book_count.dec();
                 if let Some(row) = state.microstructure.flush() {
-                    self.microstructure_outbox.push(row);
+                    queued &= self.queue_microstructure(command.token, row);
                 }
             }
         }
-        let _ = self.persist_microstructure().await;
+        self.start_microstructure();
+        self.drain_microstructure().await && queued
     }
 
     async fn commit_microstructure(&mut self, source_cutoff_ms: i64) -> bool {
-        for state in self.books.values_mut() {
-            if let Some(row) = state.microstructure.flush_elapsed(source_cutoff_ms) {
-                self.microstructure_outbox.push(row);
-            }
+        let completed = self
+            .books
+            .iter_mut()
+            .filter_map(|(token, state)| {
+                state
+                    .microstructure
+                    .flush_elapsed(source_cutoff_ms)
+                    .map(|row| (*token, row))
+            })
+            .collect::<Vec<_>>();
+        let mut queued = true;
+        for (token, row) in completed {
+            queued &= self.queue_microstructure(token, row);
         }
-        self.persist_microstructure().await
+        self.start_microstructure();
+        self.drain_microstructure().await && queued
     }
 
-    async fn persist_microstructure(&mut self) -> bool {
-        if self.microstructure_outbox.is_empty() {
-            return true;
+    fn start_microstructure(&mut self) {
+        if !self.microstructure_write.is_idle() || self.microstructure_outbox.rows.is_empty() {
+            return;
         }
-        let rows = mem::take(&mut self.microstructure_outbox);
-        let affected_tokens = rows
-            .iter()
-            .filter_map(|row| self.market_registry.data_plane().token_key(&row.token_id))
-            .collect::<HashSet<_>>();
-        if let Err(error) = self.book_fact_writer.write_microstructure_rows(rows).await {
-            tracing::error!(
-                partition_id = self.partition_id.get(),
-                ?error,
-                "microstructure feature-fact persistence failed"
-            );
-            self.book_store.mark_gap();
-            for token in affected_tokens {
-                self.invalidate_token(token);
+        let row_limit = MAX_PARTITION_BATCH_EVENTS
+            .min(self.book_fact_writer.microstructure_item_limit())
+            .max(1);
+        let byte_limit = MAX_PARTITION_BATCH_BYTES
+            .min(
+                self.book_fact_writer
+                    .microstructure_byte_limit()
+                    .unwrap_or(MAX_PARTITION_BATCH_BYTES),
+            )
+            .max(1);
+        let queued = match self.microstructure_outbox.take_batch(row_limit, byte_limit) {
+            Ok(queued) => queued,
+            Err(source) => {
+                self.fail_microstructure(DurableWriteError::PayloadTooLarge, vec![source], 1, 0);
+                return;
             }
+        };
+        if queued.is_empty() {
+            return;
+        }
+        let row_count = queued.len();
+        let resident_bytes = queued
+            .iter()
+            .map(|queued| queued.weight)
+            .fold(0_usize, usize::saturating_add);
+        let mut unique = HashSet::with_capacity(row_count);
+        let affected = queued
+            .iter()
+            .map(|queued| queued.source)
+            .filter(|source| unique.insert(*source))
+            .collect::<Vec<_>>();
+        let rows = queued
+            .into_iter()
+            .map(|queued| queued.row)
+            .collect::<Vec<_>>();
+        let writer = Arc::clone(&self.book_fact_writer);
+        let future = Box::pin(async move { writer.enqueue_microstructure_rows(rows).await });
+        self.microstructure_write = MicrostructureWriteState::Admitting {
+            future,
+            affected,
+            row_count,
+            resident_bytes,
+        };
+    }
+
+    async fn progress_microstructure(&mut self) -> bool {
+        let transition = match &mut self.microstructure_write {
+            MicrostructureWriteState::Idle => return true,
+            MicrostructureWriteState::Admitting { future, .. } => {
+                MicrostructureTransition::Admitted(future.await)
+            }
+            MicrostructureWriteState::Acknowledging { receipt, .. } => {
+                let result = receipt.acknowledge().await.map(drop);
+                MicrostructureTransition::Acknowledged(result)
+            }
+        };
+        let prior = mem::replace(
+            &mut self.microstructure_write,
+            MicrostructureWriteState::Idle,
+        );
+        match (prior, transition) {
+            (
+                MicrostructureWriteState::Admitting {
+                    affected,
+                    row_count,
+                    resident_bytes,
+                    ..
+                },
+                MicrostructureTransition::Admitted(Ok(receipt)),
+            ) => {
+                self.microstructure_write = MicrostructureWriteState::Acknowledging {
+                    receipt,
+                    affected,
+                    row_count,
+                    resident_bytes,
+                };
+                true
+            }
+            (
+                MicrostructureWriteState::Admitting {
+                    affected,
+                    row_count,
+                    resident_bytes,
+                    ..
+                },
+                MicrostructureTransition::Admitted(Err(error)),
+            )
+            | (
+                MicrostructureWriteState::Acknowledging {
+                    affected,
+                    row_count,
+                    resident_bytes,
+                    ..
+                },
+                MicrostructureTransition::Acknowledged(Err(error)),
+            ) => {
+                self.fail_microstructure(error, affected, row_count, resident_bytes);
+                false
+            }
+            (
+                MicrostructureWriteState::Acknowledging { .. },
+                MicrostructureTransition::Acknowledged(Ok(())),
+            ) => true,
+            (MicrostructureWriteState::Idle, _)
+            | (
+                MicrostructureWriteState::Admitting { .. },
+                MicrostructureTransition::Acknowledged(_),
+            )
+            | (
+                MicrostructureWriteState::Acknowledging { .. },
+                MicrostructureTransition::Admitted(_),
+            ) => {
+                tracing::error!(
+                    partition_id = self.partition_id.get(),
+                    "microstructure persistence state transition violated"
+                );
+                self.book_store.mark_gap();
+                false
+            }
+        }
+    }
+
+    async fn drain_microstructure(&mut self) -> bool {
+        let started = Instant::now();
+        let mut persisted = true;
+        loop {
+            self.start_microstructure();
+            if self.microstructure_write.is_idle() && self.microstructure_outbox.rows.is_empty() {
+                return persisted;
+            }
+            let remaining = PARTITION_DRAIN_TIMEOUT.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                self.expire_microstructure();
+                return false;
+            }
+            if let Ok(progressed) = timeout(remaining, self.progress_microstructure()).await {
+                persisted &= progressed;
+            } else {
+                self.expire_microstructure();
+                return false;
+            }
+        }
+    }
+
+    fn expire_microstructure(&mut self) {
+        let prior = mem::replace(
+            &mut self.microstructure_write,
+            MicrostructureWriteState::Idle,
+        );
+        let (mut affected, row_count, resident_bytes) = match &prior {
+            MicrostructureWriteState::Idle => (Vec::new(), 0, 0),
+            MicrostructureWriteState::Admitting {
+                affected,
+                row_count,
+                resident_bytes,
+                ..
+            }
+            | MicrostructureWriteState::Acknowledging {
+                affected,
+                row_count,
+                resident_bytes,
+                ..
+            } => (affected.clone(), *row_count, *resident_bytes),
+        };
+        drop(prior);
+        affected.extend(self.microstructure_outbox.take_sources());
+        self.fail_microstructure(
+            DurableWriteError::AcknowledgementTimeout,
+            affected,
+            row_count,
+            resident_bytes,
+        );
+    }
+
+    fn fail_microstructure(
+        &mut self,
+        error: DurableWriteError,
+        affected: Vec<MicrostructureSource>,
+        row_count: usize,
+        resident_bytes: usize,
+    ) {
+        let affected = affected.into_iter().collect::<HashSet<_>>();
+        tracing::error!(
+            partition_id = self.partition_id.get(),
+            affected_sessions = affected.len(),
+            row_count,
+            resident_bytes,
+            ?error,
+            "microstructure feature-fact persistence failed"
+        );
+        self.book_store.mark_gap();
+        self.microstructure_outbox.remove_sources(&affected);
+        let mut current_failures = HashSet::new();
+        for source in &affected {
+            if let Some(state) = self.books.get_mut(&source.token) {
+                state.microstructure.discard_session(source.session);
+            }
+            if self
+                .stream_state
+                .get(&source.token)
+                .is_some_and(|state| state.session == source.session)
+            {
+                current_failures.insert(source.token);
+            }
+        }
+        for token in &current_failures {
+            self.invalidate_token(*token);
+        }
+        if matches!(
+            error,
+            DurableWriteError::CapacityExceeded | DurableWriteError::PayloadTooLarge
+        ) && !current_failures.is_empty()
+        {
+            self.metrics
+                .book_apply_backpressure_invalidations
+                .inc_by(u64::try_from(current_failures.len()).unwrap_or(u64::MAX));
+        }
+    }
+
+    fn has_microstructure_capacity(&self, events: &[PipelineEvent]) -> bool {
+        let byte_limit = MAX_PARTITION_BATCH_BYTES
+            .min(
+                self.book_fact_writer
+                    .microstructure_byte_limit()
+                    .unwrap_or(MAX_PARTITION_BATCH_BYTES),
+            )
+            .max(1);
+        let Some((row_count, resident_bytes)) =
+            microstructure_batch_reservation(events, &self.market_registry, byte_limit)
+        else {
             return false;
+        };
+        self.microstructure_outbox
+            .can_reserve(row_count, resident_bytes)
+    }
+
+    fn discard_microstructure_sessions(&mut self, sessions: &HashSet<StreamSessionTicket>) {
+        self.microstructure_outbox.remove_sessions(sessions);
+        for state in self.books.values_mut() {
+            for session in sessions {
+                state.microstructure.discard_session(*session);
+            }
+        }
+    }
+
+    fn reject_microstructure_capacity(
+        &mut self,
+        events: &[PipelineEvent],
+        batch_scope: &[(TokenKey, StreamSessionTicket)],
+    ) -> bool {
+        if self.has_microstructure_capacity(events) {
+            return false;
+        }
+        let failed_sessions = batch_scope
+            .iter()
+            .map(|(_, session)| *session)
+            .collect::<HashSet<_>>();
+        tracing::error!(
+            partition_id = self.partition_id.get(),
+            event_count = events.len(),
+            outbox_rows = self.microstructure_outbox.rows.len(),
+            outbox_bytes = self.microstructure_outbox.resident_bytes,
+            max_outbox_rows = MAX_MICROSTRUCTURE_OUTBOX_ROWS,
+            max_outbox_bytes = MAX_MICROSTRUCTURE_OUTBOX_BYTES,
+            "microstructure outbox capacity rejected canonical batch"
+        );
+        self.discard_microstructure_sessions(&failed_sessions);
+        let invalidated = self.invalidate_batch_sessions(batch_scope, &failed_sessions);
+        if invalidated > 0 {
+            self.metrics
+                .book_apply_backpressure_invalidations
+                .inc_by(u64::try_from(invalidated).unwrap_or(u64::MAX));
         }
         true
     }
 
     #[inline]
-    async fn handle_event(&mut self, event: PipelineEvent) {
+    async fn handle_event(&mut self, event: PipelineEvent) -> QuantResult<()> {
         self.metrics.ws_events_received.inc();
 
         match event {
@@ -1801,7 +3188,7 @@ impl PartitionActor {
                         ?winning_token,
                         "resolved event lost registered winning token"
                     );
-                    return;
+                    return Ok(());
                 }
                 if registered_token_count != tokens.len() {
                     tracing::error!(%market_id, "resolved event lost registered outcome token");
@@ -1820,7 +3207,7 @@ impl PartitionActor {
                 subscription_tokens: _,
                 opened_at_ms,
             } => {
-                if !self
+                if let Err(error) = self
                     .book_fact_writer
                     .write_stream_session_open(
                         session.stream_session_id,
@@ -1831,6 +3218,13 @@ impl PartitionActor {
                     )
                     .await
                 {
+                    tracing::error!(
+                        operation = "open",
+                        ?error,
+                        stream_session_id = %session.stream_session_id,
+                        shard_id,
+                        "stream-session ledger persistence failed"
+                    );
                     self.poison_session(session);
                 }
             }
@@ -1867,9 +3261,9 @@ impl PartitionActor {
             } => {
                 let Some(token_id) = self.market_registry.token_id(token) else {
                     tracing::error!(?token, "stream gap lost registered token");
-                    return;
+                    return Ok(());
                 };
-                if let Some(row) = BookFactWriter::gap_ledger_row(
+                let fatal = if let Some(row) = BookFactWriter::gap_ledger_row(
                     &token_id,
                     self.market_registry.market_for_key(token),
                     session.stream_session_id,
@@ -1879,17 +3273,24 @@ impl PartitionActor {
                 ) && let Some(batch_id) = self.allocate_batch_id()
                     && let Err(error) = self
                         .ledger
-                        .persist(batch_id, vec![row], BOOK_CHANNEL_TIMEOUT)
+                        .persist(batch_id, vec![row], LEDGER_PERSISTENCE_BUDGETS)
                         .await
                 {
                     tracing::error!(?error, ?token, "gap ledger persistence failed");
-                }
+                    self.ledger_fail_stop(error)
+                } else {
+                    None
+                };
                 self.invalidate_closed_token(token);
+                if let Some(error) = fatal {
+                    return Err(error);
+                }
             }
         }
+        Ok(())
     }
 
-    async fn handle_canonical_batch(&mut self, events: Vec<PipelineEvent>) {
+    async fn handle_canonical_batch(&mut self, events: Vec<PipelineEvent>) -> QuantResult<()> {
         let started_at = Instant::now();
         self.metrics
             .ws_events_received
@@ -1901,6 +3302,9 @@ impl PartitionActor {
                 canonical_identity(event).map(|(token, trace)| (token, trace.session))
             })
             .collect::<Vec<_>>();
+        if self.reject_microstructure_capacity(&events, &batch_scope) {
+            return Ok(());
+        }
         let mut failed_sessions = HashSet::new();
         for event in &events {
             let Some((token, trace)) = canonical_identity(event) else {
@@ -1957,12 +3361,25 @@ impl PartitionActor {
             rows.push(row);
             committed.push(event);
         }
+        let mut fatal = None;
         if !rows.is_empty() {
             let persisted = if let Some(batch_id) = self.allocate_batch_id() {
-                self.ledger
-                    .persist(batch_id, rows, BOOK_CHANNEL_TIMEOUT)
+                match self
+                    .ledger
+                    .persist(batch_id, rows, LEDGER_PERSISTENCE_BUDGETS)
                     .await
-                    .is_ok()
+                {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::error!(
+                            ?error,
+                            partition = self.partition_id.get(),
+                            "canonical ledger persistence failed"
+                        );
+                        fatal = self.ledger_fail_stop(error);
+                        false
+                    }
+                }
             } else {
                 false
             };
@@ -1976,7 +3393,11 @@ impl PartitionActor {
         }
 
         if !failed_sessions.is_empty() {
-            self.invalidate_batch_sessions(&batch_scope, &failed_sessions);
+            self.discard_microstructure_sessions(&failed_sessions);
+            let _ = self.invalidate_batch_sessions(&batch_scope, &failed_sessions);
+        }
+        if let Some(error) = fatal {
+            return Err(error);
         }
         let events = committed
             .into_iter()
@@ -2008,6 +3429,7 @@ impl PartitionActor {
                 "slow heterogeneous canonical micro-batch"
             );
         }
+        Ok(())
     }
 
     fn prepare_ledger_event(&self, event: &PipelineEvent) -> Option<BookL2LedgerRow> {
@@ -2143,6 +3565,7 @@ impl PartitionActor {
             &token_id,
             market_id,
             &snapshot,
+            cmd.trace.session,
             ChBookEventType::Snapshot,
             0,
         );
@@ -2164,7 +3587,7 @@ impl PartitionActor {
             cmd.trace.mono,
         );
         if let Some(row) = stale_microstructure {
-            self.microstructure_outbox.push(row);
+            let _ = self.queue_microstructure(cmd.token, row);
         }
         if let Some(state) = self.stream_state.get_mut(&cmd.token) {
             state.has_fresh_snapshot = true;
@@ -2226,6 +3649,7 @@ impl PartitionActor {
                 &token_id,
                 self.market_registry.market_for_key(token),
                 &snapshot,
+                last_command.trace.session,
                 ChBookEventType::Delta,
                 u64::try_from(delete_count).unwrap_or(u64::MAX),
             );
@@ -2248,7 +3672,7 @@ impl PartitionActor {
                 last_command.trace.mono,
             );
             if let Some(row) = stale_microstructure {
-                self.microstructure_outbox.push(row);
+                let _ = self.queue_microstructure(token, row);
             }
             start = end;
         }
@@ -2281,7 +3705,7 @@ impl PartitionActor {
         &mut self,
         batch_scope: &[(TokenKey, StreamSessionTicket)],
         failed_sessions: &HashSet<StreamSessionTicket>,
-    ) {
+    ) -> usize {
         let mut invalidated_tokens = HashSet::new();
         for (token, session) in batch_scope {
             if failed_sessions.contains(session) {
@@ -2302,16 +3726,17 @@ impl PartitionActor {
             }
         }
         if invalidated_tokens.is_empty() {
-            return;
+            return 0;
         }
         self.book_store.mark_gap();
         let invalidated_tokens = invalidated_tokens.into_iter().collect::<Vec<_>>();
-        self.book_store.invalidate_tokens(&invalidated_tokens);
+        let invalidated_count = self.book_store.invalidate_tokens(&invalidated_tokens);
         let token_ids = invalidated_tokens
             .iter()
             .filter_map(|token| self.market_registry.token_id(*token))
             .collect::<Vec<_>>();
         self.event_source.invalidate_tokens(&token_ids);
+        invalidated_count
     }
 
     fn invalidate_token(&mut self, token: TokenKey) {
@@ -2453,7 +3878,16 @@ impl PartitionActor {
                 schema_version: ChSchemaVersion(2),
             })
             .await;
-        if !persisted
+        if let Err(error) = &persisted {
+            tracing::error!(
+                operation = "close",
+                ?error,
+                stream_session_id = %close.session.stream_session_id,
+                shard_id = close.shard_id,
+                "stream-session ledger persistence failed"
+            );
+        }
+        if persisted.is_err()
             || close.reason != StreamSessionEndReason::Normal
             || state == ChStreamSessionState::Invalidated
         {

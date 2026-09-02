@@ -502,7 +502,7 @@ fn evidence_refs() -> EvidenceRefs {
     }
 }
 
-fn execution_eligibility() -> ExecutionEligibility {
+const fn execution_eligibility() -> ExecutionEligibility {
     ExecutionEligibility {
         ceiling: ExecutionAuthorityCeiling::AnalysisOnly,
         blockers: Vec::new(),

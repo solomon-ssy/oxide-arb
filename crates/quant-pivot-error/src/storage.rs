@@ -65,12 +65,16 @@ pub mod entity {
     pub const QUANT_EXECUTION_ACCOUNT: &str = "quant_execution_account";
     /// `quant_account_chain_execution`.
     pub const QUANT_ACCOUNT_CHAIN_EXECUTION: &str = "quant_account_chain_execution";
+    /// `quant_account_clean_funder_blocker`.
+    pub const QUANT_ACCOUNT_CLEAN_FUNDER_BLOCKER: &str = "quant_account_clean_funder_blocker";
     /// `quant_account_recovery_incident`.
     pub const QUANT_ACCOUNT_RECOVERY_INCIDENT: &str = "quant_account_recovery_incident";
+    /// `quant_account_recovery_manifest`.
+    pub const QUANT_ACCOUNT_RECOVERY_MANIFEST: &str = "quant_account_recovery_manifest";
     /// `quant_account_execution_association`.
     pub const QUANT_ACCOUNT_EXECUTION_ASSOCIATION: &str = "quant_account_execution_association";
-    /// `quant_account_pause_submission`.
-    pub const QUANT_ACCOUNT_PAUSE_SUBMISSION: &str = "quant_account_pause_submission";
+    /// `quant_account_pause_operation`.
+    pub const QUANT_ACCOUNT_PAUSE_OPERATION: &str = "quant_account_pause_operation";
     /// `quant_venue_incentive_event`.
     pub const QUANT_VENUE_INCENTIVE_EVENT: &str = "quant_venue_incentive_event";
     pub const QUANT_VENUE_INCENTIVE_RECONCILIATION_SCAN: &str =
@@ -79,6 +83,13 @@ pub mod entity {
     pub const QUANT_CAPITAL_ALLOCATION: &str = "quant_capital_allocation";
     /// `quant_strategy_position_lot`.
     pub const QUANT_STRATEGY_POSITION_LOT: &str = "quant_strategy_position_lot";
+    /// `quant_recommendation_economic_outcome`.
+    pub const QUANT_RECOMMENDATION_ECONOMIC_OUTCOME: &str = "quant_recommendation_economic_outcome";
+    /// `quant_route_economic_health`.
+    pub const QUANT_ROUTE_ECONOMIC_HEALTH: &str = "quant_route_economic_health";
+    /// `quant_economic_outcome_reconciliation_task`.
+    pub const QUANT_ECONOMIC_OUTCOME_RECONCILIATION_TASK: &str =
+        "quant_economic_outcome_reconciliation_task";
     /// `quant_reconciliation`.
     pub const QUANT_RECONCILIATION: &str = "quant_reconciliation";
     /// `quant_settlement_redeem`.
@@ -214,6 +225,9 @@ pub enum StorageError {
     #[error("Migration error: {0}")]
     Migration(String),
 
+    #[error("Schema error: {0}")]
+    Schema(String),
+
     #[error("Channel closed: {0}")]
     ChannelClosed(String),
 
@@ -270,6 +284,12 @@ pub enum StorageError {
         duration: Duration,
     },
 
+    #[error("ClickHouse operation `{operation}` timed out after {duration:?}")]
+    ClickHouseTimeout {
+        operation: &'static str,
+        duration: Duration,
+    },
+
     #[error("ClickHouse write semaphore closed (system shutting down)")]
     ClickHouseWriteSemaphoreClosed,
 }
@@ -283,23 +303,38 @@ fn display_optional_entity(entity: Option<&'static str>) -> String {
 }
 
 impl StorageError {
+    /// Whether a complete idempotent transaction may be retried after
+    /// `PostgreSQL` aborted it for serialization or deadlock safety.
+    #[must_use]
+    pub fn is_retryable_transaction(&self) -> bool {
+        matches!(
+            self,
+            Self::Database(
+                DbErr::Exec(RuntimeErr::SqlxError(error))
+                    | DbErr::Query(RuntimeErr::SqlxError(error))
+            ) if sqlx_retryable(error)
+        )
+    }
+
     /// Whether this error proves a transient transport/capacity failure that a
     /// durable worker may retry without masking schema or business defects.
     #[must_use]
     pub fn is_transient(&self) -> bool {
         match self {
-            Self::Connection(_) | Self::Timeout { .. } => true,
+            Self::Connection(_) | Self::Timeout { .. } | Self::ClickHouseTimeout { .. } => true,
             Self::Database(error) => match error {
                 DbErr::ConnectionAcquire(_) | DbErr::Conn(_) => true,
                 DbErr::Exec(RuntimeErr::SqlxError(error))
-                | DbErr::Query(RuntimeErr::SqlxError(error)) => matches!(
-                    error.as_ref(),
-                    SqlxError::Io(_)
-                        | SqlxError::Tls(_)
-                        | SqlxError::PoolTimedOut
-                        | SqlxError::PoolClosed
-                        | SqlxError::WorkerCrashed
-                ),
+                | DbErr::Query(RuntimeErr::SqlxError(error)) => {
+                    matches!(
+                        error.as_ref(),
+                        SqlxError::Io(_)
+                            | SqlxError::Tls(_)
+                            | SqlxError::PoolTimedOut
+                            | SqlxError::PoolClosed
+                            | SqlxError::WorkerCrashed
+                    ) || sqlx_retryable(error)
+                }
                 _ => false,
             },
             _ => false,
@@ -364,6 +399,18 @@ impl StorageError {
     }
 }
 
+fn sqlx_retryable(error: &SqlxError) -> bool {
+    matches!(
+        error,
+        SqlxError::Database(database)
+            if retryable_sqlstate(database.code().as_deref())
+    )
+}
+
+fn retryable_sqlstate(code: Option<&str>) -> bool {
+    matches!(code, Some("40001" | "40P01"))
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::ConnAcquireErr;
@@ -396,10 +443,26 @@ mod tests {
     fn transient_taxonomy_fails_closed() {
         assert!(StorageError::Connection("connection reset".to_owned()).is_transient());
         assert!(
+            StorageError::ClickHouseTimeout {
+                operation: "test.timeout",
+                duration: Duration::from_millis(50),
+            }
+            .is_transient()
+        );
+        assert!(
             StorageError::Database(DbErr::ConnectionAcquire(ConnAcquireErr::Timeout))
                 .is_transient()
         );
         assert!(!StorageError::invariant_violation(None, "bad contract").is_transient());
+        assert!(!StorageError::Schema("schema drift".to_owned()).is_transient());
         assert!(!StorageError::Database(DbErr::Type("bad type".to_owned())).is_transient());
+    }
+
+    #[test]
+    fn retryable_sqlstates_are_bounded() {
+        assert!(retryable_sqlstate(Some("40001")));
+        assert!(retryable_sqlstate(Some("40P01")));
+        assert!(!retryable_sqlstate(Some("23505")));
+        assert!(!retryable_sqlstate(None));
     }
 }

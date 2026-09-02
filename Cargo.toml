@@ -18,6 +18,7 @@ members = [
   "crates/quant-pivot-system-tests",
   "crates/quant-pivot-xtask",
 ]
+exclude = ["third_party/smartcore"]
 
 [workspace.package]
 version = "0.1.0"
@@ -182,7 +183,8 @@ alloy = { version = "1.8", features = [
   "rpc-types",
   "json-rpc",
 ] }
-hypersync-client = "=1.4.0"
+hypersync-format = "=0.7.0"
+hypersync-net-types = "=0.12.3"
 
 # HTTP client (aligned with SDK's reqwest ^0.13)
 reqwest = { version = "0.13", features = ["json", "rustls", "stream"] }

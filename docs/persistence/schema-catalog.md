@@ -1,304 +1,90 @@
 # Persistence Schema Catalog
 
-本文档是 `quant-pivot` 后续所有 Postgres 表结构、索引、trigger、seed 变更的统一范式。
+本文档定义 `quant-pivot` 当前 PostgreSQL/ClickHouse schema 的唯一 fresh-bootstrap 维护规则。项目从未
+生产运行；当前只维护一个终态 PostgreSQL v1 bootstrap snapshot 和一个无版本链的 ClickHouse
+bootstrap。不存在旧数据导入、升级/降级链、`alter_*` lane、dual read/write、compatibility view、
+历史 payload converter 或 data migration。
 
-schema catalog 是唯一事实源。storage migrations 只消费 catalog metadata，禁止在 migration 里手写业务表字段、业务索引、trigger 表名列表或 seed 排序。
+## 1. Canonical owners
 
-## 核心规则
+| Contract | Canonical owner |
+|---|---|
+| PostgreSQL runtime shape | `crates/quant-pivot-models/src/entities/` dense SeaORM entities |
+| PostgreSQL fresh-bootstrap time capsule | `crates/quant-pivot-migration/src/snapshots/v1/` |
+| Entity First 无法表达的 enum/CHECK/index/trigger | `crates/quant-pivot-migration/src/migrations/support/` typed specs |
+| PostgreSQL normalized evidence | `schema/postgres/manifest.json` and `schema/postgres/migrations.json` |
+| ClickHouse fresh bootstrap | `crates/quant-pivot-storage/src/clickhouse/` canonical schema owner |
+| ClickHouse normalized evidence | `schema/clickhouse/manifest.json` |
 
-- 每个 iden enum 必须使用 `#[quant_schema]`，禁止裸写 `#[derive(DeriveIden)]`。
-- 非 core 表必须显式声明 lifecycle，例如 `#[quant_schema(lifecycle = "control")]` 或 `#[quant_schema(lifecycle = "audit")]`。未声明时只允许作为 core schema。
-- 表 DDL、索引、依赖、trigger、seed specs 都放在该表的 `idens/<table>.rs` schema module 中。
-- 不为 schema API 添加兼容 re-export。调用方必须使用明确模块路径。
-- 如果表需要 `UpdatedAt`，只在 enum 中声明 `UpdatedAt` variant，并在 `table()` 中使用 `timestamp_with_write_default(UpdatedAt)`。trigger metadata 会自动生成。
-- seed 依赖必须声明在 `SeedSpec` 中，禁止把 graph dependency 藏在 loader 函数体里。
-- 依赖上游 seed 输出时，loader 必须使用 `ctx.require<T>()?`，禁止 `unwrap()`。
+`quant-pivot-migration`、SeaORM `MigrationTrait` 和 manifest 中保留的 migration 命名只是唯一 bootstrap
+的现有实现/API 名称，不代表存在可执行的版本升级链。应用 runtime 只验证 schema，禁止启动时 DDL。
 
-## 列类型规范（强制）
+## 2. Core persistence rules
 
-所有列类型必须通过 `crate::schema::column` 的 builder 声明，禁止在 iden 中手写 `.text()` / `.decimal()` 作为标识列或金额列。
+- 内部 UUID-backed ID 使用原生 PostgreSQL `uuid` 与项目 `Copy` newtype；不得存为字符串或
+  `Arc<Uuid>`。
+- 外部 venue identifier 使用经过边界校验的字符串 newtype。`MarketId`/`TokenId` 是 opaque venue
+  identity；数据库不复制 source-specific 格式 regex，格式校验留在解析/类型边界。
+- money、price、shares、bps 和 probability 使用项目 Decimal newtype 与原生 `NUMERIC`；禁止
+  `f64` 或文本金额。
+- 需要 SQL 查询、排序、约束、FK、CAS 或独立生命周期的事实使用具名列/关系表。
+- domain-owned JSONB 只能使用 canonical typed struct/tagged enum、`deny_unknown_fields` 与
+  `FromJsonQueryResult`；禁止裸 `Json`/`serde_json::Value` 穿越 persistence/domain 边界。
+- WORM、idempotency、FK、unique、lifecycle 与 hash invariants 必须由数据库和 repository
+  round-trip/corruption tests 共同证明。
+- DDL 只存在于 deploy-only bootstrap owner；repository、handler 和 runtime startup 禁止手写 DDL。
 
-### 标识符三分法
+完整 SeaORM/typed persistence 规则见
+[`seaorm-and-typed-persistence.md`](seaorm-and-typed-persistence.md)。
 
-```text
-是 UUID（系统内部生成）？ ── 是 ──> 原生 uuid 列；Rust = #[derive(UuidId)] (Uuid, 16-byte Copy)
-        │
-        否
-        │
-是外部定义的语义字符串？ ── 是 ──> text / varchar 列；Rust = #[derive(StrId)] (Arc<str>)
-        │
-        否
-        │
-仅为高频插入的代理键？ ──────────> bigint / integer 自增；无独立 Rust ID 类型
+## 3. Changing the schema before first production deployment
+
+任何表、列、enum、index、constraint、trigger 或 seed 变化都直接修改唯一终态：
+
+1. 修改 runtime entity/domain persistence DTO/repository contract。
+2. 同一变更窗口更新 v1 bootstrap snapshot 与无法由 Entity First 表达的 typed support specs。
+3. 从全新 owned disposable PostgreSQL 16 / ClickHouse 环境生成 normalized manifests。
+4. regenerate-and-diff 必须达到 fixed point；禁止手工修补 manifest 来掩盖 owner 漂移。
+5. 运行 repository/system behavior tests，证明约束、事务、WORM、idempotency 与 typed decode。
+
+禁止为了保留本地开发/测试旧库而新增第二 bootstrap、`ALTER`/data/down step、nullable compatibility
+column、旧 reader、dual writer 或版本分派。需要继续验证时，创建新的 disposable 空基础设施并从唯一
+bootstrap 重建。任何真实数据库销毁仍需操作者对精确目标另行授权。
+
+## 4. Indexes, triggers, and seeds
+
+- index、partial predicate、expression、WORM trigger 和 lifecycle function 必须由封闭 typed spec
+  拥有，不能散落在 repository/native SQL 中。
+- 当前只有 fresh bootstrap，因此 index 直接以终态形状创建；不存在“已上线热表在线加索引”实施路径。
+- static seed 必须确定、可验证并由唯一 bootstrap 创建；governed policy 只播种首个 safe boot bundle。
+- boot 后的 policy 变化只走 Draft → Validate/Preflight → Approve → Activate，不由 TOML 或 schema
+  bootstrap 覆盖。
+- seed dependency、checksum、idempotency 与 audit 必须由 compiled bootstrap contract 和 system tests
+  证明；不存在 seed down 或数据搬运。
+
+## 5. Verification
+
+Canonical local gates:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo xtask architecture audit-functions
+cargo xtask architecture check
+cargo xtask postgres-schema manifest-clean
+cargo xtask clickhouse-schema manifest
+cargo test --workspace
 ```
 
-| 家族 | 例子 | Postgres 列类型 | builder |
-|---|---|---|---|
-| 内部 UUID | `TradeId` `UserId` `OpportunityId` `ControlFactorId` `ResolutionEventId` | `uuid` | `column::uuid_pk` / `uuid_fk` / `uuid_null` |
-| 外部字符串 | `MarketId`（`condition_id`） | `varchar(66)` | `column::market_id_pk` / `market_id` |
-| 外部字符串 | `TokenId`（CLOB 十进制） | `text` | `column::token_id` / `token_id_null` |
-| 外部字符串 | `EventId` `OrderId` `ReportId` | `text` | 直接 `.text()`（无定长语义） |
-| 代理键 | `casbin_rule.id`、审计/报告行、`risk_engine_state.id` | `bigint` / `integer` | 行内声明 |
+使用真实配置执行 `postgres-schema apply|verify|manifest` 或 `clickhouse-schema bootstrap|verify` 时，必须
+同时提供 absolute `--config-file` 与 exact `--expected-environment`。这些命令只允许在空或与唯一
+bootstrap 精确一致的目标上运行；发现未知 history、未知对象或 fingerprint/checksum 漂移即 fail closed。
 
-- **内部 ID 一律用原生 `uuid`**（16 字节定长），不得用 `text` 存 UUID，不得加 `prefix_` 前缀。命名空间安全由 Rust newtype 提供，可读性由结构化日志（`trade_id=%`）提供。
-- **联结表用复合主键**（如 `user_role` 的 `(user_id, role_id)`），禁止为联结行引入无业务意义的代理 UUID/BIGINT 主键。
-- UUID 由应用层生成：时间有序行用 `XxxId::from_v7()`（保持 B-tree 紧凑），纯随机行用 `XxxId::from_v4()`。DDL 不设 UUID 默认值，禁止空字符串 sentinel（用 `Option<XxxId>` 表达"未赋值"）。
+## 6. Review checklist
 
-### 金额列
-
-金额一律用原生 `NUMERIC(precision, scale)`，禁止用 `TEXT` 存金额。`NUMERIC` 值域完全覆盖 `rust_decimal::Decimal`，round-trip 无损（workspace 已启用 `sea-orm/with-rust_decimal`）。
-
-| newtype | NUMERIC | builder |
-|---|---|---|
-| `Usd` | `(28, 8)` | `column::usd` / `usd_null` / `usd_default_zero` |
-| `Price` | `(20, 18)` | `column::price` |
-| `Shares` | `(38, 18)` | `column::shares` |
-| `Bps` | `(10, 4)` | `column::bps_null` |
-| `Probability` | `(20, 18)` | `column::probability` / `probability_null` / `probability_default_one` |
-
-精度由每个 newtype 的 `PRECISION` 常量统一定义；新增金额列必须复用上述 builder，不得自写 `default_zero_*` 私有 helper。
-
-### 定长字符串与 CHECK
-
-- `char(n)` **禁止**：Postgres 中 `char(n)`/`varchar(n)`/`text` 索引性能一致，`char(n)` 仅因 padding 浪费空间。
-- `varchar(n)` 仅用于**语义长度约束**（如 `market_id` 固定 66 字符，`username` ≤ 64，`role.code` ≤ 32），非性能优化。
-- `market_id` / `token_id` **不加格式正则 CHECK**：dry-run / paper 模式会持久化合成 id（非 `0x…` 格式），DB 级正则会误拒合法的非 live 行。格式校验留在类型层（`TokenId::debug_validate`）。
-
-## 新增一张表
-
-1. 新增 `crates/quant-pivot-models/src/idens/<table>.rs`。
-2. 在 `crates/quant-pivot-models/src/idens/mod.rs` 添加 module。
-3. 在 iden enum 上使用 `#[quant_schema]`。
-   - control registry 表使用 `#[quant_schema(lifecycle = "control")]`。
-   - append-only audit 表使用 `#[quant_schema(lifecycle = "audit")]`。
-4. 实现 `table() -> TableCreateStatement`。
-5. 实现 `indexes() -> Vec<IndexSpec>`。
-6. 实现 `dependencies() -> Vec<TableDependency>`。
-7. 实现 `seed_units() -> Vec<SeedSpec>`。
-8. 新增 SeaORM entity 和 domain DTO。
-9. 如果业务代码会访问该表，新增 repository 方法。
-10. 跑 schema graph tests 和 Postgres migration tests。
-
-## 修改表结构
-
-首次正式部署前：直接修改 schema module，并让 initial schema lane 重新消费 catalog。
-
-正式部署后：
-
-- 禁止修改已经发布的 initial migrations。
-- 新增 `alter_*` migration lane。
-- 大表变更必须拆成 expand / data / contract 阶段。
-- 新列优先 nullable 或提供安全 DB default。
-- 昂贵约束必须分阶段添加和校验。
-
-## 新增或修改索引
-
-- 在该表 schema module 的 `indexes()` 中添加 index metadata。
-- greenfield 初始 schema 或小表使用 `IndexBuildMode::Transactional`。
-- 已上线热表新增索引必须使用 `IndexBuildMode::Concurrent`。
-- raw partial index 必须写清 predicate SQL 和用途说明。
-- 禁止在 storage migration 文件里直接手写业务索引。
-
-## Seed 数据
-
-seed metadata 必须通过相关表的 schema module 暴露。
-
-静态 seed：
-
-- 定义稳定的 `SeedSpec`，包含 `id`、`version`、`checksum`、`conflict_policy`。
-- operator-owned 数据，例如 governed policy revision，必须使用 no-clobber 策略。
-- loader SQL 必须确定、幂等。
-
-六类 policy revision 的持久化类型是
-`quant_pivot_models::runtime_config::PolicyDocument`：闭集 enum 承载六个强类型 struct，
-每个资源固定 `schema_version = 1` 并拒绝 unknown fields。runtime entity 的 `JsonBinary`
-字段由 `cargo xtask architecture check` 自动发现，并要求 canonical typed document、
-`FromJsonQueryResult` 与闭合 serde shape；数据库表示与约束由 fresh-boot schema verification
-和 repository system tests 验证。`JSONB` 只作为不可变聚合的
-物理存储，不以 `serde_json::Value` 穿越 repository/domain 边界，且任何可查询字段都
-必须拆为原生列或 PostgreSQL enum。bootstrap 只播种首个 boot revision bundle；之后
-所有变更只通过 Draft → Validate/Preflight → Approve → Activate 写入，TOML 永不覆盖
-policy 表。激活时 `PolicySnapshotApplicator` 先 prepare 全部强类型 consumer snapshot，
-数据库 CAS 成功后再原子 publish 到 `DecisionPolicyStore`；任一 prepare/CAS 失败均保持
-旧 snapshot，不做隐式自动回滚。
-
-依赖型 graph seed：
-
-- 在 `depends_on` 中声明所有上游 artifact。
-- 在 `produces` 中声明本 seed 产出的 artifact。
-- 用 `SeedContext::put` 保存上游输出。
-- 用 `SeedContext::require` 读取下游输入。
-- 返回结构化错误，禁止 `unwrap()`。
-
-依赖形态示例：
-
-```text
-RoleSeed
-UserSeed   -> RelationSeed
-MenuSeed
-```
-
-## 需要 `updated_at`
-
-1. 在 iden enum 中添加 `UpdatedAt`。
-2. 在 `table()` 中添加 `.col(crate::schema::timestamp_with_write_default(Table::UpdatedAt))`。
-3. 不写 trigger 注册代码。
-4. 不在 storage migration 里添加表名。
-5. 不在应用层 update 路径手动设置 `updated_at`。
-
-## Down 和测试
-
-- down 顺序由 catalog 的 reverse topological order 生成。
-- seed down 默认 no-op。
-- data migration down 默认禁止，除非该 data migration 明确可逆。
-- 每个 schema 变更必须通过 macro tests、schema graph tests、seed graph tests 和 Postgres migration tests。
-
-## 完整 Schema Module 示例
-
-```rust
-use quant_pivot_macros::quant_schema;
-use sea_orm::{
-    Iden,
-    sea_query::{
-        ColumnDef, ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement,
-    },
-};
-
-use crate::{
-    enums::{common::TickSize, market::MarketStatus},
-    idens::event::Event,
-    schema::{
-        column,
-        dependency::TableDependency,
-        index::{IndexBuildMode, IndexSpec},
-        seed::SeedSpec,
-    },
-};
-
-#[quant_schema]
-pub enum Market {
-    Table,
-    MarketId,
-    EventId,
-    Question,
-    Slug,
-    Categories,
-    Status,
-    Outcome,
-    YesTokenId,
-    NoTokenId,
-    TickSize,
-    NegRisk,
-    EndDate,
-    ResolvedAt,
-    FeesEnabled,
-    FeeRate,
-    FeeExponent,
-    FeeTakerOnly,
-    FeeRebateRate,
-    FeeSource,
-    FeeObservedAt,
-    CreatedAt,
-    UpdatedAt,
-}
-
-pub fn table() -> TableCreateStatement {
-    Table::create()
-        .table(Market::Table)
-        .if_not_exists()
-        .col(column::market_id_pk(Market::MarketId))
-        .col(ColumnDef::new(Market::EventId).text().not_null())
-        .col(ColumnDef::new(Market::Question).text().not_null())
-        .col(ColumnDef::new(Market::Slug).text().not_null())
-        .col(
-            ColumnDef::new(Market::Categories)
-                .array(ColumnType::Text)
-                .not_null()
-                .default(Expr::cust("'{}'::text[]")),
-        )
-        .col(
-            ColumnDef::new(Market::Status)
-                .text()
-                .not_null()
-                .default(MarketStatus::Active),
-        )
-        .col(ColumnDef::new(Market::Outcome).text().null())
-        .col(column::token_id(Market::YesTokenId))
-        .col(column::token_id(Market::NoTokenId))
-        .col(
-            ColumnDef::new(Market::TickSize)
-                .text()
-                .not_null()
-                .default(TickSize::Hundredth),
-        )
-        .col(ColumnDef::new(Market::NegRisk).boolean().not_null().default(false))
-        .col(ColumnDef::new(Market::EndDate).timestamp_with_time_zone().null())
-        .col(ColumnDef::new(Market::ResolvedAt).timestamp_with_time_zone().null())
-        .col(ColumnDef::new(Market::FeesEnabled).boolean().not_null().default(true))
-        .col(ColumnDef::new(Market::FeeRate).decimal().null())
-        .col(ColumnDef::new(Market::FeeExponent).decimal().null())
-        .col(ColumnDef::new(Market::FeeTakerOnly).boolean().null())
-        .col(ColumnDef::new(Market::FeeRebateRate).decimal().null())
-        .col(ColumnDef::new(Market::FeeSource).text().null())
-        .col(ColumnDef::new(Market::FeeObservedAt).timestamp_with_time_zone().null())
-        .col(crate::schema::timestamp_with_write_default(Market::CreatedAt))
-        .col(crate::schema::timestamp_with_write_default(Market::UpdatedAt))
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_market_event")
-                .from(Market::Table, Market::EventId)
-                .to(Event::Table, Event::EventId)
-                .on_delete(ForeignKeyAction::Restrict),
-        )
-        .to_owned()
-}
-
-pub fn indexes() -> Vec<IndexSpec> {
-    vec![
-        IndexSpec::sea_query(
-            "idx_markets_event_id",
-            market_table_name,
-            IndexBuildMode::Transactional,
-            Index::create()
-                .name("idx_markets_event_id")
-                .table(Market::Table)
-                .col(Market::EventId)
-                .to_owned(),
-            "market lookup by event",
-        ),
-        IndexSpec::raw(
-            "idx_markets_active_endgame",
-            market_table_name,
-            IndexBuildMode::Transactional,
-            "CREATE INDEX IF NOT EXISTS idx_markets_active_endgame \
-             ON market (end_date) \
-             WHERE status = 'active' AND end_date IS NOT NULL",
-            "scanner hot path for active endgame candidates",
-        ),
-    ]
-}
-
-pub fn dependencies() -> Vec<TableDependency> {
-    vec![TableDependency::foreign_key(event_table_name)]
-}
-
-pub fn seed_units() -> Vec<SeedSpec> {
-    Vec::new()
-}
-
-fn market_table_name() -> String {
-    Market::Table.to_string()
-}
-
-fn event_table_name() -> String {
-    Event::Table.to_string()
-}
-```
-
-说明：
-
-- `#[quant_schema]` 注入 `DeriveIden` 并注册 `TableSpec`。
-- `UpdatedAt` trigger 自动生成。
-- `dependencies()` 是 create/drop 拓扑排序来源。
-- `indexes()` 是定义该表业务索引的唯一位置。
-- `seed_units()` 拥有该表相关 seed metadata。
+- 是否只有一个 PostgreSQL v1 snapshot owner 和一个无版本链的 ClickHouse bootstrap owner？
+- entity、bootstrap snapshot、typed support spec 与 normalized manifest 是否 fixed point？
+- 是否引入了任何 upgrade/downgrade/data migration、兼容列、旧 reader、dual write 或版本分派？
+- money/ID/document 是否使用 canonical newtype/typed persistence contract？
+- 数据库约束与 repository transaction 是否表达完整业务不变量？
+- corruption、unknown field/tag、hash mismatch、CAS race、WORM update/delete 是否有真实测试？

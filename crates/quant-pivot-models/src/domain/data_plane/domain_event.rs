@@ -6,6 +6,7 @@ use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Error as SerdeJsonError;
 
+use super::domain_observation::{CryptoCheckpointError, DomainSourceCheckpoint};
 use crate::{
     clickhouse::{
         ChDecimal64, ChSchemaVersion, CryptoPriceReportRow, DomainEventRow, WeatherForecastFactRow,
@@ -41,11 +42,17 @@ pub struct CryptoPriceReport {
     pub raw_report: String,
 }
 
-impl From<&CryptoPriceReport> for CryptoPriceReportRow {
-    fn from(value: &CryptoPriceReport) -> Self {
-        Self {
+impl CryptoPriceReportRow {
+    /// Encode one report with its explicit durable continuity generation.
+    pub fn from_report(
+        value: &CryptoPriceReport,
+        gap_generation: u64,
+    ) -> Result<Self, CryptoCheckpointError> {
+        value.checkpoint()?;
+        Ok(Self {
             source_id: value.source_id.clone(),
             instrument_key: value.instrument_key.clone(),
+            gap_generation,
             source_sequence: value.source_sequence,
             price: ChDecimal64::from(value.price.inner()),
             quantity: value
@@ -62,32 +69,124 @@ impl From<&CryptoPriceReport> for CryptoPriceReportRow {
             report_hash: value.report_hash,
             raw_report: value.raw_report.clone(),
             schema_version: ChSchemaVersion::FIRST,
-        }
+        })
     }
 }
 
 impl CryptoPriceReport {
-    /// Decode one persisted source fact without inventing missing timestamps.
-    #[must_use]
-    pub fn from_clickhouse_row(row: CryptoPriceReportRow) -> Option<Self> {
-        Some(Self {
-            source_id: row.source_id,
-            instrument_key: row.instrument_key,
+    /// Construct the exact source-native checkpoint owned by this report.
+    pub fn checkpoint(&self) -> Result<DomainSourceCheckpoint, CryptoCheckpointError> {
+        if self.instrument_key.source_id().as_ref() != Some(&self.source_id) {
+            return Err(CryptoCheckpointError::BindingMismatch {
+                detail: "source and instrument identities differ",
+            });
+        }
+        if self.source_id == DomainSourceId::binance_agg_trade()
+            || self.source_id == DomainSourceId::binance_futures_trade()
+        {
+            Ok(DomainSourceCheckpoint::BinanceAggTrade {
+                aggregate_trade_id: self.source_sequence,
+                event_time: self.event_time,
+            })
+        } else if self.source_id == DomainSourceId::chainlink_data_streams() {
+            let observations_timestamp =
+                self.observations_timestamp
+                    .ok_or(CryptoCheckpointError::BindingMismatch {
+                        detail: "Chainlink report lacks observations timestamp",
+                    })?;
+            if u64::try_from(observations_timestamp.timestamp()).ok() != Some(self.source_sequence)
+            {
+                return Err(CryptoCheckpointError::BindingMismatch {
+                    detail: "Chainlink report sequence differs from observations timestamp",
+                });
+            }
+            Ok(DomainSourceCheckpoint::ChainlinkDataStreams {
+                observations_timestamp,
+                report_hash: self.report_hash,
+            })
+        } else if self.source_id == DomainSourceId::polymarket_rtds_binance()
+            || self.source_id == DomainSourceId::polymarket_rtds_chainlink()
+        {
+            if u64::try_from(self.event_time.timestamp_millis()).ok() != Some(self.source_sequence)
+            {
+                return Err(CryptoCheckpointError::BindingMismatch {
+                    detail: "RTDS report sequence differs from source timestamp",
+                });
+            }
+            Ok(DomainSourceCheckpoint::PolymarketRtds {
+                source_timestamp: self.event_time,
+                envelope_timestamp: self.published_at,
+                report_hash: self.report_hash,
+            })
+        } else {
+            Err(CryptoCheckpointError::UnsupportedSource {
+                source_id: self.source_id.clone(),
+            })
+        }
+    }
+
+    /// Verify an externally supplied checkpoint against this report.
+    pub fn validate_checkpoint(
+        &self,
+        checkpoint: &DomainSourceCheckpoint,
+    ) -> Result<(), CryptoCheckpointError> {
+        let expected = self.checkpoint()?;
+        if expected != *checkpoint {
+            return Err(CryptoCheckpointError::BindingMismatch {
+                detail: "report differs from its supplied checkpoint",
+            });
+        }
+        Ok(())
+    }
+
+    /// Decode one persisted source fact with typed timestamp validation.
+    pub fn try_from_clickhouse_row(
+        row: &CryptoPriceReportRow,
+    ) -> Result<Self, CryptoCheckpointError> {
+        let event_time = decode_crypto_millis(row.event_time, "event_time")?;
+        let published_at = decode_crypto_millis(row.published_at, "published_at")?;
+        let available_at = decode_crypto_millis(row.available_at, "available_at")?;
+        let report = Self {
+            source_id: row.source_id.clone(),
+            instrument_key: row.instrument_key.clone(),
             source_sequence: row.source_sequence,
             price: Usd::new(Decimal::from(row.price)),
             quantity: row
                 .quantity
                 .map(|quantity| Shares::new(Decimal::from(quantity))),
-            event_time: Utc.timestamp_millis_opt(row.event_time).single()?,
-            published_at: Utc.timestamp_millis_opt(row.published_at).single()?,
-            available_at: Utc.timestamp_millis_opt(row.available_at).single()?,
-            valid_from: decode_optional_millis(row.valid_from).ok()?,
-            observations_timestamp: decode_optional_millis(row.observations_timestamp).ok()?,
-            expires_at: decode_optional_millis(row.expires_at).ok()?,
+            event_time,
+            published_at,
+            available_at,
+            valid_from: decode_crypto_optional(row.valid_from, "valid_from")?,
+            observations_timestamp: decode_crypto_optional(
+                row.observations_timestamp,
+                "observations_timestamp",
+            )?,
+            expires_at: decode_crypto_optional(row.expires_at, "expires_at")?,
             report_hash: row.report_hash,
-            raw_report: row.raw_report,
-        })
+            raw_report: row.raw_report.clone(),
+        };
+        report.checkpoint()?;
+        Ok(report)
     }
+}
+
+fn decode_crypto_millis(
+    value: i64,
+    field: &'static str,
+) -> Result<DateTime<Utc>, CryptoCheckpointError> {
+    Utc.timestamp_millis_opt(value)
+        .single()
+        .ok_or(CryptoCheckpointError::InvalidTimestamp { field, value })
+}
+
+fn decode_crypto_optional(
+    value: Option<i64>,
+    field: &'static str,
+) -> Result<Option<DateTime<Utc>>, CryptoCheckpointError> {
+    value
+        .map(|value| decode_crypto_millis(value, field))
+        .transpose()
 }
 
 #[derive(Debug)]

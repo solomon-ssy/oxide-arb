@@ -401,6 +401,93 @@ pub async fn projection_upsert_updates_status() {
     assert!(active_projection.filter_reasons.is_empty());
 }
 
+pub async fn late_source_preserves_terminal() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection();
+    let repo = PgCatalogLedgerRepository::new(db.clone());
+    let t0 = Utc.with_ymd_and_hms(2026, 7, 10, 4, 0, 0).unwrap();
+
+    repo.commit(commit(1, t0, t0, "original"))
+        .await
+        .expect("active baseline");
+
+    let mut terminal = commit(
+        2,
+        t0 + Duration::seconds(20),
+        t0 + Duration::seconds(10),
+        "terminal",
+    );
+    set_event_status(&mut terminal, EventStatus::Closed);
+    set_market_disposition(
+        &mut terminal,
+        MarketStatus::Delisted,
+        CatalogFilterReasonSet::default(),
+    );
+    terminal.events[0].change.change_type = CatalogChangeType::GammaConfirmedTombstone;
+    terminal.events[0].change.source_timestamp_quality =
+        CatalogTimestampQuality::CommitTimeFallback;
+    terminal.markets[0].change_type = CatalogChangeType::GammaConfirmedTombstone;
+    terminal.markets[0].source_timestamp_quality = CatalogTimestampQuality::CommitTimeFallback;
+    let terminal_event_change_id = terminal.events[0].change.event_change_id;
+    let terminal_market_change_id = terminal.markets[0].market_change_id;
+    let terminal_event_hash = terminal.events[0].object.content_hash;
+    let terminal_market_hash = terminal.markets[0].object.content_hash;
+    let terminal_batch = repo
+        .commit(terminal)
+        .await
+        .expect("newer terminal catalog commit");
+    let terminal_effective_at = terminal_batch
+        .committed_at
+        .expect("terminal batch committed_at");
+
+    let mut late_active = commit(3, t0 + Duration::seconds(30), t0, "original");
+    late_active.batch.sync_kind = CatalogSyncKind::Reconcile;
+    let late = repo
+        .commit(late_active)
+        .await
+        .expect("older source-effective active re-observation");
+    let late_committed_at = late.committed_at.expect("late batch committed_at");
+
+    let snapshot = repo
+        .snapshot_at(
+            &MarketId::new("0xcatalog-ledger"),
+            &DecisionClock::new(0)
+                .boundary(late_committed_at)
+                .expect("post-late boundary"),
+        )
+        .await
+        .expect("post-late PIT lookup")
+        .expect("post-late catalog snapshot");
+    assert_eq!(snapshot.event.event_change_id, terminal_event_change_id);
+    assert_eq!(snapshot.market.market_change_id, terminal_market_change_id);
+    assert_eq!(snapshot.event.source_effective_at, terminal_effective_at);
+    assert_eq!(snapshot.market.source_effective_at, terminal_effective_at);
+    assert_eq!(snapshot.event.payload["status"], "closed");
+    assert_eq!(snapshot.market.payload["status"], "delisted");
+
+    let current_event = EventEntity::find_by_id(EventId::new("evt-catalog-ledger"))
+        .one(db)
+        .await
+        .expect("load current event projection")
+        .expect("current event projection exists");
+    let current_market = Entity::find_by_id(MarketId::new("0xcatalog-ledger"))
+        .one(db)
+        .await
+        .expect("load current market projection")
+        .expect("current market projection exists");
+    assert_eq!(current_event.status, EventStatus::Closed);
+    assert_eq!(current_event.content_hash, terminal_event_hash);
+    assert_eq!(current_market.status, MarketStatus::Delisted);
+    assert_eq!(current_market.content_hash, terminal_market_hash);
+
+    let counts = catalog_row_counts(db).await;
+    assert_eq!(counts.batches, 3);
+    assert_eq!(counts.event_objects, 2);
+    assert_eq!(counts.event_changes, 3);
+    assert_eq!(counts.market_objects, 2);
+    assert_eq!(counts.market_changes, 3);
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct CatalogRowCounts {
     batches: u64,
@@ -623,6 +710,38 @@ fn set_market_disposition(
     candidate.object.payload = payload.into();
     candidate.projection = UpsertMarket::from_registry(&source).expect("normalize market fixture");
     candidate.projection.content_hash = content_hash;
+}
+
+fn set_event_status(commit: &mut CatalogBatchCommit, status: EventStatus) {
+    let candidate = commit
+        .events
+        .first_mut()
+        .expect("catalog fixture has one event");
+    let mut source =
+        serde_json::from_value::<EventRegistryInfo>(candidate.object.payload.clone().into_inner())
+            .expect("decode typed event fixture");
+    source.status = status;
+    let mut payload = serde_json::to_value(&source).expect("encode typed event fixture");
+    payload
+        .as_object_mut()
+        .expect("event fixture object")
+        .insert("revision".to_owned(), "terminal".into());
+    let content_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/catalog-event-object",
+        CATALOG_OBJECT_HASH_VERSION,
+        &payload,
+    )
+    .expect("hash typed event fixture");
+    let event_object_id = CatalogEventObjectId::from_content_hash(&content_hash);
+    candidate.object.event_object_id = event_object_id;
+    candidate.object.content_hash = content_hash;
+    candidate.object.payload = payload.into();
+    candidate.change.event_object_id = event_object_id;
+    candidate.projection.status = status;
+    candidate.projection.content_hash = content_hash;
+    for market in &mut commit.markets {
+        market.event_object_id = event_object_id;
+    }
 }
 
 fn event_object_fixture(

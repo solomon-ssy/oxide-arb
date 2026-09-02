@@ -11,8 +11,19 @@ use crate::{
         api::{ModelTrainJobParams, TrainedModelView},
         quant::{JobProgressSink, ModelVersionInfo},
     },
-    types::ModelVersionId,
+    types::{ModelRunId, ModelVersionId},
 };
+
+/// Result of an explicit owner-driven terminalization of a training run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainingRunFinalization {
+    /// The run was absent, newly terminalized, or already in the requested
+    /// terminal state.
+    Terminalized,
+    /// The atomic model/version commit won the race and must be surfaced as a
+    /// successful research-job result after exact version/parity readback.
+    CommitWon { model_version_id: ModelVersionId },
+}
 
 /// Dependency-inversion boundary between the HTTP layer and the core trainer.
 ///
@@ -30,6 +41,22 @@ pub trait ModelTrainingPort: Send + Sync {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TrainedModelView>;
+
+    /// Terminalize a still-running training run after an explicit operator
+    /// cancellation. Lease loss and shutdown must never call this operation.
+    async fn cancel_run(
+        &self,
+        model_run_id: &ModelRunId,
+        reason: String,
+    ) -> QuantResult<TrainingRunFinalization>;
+
+    /// Terminalize a still-running training run after its bounded transient
+    /// retries are exhausted. Scheduled retries and lease loss must not call it.
+    async fn fail_run(
+        &self,
+        model_run_id: &ModelRunId,
+        reason: String,
+    ) -> QuantResult<TrainingRunFinalization>;
 
     /// Load a registered model version (UI poll target after train).
     async fn find_version(

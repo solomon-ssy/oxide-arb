@@ -3,7 +3,7 @@
 //!
 //! `submit_if_admitted` is the only path that signs and submits money. It is
 //! **claim-first**: a short row-locked transaction moves the intent
-//! `Approved`/`ApprovedByPolicy -> AdmissionPending` (the double-submit guard),
+//! `Authorized -> AdmissionPending` (the double-submit guard),
 //! then admission is evaluated against the *pre-claim* approval snapshot, then —
 //! on `Allow` — the order is write-ahead persisted (`Submitted`) with capital
 //! locked, the venue is called **outside any DB lock**, and the result is
@@ -128,7 +128,7 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
                 state: "not_found".to_owned(),
             })?;
         ensure_submittable(&intent, now)?;
-        // Pre-claim approval status; the post-settle lifecycle event is emitted
+        // Pre-claim authorization status; the post-settle lifecycle event is emitted
         // relative to this so a resting `Submitted` or an immediate `Filled`
         // fans out on `quant.intent`.
         let prior_status = intent.status;
@@ -187,8 +187,7 @@ impl CoreExecutionDispatcher {
         };
         let recommendation = input.recommendation.clone();
         let condition = input.condition.clone();
-        let prepared_order = input.prepare_entry_order()?;
-        let decision = match self.deps.admission.evaluate(input).await {
+        let decision = match self.deps.admission.evaluate(&input).await {
             Ok(decision) => decision,
             Err(error) => return Err(error),
         };
@@ -211,7 +210,7 @@ impl CoreExecutionDispatcher {
                         admission_state_version,
                         claimed_at: now,
                     },
-                    prepared_order,
+                    input.prepared_order,
                 ))
             }
             AdmissionOutcome::Deny => {
@@ -276,7 +275,7 @@ impl CoreExecutionDispatcher {
         let result = self
             .deps
             .order_client
-            .submit(build_venue_order(recommendation, prepared_order))
+            .submit(build_venue_order(prepared_order))
             .await
             .with_order_type_semantics(&spec.order_type);
 
@@ -321,7 +320,7 @@ impl CoreExecutionDispatcher {
         Ok(recorded)
     }
 
-    /// Best-effort release the claim (`AdmissionPending -> Approved`) before
+    /// Best-effort release the claim (`AdmissionPending -> Authorized`) before
     /// propagating a pre-submission error, so the intent stays retryable.
     async fn revert_and(&self, intent_id: &OrderIntentId, error: QuantError) -> QuantError {
         match self.deps.submission.revert_claim(intent_id).await {
@@ -432,19 +431,27 @@ fn build_new_execution_order(
     spec: &EntryOrderSpec,
     prepared_order: &PreparedVenueOrder,
 ) -> Result<NewExecutionOrder, ExecutionError> {
+    if prepared_order.market_id != recommendation.market_id
+        || prepared_order.token_id != spec.token_id
+    {
+        return Err(ExecutionError::IntentDenied {
+            reason: "prepared entry venue identity differs from its owning intent".to_owned(),
+        });
+    }
     Ok(NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
         order_intent_id: intent.order_intent_id,
         order_phase: ExecutionOrderPhase::Entry,
-        market_id: recommendation.market_id.clone(),
-        token_id: spec.token_id.clone(),
+        market_id: prepared_order.market_id.clone(),
+        token_id: prepared_order.token_id.clone(),
         side: spec.side,
         order_type: spec.order_type.into(),
-        price: spec.limit_price,
-        shares: prepared_order.expected_filled_shares,
-        cost_usd: prepared_order
-            .cash_budget
-            .unwrap_or_else(|| spec.notional()),
+        price: prepared_order.limit_price,
+        shares: prepared_order.requested_shares,
+        cost_usd: prepared_order.cash_budget.unwrap_or_else(|| {
+            prepared_order.requested_shares * prepared_order.limit_price
+                + prepared_order.expected_fee
+        }),
         prepared_order_json: prepared_order.clone(),
         venue_order_id: None,
         venue_status: None,
@@ -457,15 +464,16 @@ fn build_new_execution_order(
     })
 }
 
-fn build_venue_order(
-    recommendation: &RecommendationInfo,
-    prepared: &PreparedVenueOrder,
-) -> VenueOrder {
+fn build_venue_order(prepared: &PreparedVenueOrder) -> VenueOrder {
     VenueOrder {
-        market_id: recommendation.market_id.clone(),
+        market_id: prepared.market_id.clone(),
         token_id: prepared.token_id.clone(),
+        tick_size: prepared.tick_size,
+        minimum_order_size: prepared.minimum_order_size,
+        neg_risk: prepared.neg_risk,
+        clob_market_info_payload_hash: prepared.clob_market_info_payload_hash,
         side: prepared.side,
-        price: prepared.worst_price,
+        limit_price: prepared.limit_price,
         amount: prepared.venue_amount,
         order_type: prepared.order_type,
         post_only: prepared.post_only,

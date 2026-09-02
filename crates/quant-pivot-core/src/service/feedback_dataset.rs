@@ -9,6 +9,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
@@ -37,7 +38,8 @@ use quant_pivot_models::{
         FeatureVectorId, MODEL_SCORE_COHORT_FORMAT_VERSION, ModelLearningCohortRow, ModelRunId,
         ModelScoreCohortArtifact, ModelScoreCohortRow, ModelVersionId, NewModelLearningCohortRow,
         NewModelScoreCohortRow, RecommendationReportId, ReportFunnelStage, ReportRouteRunId,
-        ResearchJobProgress, SchemaVersion, TokenId, TrainingSampleSource, TrainingSampleSources,
+        ReportRunId, ResearchJobProgress, SchemaVersion, TokenId, TrainingSampleSource,
+        TrainingSampleSources,
         factor::{FactorDefinitionRef, FactorServingPlane},
     },
 };
@@ -73,6 +75,8 @@ pub struct FeedbackDatasetServiceDeps {
     pub feature_repository: Arc<dyn FeatureRepository>,
     pub factor_repository: Arc<dyn FactorRepository>,
     pub artifact_store: Arc<dyn ArtifactStore>,
+    pub compute: Arc<ComputeExecutor>,
+    pub compute_memory: OfflineMemory,
     pub dataset_service: Arc<TrainingDatasetService>,
 }
 
@@ -115,7 +119,17 @@ impl FeedbackCohortMaterializer {
 pub struct FeedbackDatasetService {
     score_materializer: ModelScoreCohortMaterializer,
     artifact_store: Arc<dyn ArtifactStore>,
+    compute: Arc<ComputeExecutor>,
+    compute_memory: OfflineMemory,
     dataset_service: Arc<TrainingDatasetService>,
+}
+
+struct EncodedScoreCohort {
+    artifact: ModelScoreCohortArtifact,
+    source_hash: ContentHash,
+    bytes: Vec<u8>,
+    bytes_hash: ContentHash,
+    schema_hash: ContentHash,
 }
 
 /// Complete scored-serving population reader. Recommendation publication is
@@ -200,6 +214,8 @@ impl FeedbackDatasetService {
                 factors: deps.factor_repository,
             },
             artifact_store: deps.artifact_store,
+            compute: deps.compute,
+            compute_memory: deps.compute_memory,
             dataset_service: deps.dataset_service,
         }
     }
@@ -228,6 +244,7 @@ impl FeedbackDatasetService {
                 materialized.counts.clone(),
                 request.source_lineage.capability_registry_hashes.clone(),
                 mem::take(&mut materialized.rows),
+                &cancel,
             )
             .await?;
         if cancel.is_cancelled() {
@@ -278,6 +295,8 @@ impl FeedbackDatasetService {
             plan,
             materialized.examples,
             materialized.coverage,
+            self.compute_memory,
+            &cancel,
         ))
         .await
     }
@@ -339,26 +358,67 @@ impl ModelScoreCohortMaterializer {
         window: &FeedbackCohortWindow,
         truth_cutoff: DateTime<Utc>,
     ) -> QuantResult<HashMap<RecommendationReportId, ScoreReportBinding>> {
-        let mut by_id = HashMap::new();
-        for report in self
+        let reports = self
             .reports
             .list_committed_between(window.window_start(), window.cutoff())
             .await?
-        {
-            if report.created_at > truth_cutoff {
-                continue;
+            .into_iter()
+            .filter(|report| report.created_at <= truth_cutoff)
+            .collect::<Vec<_>>();
+        let mut report_by_run = HashMap::<ReportRunId, RecommendationReportId>::new();
+        for report in &reports {
+            if report_by_run
+                .insert(report.report_run_id, report.recommendation_report_id)
+                .is_some()
+            {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "committed report window contains duplicate run identity {}",
+                        report.report_run_id
+                    ),
+                }
+                .into());
             }
-            let route_runs = self
-                .reports
-                .list_route_runs(&report.recommendation_report_id)
-                .await?
+        }
+        let report_run_ids = report_by_run.keys().copied().collect::<Vec<_>>();
+        let mut routes_by_run =
+            HashMap::<ReportRunId, HashMap<ReportRouteRunId, ReportRouteRunInfo>>::new();
+        for route_run in self.reports.find_route_runs(&report_run_ids).await? {
+            let report_run_id = route_run.report_run_id;
+            let report_route_run_id = route_run.report_route_run_id;
+            if !report_by_run.contains_key(&report_run_id) {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "Route run {report_route_run_id} belongs to unrequested report run {report_run_id}"
+                    ),
+                }
+                .into());
+            }
+            if routes_by_run
+                .entry(report_run_id)
+                .or_default()
+                .insert(report_route_run_id, route_run)
+                .is_some()
+            {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "report run {report_run_id} returned duplicate Route-run identity {report_route_run_id}"
+                    ),
+                }
+                .into());
+            }
+        }
+        let mut by_id = HashMap::new();
+        for report in reports {
+            let route_runs = routes_by_run
+                .remove(&report.report_run_id)
+                .unwrap_or_default()
                 .into_iter()
-                .filter(|route_run| {
+                .filter(|(_, route_run)| {
                     route_run.lineage_json.as_ref().is_some_and(|lineage| {
                         lineage.research_profile_ref == *window.profile_ref()
                     })
                 })
-                .map(|route_run| (route_run.report_route_run_id, route_run))
                 .collect::<HashMap<_, _>>();
             if route_runs.is_empty() {
                 continue;
@@ -374,6 +434,12 @@ impl ModelScoreCohortMaterializer {
                 }
                 .into());
             }
+        }
+        if !routes_by_run.is_empty() {
+            return Err(ResearchError::DatasetBuild {
+                detail: "batched Route-run query returned orphan report-run groups".to_owned(),
+            }
+            .into());
         }
         Ok(by_id)
     }
@@ -1561,6 +1627,7 @@ impl FeedbackCohortMaterializer {
                     candidate.context(),
                     candidate.resolution_outcome(),
                     candidate.execution_rollup(),
+                    candidate.economic_outcome(),
                 )
                 .map_err(|error| ResearchError::DatasetBuild {
                     detail: format!("classify {cohort} candidate: {error}"),
@@ -2114,6 +2181,7 @@ impl FeedbackDatasetService {
         counts: DatasetCohortCounts,
         capability_registry_hashes: CapabilityRegistryHashes,
         rows: Vec<ModelScoreCohortRow>,
+        cancel: &CancellationToken,
     ) -> QuantResult<DatasetCohortManifest> {
         let artifact = ModelScoreCohortArtifact {
             format_version: MODEL_SCORE_COHORT_FORMAT_VERSION,
@@ -2121,26 +2189,60 @@ impl FeedbackDatasetService {
             counts: counts.clone(),
             rows,
         };
-        let source_hash = artifact
-            .source_hash()
-            .map_err(|error| ResearchError::DatasetBuild {
-                detail: format!("hash model-score cohort artifact: {error}"),
-            })?;
-        let bytes = ModelScoreCohortCodec::encode(&artifact)?;
-        let bytes_hash = ModelScoreCohortCodec::bytes_hash(&bytes);
-        let schema_hash = ModelScoreCohortCodec::schema_hash()?;
-        let key = ArtifactKey::new(ArtifactNamespace::FeedbackCohort, source_hash.hex(), "json")?;
-        let uri = self.artifact_store.put(key, &bytes).await?;
+        Self::require_active(cancel, "before model-score cohort encoding")?;
+        let encoded = self
+            .compute
+            .run_offline_cancellable(self.compute_memory, cancel, move || {
+                let source_hash =
+                    artifact
+                        .source_hash()
+                        .map_err(|error| ResearchError::DatasetBuild {
+                            detail: format!("hash model-score cohort artifact: {error}"),
+                        })?;
+                let bytes = ModelScoreCohortCodec::encode(&artifact)?;
+                let bytes_hash = ModelScoreCohortCodec::bytes_hash(&bytes);
+                let schema_hash = ModelScoreCohortCodec::schema_hash()?;
+                Ok(EncodedScoreCohort {
+                    artifact,
+                    source_hash,
+                    bytes,
+                    bytes_hash,
+                    schema_hash,
+                })
+            })
+            .await?;
+        Self::require_active(cancel, "after model-score cohort encoding")?;
+        let key = ArtifactKey::new(
+            ArtifactNamespace::FeedbackCohort,
+            encoded.source_hash.hex(),
+            "json",
+        )?;
+        let uri = self.artifact_store.put(key, &encoded.bytes).await?;
         let persisted = self.artifact_store.get(&uri).await?;
-        if ModelScoreCohortCodec::bytes_hash(&persisted) != bytes_hash
-            || ModelScoreCohortCodec::decode(&persisted)? != artifact
-        {
-            return Err(ResearchError::ArtifactHashMismatch {
-                expected: bytes_hash.to_string(),
-                actual: ModelScoreCohortCodec::bytes_hash(&persisted).to_string(),
-            }
-            .into());
-        }
+        Self::require_active(cancel, "before model-score cohort verification")?;
+        let EncodedScoreCohort {
+            artifact,
+            source_hash,
+            bytes: _,
+            bytes_hash,
+            schema_hash,
+        } = encoded;
+        self.compute
+            .run_offline_cancellable(self.compute_memory, cancel, move || {
+                let actual_hash = ModelScoreCohortCodec::bytes_hash(&persisted);
+                if actual_hash != bytes_hash
+                    || ModelScoreCohortCodec::decode(&persisted)? != artifact
+                {
+                    return Err(ResearchError::ArtifactHashMismatch {
+                        expected: bytes_hash.to_string(),
+                        actual: actual_hash.to_string(),
+                    }
+                    .into());
+                }
+                Ok(())
+            })
+            .await?;
+        Self::require_active(cancel, "after model-score cohort verification")?;
         let manifest = DatasetCohortManifest {
             format_version: DATASET_COHORT_MANIFEST_FORMAT_VERSION,
             cohort: FeedbackCohort::ModelScoreLearning,
@@ -2161,5 +2263,15 @@ impl FeedbackDatasetService {
                 detail: format!("validate model-score cohort manifest: {error}"),
             })?;
         Ok(manifest)
+    }
+
+    fn require_active(cancel: &CancellationToken, boundary: &'static str) -> QuantResult<()> {
+        if cancel.is_cancelled() {
+            return Err(ResearchError::Cancelled {
+                detail: format!("feedback Dataset cancelled {boundary}"),
+            }
+            .into());
+        }
+        Ok(())
     }
 }

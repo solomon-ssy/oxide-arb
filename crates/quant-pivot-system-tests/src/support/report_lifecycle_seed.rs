@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Duration};
+use quant_pivot_core::report::ReportTrigger;
 use quant_pivot_models::{
     clickhouse::{ChUsd, QuantReportRecommendationFactRow, ReportMarketFunnelRow},
     config::ClickHouseConfig,
     domain::quant::{
-        NewReportFactDelivery, NewReportTransaction, RecommendationReportInfo, ReportRunClaim,
+        NewReportFactDelivery, NewReportRun, NewReportTransaction, RecommendationReportInfo,
+        ReportRunClaim, ReportRunInfo,
     },
     entities::quant_report_run::ActiveModel,
     enums::quant::{
@@ -132,7 +134,10 @@ pub async fn materialize_report_facts(
     .await?;
 
     let pool = Arc::new(ClickHousePool::connect(clickhouse).await?);
-    let manager = Arc::new(ChWriteManager::new(clickhouse.max_concurrent_inserts));
+    let manager = Arc::new(ChWriteManager::new(
+        clickhouse.max_concurrent_inserts,
+        &clickhouse.io,
+    ));
     if !recommendation_rows.is_empty() {
         ChFactWriter::new(
             Arc::clone(&pool),
@@ -250,6 +255,113 @@ pub async fn seal_report_facts(
     Ok(())
 }
 
+/// Test-only database adapter for a claimed run with an explicit fixture clock.
+///
+/// The resulting durable run can enter the production parity factory and
+/// report commit FSM; this adapter does not create parity evidence or reports.
+pub struct ReportRunFixture<'a> {
+    db: &'a DatabaseConnection,
+}
+
+impl<'a> ReportRunFixture<'a> {
+    /// Bind claimed-run setup to this fixture's database.
+    #[must_use]
+    pub const fn new(db: &'a DatabaseConnection) -> Self {
+        Self { db }
+    }
+
+    /// Persist the exact run and lease needed by normal report preparation.
+    pub async fn create_claimed(
+        &self,
+        transaction: &NewReportTransaction,
+        trigger: &ReportTrigger,
+        knowledge_lag_secs: i64,
+    ) -> Result<ReportRunInfo> {
+        let decision_at = transaction.report.decision_at;
+        let (schedule_id, request_id, scheduled_for) = match trigger {
+            ReportTrigger::Scheduled { schedule_id } => {
+                (Some(schedule_id.clone()), None, Some(decision_at))
+            }
+            ReportTrigger::AdHoc { request_id } => (None, Some(request_id.clone()), None),
+        };
+        self.persist_claimed(
+            transaction,
+            NewReportRun {
+                report_run_id: transaction.report.report_run_id,
+                trigger_kind: trigger.kind(),
+                trigger_key: trigger.key(decision_at)?,
+                schedule_id,
+                request_id,
+                retry_of_run_id: None,
+                scheduled_for,
+                requested_at: decision_at,
+                status: ReportRunStatus::Running,
+                top_n: Some(transaction.report.top_n),
+                knowledge_lag_secs: Some(knowledge_lag_secs),
+            },
+        )
+        .await
+    }
+
+    async fn persist_claimed(
+        &self,
+        transaction: &NewReportTransaction,
+        seed: NewReportRun,
+    ) -> Result<ReportRunInfo> {
+        let clock = PgReportRunRepository::new(self.db.clone());
+        let latest_availability_at = transaction
+            .recommendations
+            .iter()
+            .map(|recommendation| recommendation.created_at)
+            .fold(transaction.report.created_at, DateTime::max);
+        let now = loop {
+            let now = clock
+                .database_time()
+                .await
+                .context("read database time for report fixture")?;
+            if now >= latest_availability_at {
+                break now;
+            }
+            let wait = (latest_availability_at - now)
+                .to_std()
+                .context("positive database clock wait")?;
+            tokio::time::sleep(wait).await;
+        };
+        let worker_id = WorkerId::from_v7();
+        let lease_expires_at = now + Duration::minutes(10);
+        let run = ActiveModel {
+            report_run_id: ActiveValue::Set(seed.report_run_id),
+            trigger_kind: ActiveValue::Set(seed.trigger_kind),
+            trigger_key: ActiveValue::Set(seed.trigger_key),
+            schedule_id: ActiveValue::Set(seed.schedule_id),
+            request_id: ActiveValue::Set(seed.request_id),
+            retry_of_run_id: ActiveValue::Set(seed.retry_of_run_id),
+            scheduled_for: ActiveValue::Set(seed.scheduled_for),
+            requested_at: ActiveValue::Set(seed.requested_at),
+            status: ActiveValue::Set(seed.status),
+            started_at: ActiveValue::Set(Some(transaction.report.decision_at)),
+            decision_at: ActiveValue::Set(Some(transaction.report.decision_at)),
+            heartbeat_at: ActiveValue::Set(Some(now)),
+            lease_expires_at: ActiveValue::Set(Some(lease_expires_at)),
+            finished_at: ActiveValue::Set(None),
+            lease_owner: ActiveValue::Set(Some(worker_id)),
+            decision_policy_snapshot_id: ActiveValue::Set(Some(
+                transaction.report.decision_policy_snapshot_id,
+            )),
+            top_n: ActiveValue::Set(seed.top_n),
+            knowledge_lag_secs: ActiveValue::Set(seed.knowledge_lag_secs),
+            output_report_id: ActiveValue::Set(None),
+            terminal_reason: ActiveValue::Set(None),
+            error_code: ActiveValue::Set(None),
+            error_summary: ActiveValue::Set(None),
+        }
+        .insert(self.db)
+        .await
+        .context("seed running report run")?;
+        Ok(run.into())
+    }
+}
+
 /// Persist a complete Prepared artifact, verify its delivery, and atomically
 /// publish it. Fixtures must not bypass the durable run/publication FSM.
 pub async fn persist_and_publish_report(
@@ -288,28 +400,6 @@ pub async fn persist_prepared_report(
     trigger_key: &str,
     knowledge_lag_secs: i64,
 ) -> RecommendationReportInfo {
-    let clock = PgReportRunRepository::new(db.clone());
-    let latest_availability_at = transaction
-        .recommendations
-        .iter()
-        .map(|recommendation| recommendation.created_at)
-        .fold(transaction.report.created_at, DateTime::max);
-    let now = loop {
-        let now = clock
-            .database_time()
-            .await
-            .expect("read database time for report fixture");
-        if now >= latest_availability_at {
-            break now;
-        }
-        let wait = (latest_availability_at - now)
-            .to_std()
-            .expect("positive database clock wait");
-        tokio::time::sleep(wait).await;
-    };
-    let worker_id = WorkerId::from_v7();
-    let lease_expires_at = now + Duration::minutes(10);
-    let report_run_id = transaction.report.report_run_id;
     transaction.report.status = RecommendationReportStatus::Prepared;
     transaction.report.published_at = None;
     transaction.report.successor_report_id = None;
@@ -322,45 +412,34 @@ pub async fn persist_prepared_report(
         recommendation.status = RecommendationStatus::Prepared;
     }
 
-    ActiveModel {
-        report_run_id: ActiveValue::Set(report_run_id),
-        trigger_kind: ActiveValue::Set(ReportTriggerKind::Scheduled),
-        trigger_key: ActiveValue::Set(
-            ReportTriggerKey::parse(trigger_key).expect("valid report fixture trigger key"),
-        ),
-        schedule_id: ActiveValue::Set(Some("test_fixture".into())),
-        request_id: ActiveValue::Set(None),
-        retry_of_run_id: ActiveValue::Set(None),
-        scheduled_for: ActiveValue::Set(Some(transaction.report.decision_at)),
-        requested_at: ActiveValue::Set(transaction.report.decision_at),
-        status: ActiveValue::Set(ReportRunStatus::Running),
-        started_at: ActiveValue::Set(Some(transaction.report.decision_at)),
-        decision_at: ActiveValue::Set(Some(transaction.report.decision_at)),
-        heartbeat_at: ActiveValue::Set(Some(now)),
-        lease_expires_at: ActiveValue::Set(Some(lease_expires_at)),
-        finished_at: ActiveValue::Set(None),
-        lease_owner: ActiveValue::Set(Some(worker_id)),
-        decision_policy_snapshot_id: ActiveValue::Set(Some(
-            transaction.report.decision_policy_snapshot_id,
-        )),
-        top_n: ActiveValue::Set(Some(transaction.report.top_n)),
-        knowledge_lag_secs: ActiveValue::Set(Some(knowledge_lag_secs)),
-        output_report_id: ActiveValue::Set(None),
-        terminal_reason: ActiveValue::Set(None),
-        error_code: ActiveValue::Set(None),
-        error_summary: ActiveValue::Set(None),
-    }
-    .insert(db)
-    .await
-    .expect("seed running report run");
+    let run = ReportRunFixture::new(db)
+        .persist_claimed(
+            &transaction,
+            NewReportRun {
+                report_run_id: transaction.report.report_run_id,
+                trigger_kind: ReportTriggerKind::Scheduled,
+                trigger_key: ReportTriggerKey::parse(trigger_key)
+                    .expect("valid report fixture trigger key"),
+                schedule_id: Some("test_fixture".into()),
+                request_id: None,
+                retry_of_run_id: None,
+                scheduled_for: Some(transaction.report.decision_at),
+                requested_at: transaction.report.decision_at,
+                status: ReportRunStatus::Running,
+                top_n: Some(transaction.report.top_n),
+                knowledge_lag_secs: Some(knowledge_lag_secs),
+            },
+        )
+        .await
+        .expect("seed claimed report run");
 
     let repository = PgRecommendationReportRepository::new(db.clone());
     repository
         .create_prepared_report(
             ReportRunClaim {
-                report_run_id,
-                lease_owner: worker_id,
-                lease_expires_at,
+                report_run_id: run.report_run_id,
+                lease_owner: run.lease_owner.expect("fixture run lease owner"),
+                lease_expires_at: run.lease_expires_at.expect("fixture run lease deadline"),
             },
             transaction,
         )

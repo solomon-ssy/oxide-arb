@@ -23,7 +23,8 @@ use quant_pivot_research::{
 
 use crate::service::{
     model_serving_preimage::{
-        ModelServingPreimageService, PreimageVerificationDepth, VerifiedModelServingPreimage,
+        ModelPreimageReadContext, ModelServingPreimageService, PreimageVerificationDepth,
+        VerifiedModelServingPreimage,
     },
     trade_policy_evidence::{TradePolicyEvidenceDurability, TradePolicyEvidenceVerifier},
     training_dataset::require_dataset_materialization,
@@ -325,14 +326,17 @@ impl TradePolicyPreimageVerifier {
         serving_preimages: &ModelServingPreimageService,
         target: TradePolicyPreimageTarget<'_>,
         durability: TradePolicyEvidenceDurability,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<Option<VerifiedTradePolicyPreimage>> {
-        Box::pin(self.verify_depth(
-            serving_preimages,
-            target,
-            durability,
-            PreimageVerificationDepth::FullObjects,
-        ))
-        .await
+        context
+            .run(Box::pin(self.verify_depth(
+                serving_preimages,
+                target,
+                durability,
+                PreimageVerificationDepth::FullObjects,
+                context,
+            )))
+            .await
     }
 
     pub(crate) async fn verify_depth(
@@ -341,6 +345,7 @@ impl TradePolicyPreimageVerifier {
         target: TradePolicyPreimageTarget<'_>,
         durability: TradePolicyEvidenceDurability,
         depth: PreimageVerificationDepth,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<Option<VerifiedTradePolicyPreimage>> {
         let manifest = require_dataset_materialization(target.dataset)?.manifest;
         let (Some(artifact_id), Some(expected_hash)) = (
@@ -388,7 +393,7 @@ impl TradePolicyPreimageVerifier {
                 id: source_dataset_id.to_string(),
             })?;
         serving_preimages
-            .verify_dataset(&source_dataset, target.profile, depth)
+            .verify_dataset(&source_dataset, target.profile, depth, context)
             .await?;
 
         let subject_id = policy.payload_json.fit_contract.model_version_id;
@@ -401,7 +406,9 @@ impl TradePolicyPreimageVerifier {
                 entity: "quant_model_version",
                 id: subject_id.to_string(),
             })?;
-        let subject_preimage = serving_preimages.load_base(&subject, depth).await?;
+        let subject_preimage = serving_preimages
+            .load_base(&subject, depth, context)
+            .await?;
         TradePolicyCrossBindings {
             policy: &policy,
             source_dataset: &source_dataset,

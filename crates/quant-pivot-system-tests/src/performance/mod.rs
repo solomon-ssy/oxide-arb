@@ -44,6 +44,7 @@ use quant_pivot_models::{
     domain::data_plane::pipeline::StreamSessionTicket,
     types::{TokenId, TokenKey},
 };
+use quant_pivot_storage::clickhouse::ClickHouseQueryLimits;
 use tokio::{
     task::JoinHandle,
     time::{Instant, sleep, sleep_until, timeout},
@@ -727,26 +728,23 @@ async fn write_run_evidence(
 
 impl PerformanceRuntime {
     async fn collect_runtime_environment(&self) -> Result<PerformanceEnvironmentV1> {
-        let clickhouse_version = self
-            .infra
-            .ch
-            .client()
-            .query("SELECT version()")
-            .fetch_one::<String>()
-            .await
-            .context("read ClickHouse performance version")?;
-        let clickhouse_settings = self
-            .infra
-            .ch
-            .client()
-            .query(
-                "SELECT concat(name, '=', value) FROM system.settings \
-             WHERE name IN ('async_insert', 'wait_for_async_insert', \
-             'async_insert_deduplicate', 'max_threads') ORDER BY name",
-            )
-            .fetch_all::<String>()
-            .await
-            .context("read ClickHouse performance settings")?;
+        let clickhouse_version =
+            ClickHouseQueryLimits::new("ch.performance.environment_version.v1", 1, 1_024)
+                .query(self.infra.ch.as_ref(), "SELECT version()")
+                .fetch_one::<String>()
+                .await
+                .context("read ClickHouse performance version")?;
+        let clickhouse_settings =
+            ClickHouseQueryLimits::new("ch.performance.environment_settings.v1", 8, 16 * 1_024)
+                .query(
+                    self.infra.ch.as_ref(),
+                    "SELECT concat(name, '=', value) FROM system.settings \
+             WHERE name IN ('async_insert', 'insert_deduplicate', 'max_threads', \
+             'max_insert_threads', 'priority', 'use_concurrency_control') ORDER BY name",
+                )
+                .fetch_all::<String>()
+                .await
+                .context("read ClickHouse performance settings")?;
         let network_rtt_p50_us = measure_http_rtt(&self.stack.clickhouse_config.url, 20).await?;
         collect_environment(clickhouse_version, clickhouse_settings, network_rtt_p50_us)
     }

@@ -67,6 +67,19 @@ pub struct ResolvedMarketBundle<'a> {
     pub capture: Option<MarketDecisionCapture>,
 }
 
+/// Minimal resolved evidence needed to freeze one report data-quality row.
+///
+/// Keeping this view independent from [`ResolvedMarketBundle`] lets serving
+/// computation move its large owned inputs onto the governed Rayon pool while
+/// retaining only the capture and window evidence required after persistence.
+#[derive(Clone, Copy)]
+pub struct ResolvedDataQualityInput<'a> {
+    /// Decision-time recommendation execution capture.
+    pub capture: &'a MarketDecisionCapture,
+    /// PIT-bounded microstructure window consumed by the feature build.
+    pub window: &'a MarketWindowSnapshot,
+}
+
 /// Everything frozen at feature resolve for downstream report composition.
 #[derive(Debug, Clone)]
 pub struct MarketDecisionCapture {
@@ -205,10 +218,11 @@ pub fn market_context_from_resolved(
         time_to_resolution_secs,
         market_status: market.status,
         neg_risk: market.neg_risk,
-        tick_size: registry
+        tick_size: market
+            .order_rules
             .ok_or_else(|| ResearchError::PitResolution {
                 detail: format!(
-                    "market {} has no tick-size registry metadata",
+                    "market {} has no point-in-time CLOB order rules",
                     selected.market_id
                 ),
             })?
@@ -405,16 +419,16 @@ pub fn capture_market_decision(
 pub fn draft_data_quality_snapshot(
     as_of: DateTime<Utc>,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    bundles: &[ResolvedMarketBundle<'_>],
+    resolved: &[ResolvedDataQualityInput<'_>],
     vectors: &[FeatureVector],
     persisted: &[FeatureVectorInfo],
     rejected_markets: &[RejectedMarketDraft],
 ) -> QuantResult<NewReportDataQualitySnapshot> {
-    if bundles.len() != vectors.len() || vectors.len() != persisted.len() {
+    if resolved.len() != vectors.len() || vectors.len() != persisted.len() {
         return Err(ResearchError::Determinism {
             detail: format!(
-                "data-quality snapshot alignment mismatch: bundles={}, vectors={}, persisted={}",
-                bundles.len(),
+                "data-quality snapshot alignment mismatch: resolved={}, vectors={}, persisted={}",
+                resolved.len(),
                 vectors.len(),
                 persisted.len()
             ),
@@ -425,57 +439,50 @@ pub fn draft_data_quality_snapshot(
         .iter()
         .map(|row| (row.market_id.clone(), row))
         .collect();
-    let records =
-        bundles
-            .iter()
-            .zip(vectors)
-            .zip(persisted)
-            .map(
-                |((bundle, vector), persisted)| -> QuantResult<TokenDataQualityRecord> {
-                    let wrong_market = persisted.market_id != vector.market_id;
-                    let wrong_token = persisted.token_id.as_ref() != vector.token_id.as_ref();
-                    let wrong_decision = persisted.decision_at != as_of;
-                    let wrong_data_quality = persisted.data_quality != vector.data_quality;
-                    if wrong_market || wrong_token || wrong_decision || wrong_data_quality {
-                        return Err(ResearchError::Determinism {
+    let records = resolved
+        .iter()
+        .zip(vectors)
+        .zip(persisted)
+        .map(
+            |((resolved, vector), persisted)| -> QuantResult<TokenDataQualityRecord> {
+                let wrong_market = persisted.market_id != vector.market_id;
+                let wrong_token = persisted.token_id.as_ref() != vector.token_id.as_ref();
+                let wrong_decision = persisted.decision_at != as_of;
+                let wrong_data_quality = persisted.data_quality != vector.data_quality;
+                if wrong_market || wrong_token || wrong_decision || wrong_data_quality {
+                    return Err(ResearchError::Determinism {
                         detail: format!(
                             "persisted feature vector {} is not aligned with DQ row for market {}",
                             persisted.feature_vector_id, vector.market_id
                         ),
                     }
                     .into());
-                    }
-                    let capture = bundle.capture.as_ref().ok_or_else(|| {
-                        ResearchError::Determinism {
-                        detail:
-                            "online data-quality snapshot requires recommendation execution capture"
-                                .to_owned(),
-                    }
-                    })?;
-                    let book = &capture.book;
-                    let missing = rejected_by_market
-                        .get(&vector.market_id)
-                        .map(|row| {
-                            row.missing_required
-                                .iter()
-                                .map(|(name, _)| name.to_string())
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    Ok(TokenDataQualityRecord {
-                        feature_vector_id: Some(persisted.feature_vector_id),
-                        token_id: capture.token_id.clone(),
-                        market_id: capture.market_id.clone(),
-                        status: vector.data_quality,
-                        book_age_ms: book_age_ms(as_of, book)?,
-                        crossed: book.is_crossed(),
-                        empty: book.is_empty(),
-                        fact_lag_ms: fact_lag_ms(as_of, bundle.inputs.window)?,
-                        missing_required: missing,
+                }
+                let capture = resolved.capture;
+                let book = &capture.book;
+                let missing = rejected_by_market
+                    .get(&vector.market_id)
+                    .map(|row| {
+                        row.missing_required
+                            .iter()
+                            .map(|(name, _)| name.to_string())
+                            .collect()
                     })
-                },
-            )
-            .collect::<QuantResult<Vec<_>>>()?;
+                    .unwrap_or_default();
+                Ok(TokenDataQualityRecord {
+                    feature_vector_id: persisted.feature_vector_id,
+                    token_id: capture.token_id.clone(),
+                    market_id: capture.market_id.clone(),
+                    status: vector.data_quality,
+                    book_age_ms: book_age_ms(as_of, book)?,
+                    crossed: book.is_crossed(),
+                    empty: book.is_empty(),
+                    fact_lag_ms: fact_lag_ms(as_of, resolved.window)?,
+                    missing_required: missing,
+                })
+            },
+        )
+        .collect::<QuantResult<Vec<_>>>()?;
     Ok(NewReportDataQualitySnapshot {
         report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
         decision_at: as_of,
@@ -540,9 +547,12 @@ mod tests {
 
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::market::{
-            TokenInfo, book::BookLevel, fee::MarketMakerRebateEvidence,
-            registry::MarketRegistryInfo,
+        domain::{
+            market::{
+                TokenInfo, book::BookLevel, fee::MarketMakerRebateEvidence,
+                registry::MarketRegistryInfo,
+            },
+            order::PolymarketOrderRules,
         },
         enums::{
             catalog::CatalogFilterReasonSet,
@@ -659,6 +669,10 @@ mod tests {
             end_date: None,
             created_at: Some(as_of),
             fee_schedule: None,
+            order_rules: Some(
+                PolymarketOrderRules::new(TickSize::Hundredth, Shares::new(dec!(5)))
+                    .expect("rules"),
+            ),
             maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         };
         let selected = SelectedMarket {

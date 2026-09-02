@@ -8,7 +8,6 @@ expression: "TopNReportSnapshot::non_empty()"
     "report_run_id": "72683c63-42e7-5c42-9a8d-630027e708ad",
     "report_kind": "top_n",
     "decision_at": "2023-11-14T22:11:20Z",
-    "runtime_mode": "report_only",
     "top_n": 20,
     "status": "published",
     "account_source": "polymarket",
@@ -96,9 +95,9 @@ expression: "TopNReportSnapshot::non_empty()"
       },
       "top_rejection_reasons": [],
       "execution_eligibility_summary": {
-        "eligible_report_only": 2,
-        "eligible_semi_auto": 0,
-        "eligible_auto_execution": 0
+        "analysis_only": 2,
+        "operator_approval": 0,
+        "policy_automatic": 0
       },
       "empty_reason": null,
       "warnings": [
@@ -410,8 +409,6 @@ expression: "TopNReportSnapshot::non_empty()"
           "cvar_contribution_usd": "40",
           "portfolio_cvar_cap_usd": "500",
           "maximum_scenario_loss_cap_usd": "750",
-          "requires_approval": true,
-          "auto_execution_allowed": false,
           "risk_notes": [
             "thin book"
           ],
@@ -438,14 +435,9 @@ expression: "TopNReportSnapshot::non_empty()"
         }
       ],
       "execution_eligibility": {
-        "eligible_modes": [
-          "report_only"
-        ],
-        "ineligibility_reasons": [
-          "report_only_mode"
-        ],
-        "approval_required": true,
-        "auto_policy_id": null
+        "ceiling": "analysis_only",
+        "blockers": [],
+        "policy_binding": null
       },
       "valid_from": "2023-11-14T22:13:20Z",
       "valid_until": "2023-11-15T22:13:20Z",
@@ -745,8 +737,6 @@ expression: "TopNReportSnapshot::non_empty()"
           "cvar_contribution_usd": "40",
           "portfolio_cvar_cap_usd": "500",
           "maximum_scenario_loss_cap_usd": "750",
-          "requires_approval": true,
-          "auto_execution_allowed": false,
           "risk_notes": [
             "thin book"
           ],
@@ -773,14 +763,9 @@ expression: "TopNReportSnapshot::non_empty()"
         }
       ],
       "execution_eligibility": {
-        "eligible_modes": [
-          "report_only"
-        ],
-        "ineligibility_reasons": [
-          "report_only_mode"
-        ],
-        "approval_required": true,
-        "auto_policy_id": null
+        "ceiling": "analysis_only",
+        "blockers": [],
+        "policy_binding": null
       },
       "valid_from": "2023-11-14T22:13:20Z",
       "valid_until": "2023-11-15T22:13:20Z",

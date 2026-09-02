@@ -1,12 +1,12 @@
 # quant-pivot 架构与详细设计
 
-> Last reviewed: 2026-08-08.
+> Last reviewed: 2026-08-29.
 >
 > This document describes the current quant-pivot architecture implemented in this repository. The project has not entered production and is installed only from the current clean boot-v1 PostgreSQL/ClickHouse schema. Historical phase increments are audit context only and have no implementation authority. There is no compatibility bridge, legacy parser, dual read/write, or upgrade migration from an earlier quant-pivot contract.
 
 ## 1. 系统目标
 
-quant-pivot 是 Polymarket-only 的量化系统。它的闭环目标不是直接发现一个“机会”就立即冲单，而是产生可审计、可治理、可回放的 `RecommendationReport`，再按 runtime mode 决定是否进入订单执行链路。
+quant-pivot 是 Polymarket-only 的量化系统。它的闭环目标不是直接发现一个“机会”就立即冲单，而是产生可审计、可治理、可回放的 `RecommendationReport`。是否进入订单执行链路由 recommendation 冻结的 `ExecutionAuthorityCeiling`/blockers、当前 `EntryAuthorizationPolicy`、intent 上不可变的 `AuthorizationEvidence`、kill switch、account-recovery state 与 admission 共同决定；`SettlementWritePolicy` 仍是独立 owner。
 
 核心问题：
 
@@ -45,11 +45,11 @@ flowchart TD
     K --> L
     SNAP --> L
     L --> M["RecommendationReport"]
-    M --> N{"Runtime mode"}
-    N -->|"report_only"| O["Human reads report"]
-    N -->|"semi_auto"| P["OrderIntent pending_approval"]
-    N -->|"auto_execution"| Q["OrderIntent approved_by_policy"]
-    P --> R["Human approve/reject"]
+    M --> O["Report remains visible"]
+    M --> N{"Recommendation authority ceiling"}
+    N -->|"operator approval"| P["OrderIntent pending_authorization"]
+    N -->|"active policy"| Q["OrderIntent authorized"]
+    P --> R["Human authorize/reject"]
     R --> S["Admission engine"]
     Q --> S
     S -->|"allow"| T["CLOB signed order"]
@@ -68,8 +68,8 @@ flowchart TD
 关键设计点：
 
 - 报告是 first-class artifact，不是执行副产品；
-- `report_only` 仍读取真实账户资金；
-- execution 是 mode-gated 和 admission-gated 的后续链路；
+- 每份 report 都读取真实账户资金并保持可见；
+- execution 是 authorization-gated 和 admission-gated 的后续链路；
 - 所有订单状态、资金锁定、reconciliation 和 attribution 都落 Postgres；
 - 市场事实和研究事实主要进入 ClickHouse；
 - selection、feature、capture 从同一 `DecisionBoundary` 与 immutable PIT snapshot 投影；`BookStore` 不得充当历史 replay 来源；
@@ -137,7 +137,7 @@ flowchart LR
 | `quant-pivot-core` | AppContext、data ingest、report builder、governance、execution、account、reconciliation | 不直接暴露 HTTP contract |
 | `quant-pivot-api` | Polymarket Gamma/CLOB/Data API/on-chain/relayer clients | 不做策略 sizing |
 | `quant-pivot-models` | DTO、domain structs、enums、typed policy schema、entities/idens | 不访问外部服务 |
-| `quant-pivot-storage` | DB pools、migrations、ClickHouse writer | 不编码交易策略 |
+| `quant-pivot-storage` | DB pools、schema bootstrap/verification、ClickHouse writer | 不编码交易策略 |
 | `quant-pivot-repository` | Postgres repository traits/impl、idempotent writes | 不写 HTTP handler |
 | `quant-pivot-web` | Actix routes、auth、RBAC、API envelope、WS | 不绕过 core 服务直接下单 |
 | `quant-pivot-research` | features、factors、model、portfolio sizing/optimizer | 不访问私钥或提交订单 |
@@ -169,7 +169,7 @@ flowchart LR
     Secrets --> Effective["typed DeployConfig + SecretText"]
 ```
 
-Deploy config 拒绝 unknown fields。所有 mode 都要求 private key 和 funder；可执行 mode 下 proxy/safe 还要求 relayer secret。PostgreSQL 与 ClickHouse 各自只有一组配置身份，runtime、schema CLI 与 Fresh Boot 复用该身份；权限隔离由环境边界、生命周期租约和受控 CLI 承担，不维护平行 credential。
+Deploy config 拒绝 unknown fields。所有部署都要求 private key 和 funder 以读取真实账户并生成报告；需要提交链上动作的 proxy/safe/deposit-wallet topology 还要求 relayer secret。PostgreSQL 与 ClickHouse 各自只有一组配置身份，runtime、schema CLI 与 Fresh Boot 复用该身份；权限隔离由环境边界、生命周期租约和受控 CLI 承担，不维护平行 credential。
 
 ### 5.2 Governed policy resources（boot schema 1）
 
@@ -196,7 +196,7 @@ flowchart TD
 | `model_routing` | Route champion/shadow/exit artifact 与 scenario-model binding | 新 model evaluation / report claim |
 | `report_schedule` | timezone、cadence、enabled、future run reconcile | 尚未 claim 的 future run |
 | `operations_policy` | execution halt、notification routing、worker 与 outcome-reconciliation admission | operational admission gate |
-| `execution_automation_policy` | `SemiAuto` approval TTL 与 `AutoExecution` report-level authorization caps | mode preflight 后的新 admission |
+| `execution_authorization_policy` | operator approval TTL 与 `PolicyAutomatic` report-level authorization caps | authorization preflight 后的新 admission |
 
 每个 resource 固定 `schema_version = 1`，但没有统一大文档版本。修改必须依次完成 Draft、Validate/Preflight、Approve、Activate；activation body 绑定 `approval_id`、`expected_active_revision_id`、`preflight_token` 和 `idempotency_key`。任一 prepare 或 CAS 失败都保持旧 snapshot；不存在自动回滚，回滚也是一次显式、可审计 activation。
 
@@ -384,7 +384,7 @@ Parity latch open/uninitialized、关键 PIT snapshot 缺失、category route �
 | ExitPlan | TP/SL/time/signal/hold/redeem | exit monitor、operator |
 | RiskEnvelope | market/event/category/Route exposure、liquidity、scenario loss、CVaR、drawdown | admission、risk |
 | Evidence | feature snapshot、data quality、model/factor refs | audit、debug |
-| ExecutionEligibility | eligible modes、auto reasons、approval required | UI、dispatcher |
+| ExecutionEligibility | `ceiling`、`blockers`、`policy_binding` | UI、dispatcher |
 
 ## 9. Portfolio 与 sizing 设计
 
@@ -442,26 +442,25 @@ solver timeout、non-optimal、infeasible contract、数值异常或 exact post-
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending_approval: semi_auto create
-    [*] --> approved_by_policy: auto_execution create
-    pending_approval --> approved: approve
-    pending_approval --> rejected: reject
-    pending_approval --> cancelled: cancel
-    approved --> admission_pending: submit
-    approved_by_policy --> admission_pending: dispatcher/submit
-    admission_pending --> submitted: admission allow + venue accepted
-    admission_pending --> admission_rejected: admission deny
+    [*] --> pending_authorization: operator policy create
+    [*] --> authorized: active policy evidence
+    pending_authorization --> authorized: operator authorize
+    pending_authorization --> authorization_rejected: reject
+    pending_authorization --> cancelled: cancel
+    authorized --> admission_rejected: admission deny
+    authorized --> authorized: admission defer / no claim
+    authorized --> admission_pending: admission allow + atomic claim
+    admission_pending --> submitted: write-ahead + venue accepted
     admission_pending --> failed: venue/client failure
     submitted --> partially_filled
     submitted --> filled
-    submitted --> rejected
     submitted --> failed
     submitted --> invalidated
     partially_filled --> filled
     partially_filled --> expired
 ```
 
-`OrderIntent` 冻结 recommendation 的 entry/sizing/risk envelope。审批、提交、拒绝、取消都会写 operation log。
+`OrderIntent` 冻结 recommendation 的 entry/sizing/risk envelope。授权、提交、拒绝、取消都会写 operation log。
 
 ### 10.2 Admission engine
 
@@ -472,10 +471,12 @@ Admission 是提交前最后一道门。它检查：
 | `intent_state` | intent 必须处于可提交状态 |
 | `recommendation_freshness` | 推荐未过期 |
 | `report_status` | 报告仍 published 且未 revoke |
-| `runtime_mode` | 当前 mode 允许订单提交 |
+| `authorization_policy` | intent 的 authorization kind 与当前 entry policy 相容 |
+| `economic_health` | Route health 对 operator/automatic authority fail closed |
 | `model_publication` | model 状态仍可用 |
 | `data_quality` | 数据质量未退化 |
 | `book_freshness` | order book 足够新 |
+| `venue_metadata` | PIT 与 live CLOB 的 market/token、tick、minimum size、NegRisk 一致，价格和数量可在 venue 网格表达 |
 | `entry_trigger` | 价格/depth/entry window 符合 |
 | `risk_envelope_hash` | 审批未篡改推荐风险包络 |
 | `capital_budget` | 资金仍足够 |
@@ -489,6 +490,7 @@ Admission 是提交前最后一道门。它检查：
 | `manual_block` | 市场/推荐未被人工 blocked |
 | `kill_switch` | kill switch 允许新开仓 |
 | `venue_guard` | venue 状态和 order constraints 可用 |
+| `venue_funding` | exact funder 的 balance 与 exact V2 spender allowance 覆盖 canonical order requirement |
 | `credential_readiness` | 私钥/funder/relayer 可用 |
 | `exit_monitor_readiness` | 可执行后续退出管理 |
 
@@ -509,16 +511,17 @@ sequenceDiagram
     participant Repo as Repositories
     participant Recon as ReconciliationQueue
 
-    Submit->>Repo: claim intent atomically
-    Submit->>Admission: evaluate frozen intent + live context
+    Submit->>Admission: build frozen intent + PIT/live rules + funding context
     Admission-->>Submit: allow / deny / defer
     alt deny
         Submit->>Repo: intent admission_rejected
     else defer
-        Submit->>Repo: release claim, keep submittable
+        Submit-->>Submit: keep intent submittable; no claim
     else allow
+        Submit->>Repo: claim intent atomically
         Submit->>Repo: lock capital, create execution_order planned
-        Submit->>Client: sign and place order
+        Submit->>Client: re-read live rules/funding and build unsigned order
+        Client->>Client: verify exact V2 maker/taker payload, then sign
         Client->>CLOB: POST order
         CLOB-->>Client: order status / error / ambiguous
         Client-->>Submit: venue result
@@ -532,8 +535,16 @@ Order policy：
 - default 是 limit entry；
 - `allow_market_orders=false` 时不允许 immediate market order；
 - `allow_market_orders=true` 时仍必须带 worst-price / slippage cap；
-- `max_slippage_bps`、tick size、book depth、book age 都参与 admission；
-- BUY 需要 pUSD allowance，SELL 需要 conditional token allowance。
+- aggressive BUY cap 在报告/回放共享语义中按 PIT CLOB tick 向下对齐，且不超过
+  `1 - tick` 或治理 slippage cap；
+- PIT CLOB market-info 是 tick、minimum order size 与 NegRisk 的执行 owner；它必须与 live
+  `/book` 的 market/token/rules 一致。canonical shares 与 aggressive BUY principal 向下到 2 位，
+  counter amount 按 tick 对应的 3/4/5/6/5/6 位规则生成；低于 minimum 的 tier 不进入
+  portfolio solver；
+- BUY 需要 pUSD balance/allowance，SELL 需要 conditional-token balance/allowance。系统只读
+  `balance-allowance` 做 fail-closed preflight，不自动 approve 或发送 approval transaction；
+- SDK unsigned V2 payload 的 token、side、maker/taker amount、order type、expiration、maker/
+  signer identity 必须与 canonical projection 完全相等，验证通过后才签名和 `POST /order`。
 
 ## 12. Exit、settlement、attribution 设计
 
@@ -548,7 +559,7 @@ flowchart TD
     C --> D{"kill switch"}
     D -->|"execution_halted"| E["manual only"]
     D -->|"emergency_halted"| F["emergency path"]
-    D -->|"closed/report_only_forced/exit_only"| G{"exit trigger?"}
+    D -->|"closed/exit_only"| G{"exit trigger?"}
     G -->|"stop_loss"| H["submit exit order"]
     G -->|"signal_invalidation"| H
     G -->|"time_exit"| H
@@ -635,10 +646,10 @@ Protected `/api/...` routes require：
 |------|-------|
 | Auth | `/api/auth/login`, `/api/auth/refresh`, `/api/auth/logout`, `/api/auth/me` |
 | Config governance | `/api/config/resources`, `/api/config/{kind}/current|schema|revisions`, `/drafts/...`, `/api/config/activity`, `/deployment`, `/lifecycle` |
-| System | `/api/system/status`, `/api/system/health`, `/api/system/quant-mode`, `/api/system/kill-switch` |
+| System | `/api/system/status`, `/api/system/health`, `/api/system/runtime-controls/entry-authorization-policy`, `/api/system/runtime-controls/kill-switch`, `/api/system/execution-recovery/incidents/...` |
 | Account | `/api/quant/account/live`, `/api/quant/account/equity-snapshots` |
 | Reports | `/api/quant/reports`, `/api/quant/reports/current`, `/api/quant/reports/run`, `/api/quant/report-runs`, `/api/quant/report-schedules/health` |
-| Recommendations | `/api/quant/recommendations/{id}`, `/evidence`, `/attribution` |
+| Recommendations | `/api/quant/recommendations/{id}`, `/evidence`, `/economic-outcome`, `/execution-comparison` |
 | Execution | `/api/quant/intents`, `/api/quant/execution-orders`, `/api/quant/positions` |
 | Reconciliation | `/api/quant/reconciliations`, `/api/quant/reconciliations/{id}/resolve` |
 | Settlement | `/api/quant/settlement-redeems` |
@@ -716,7 +727,7 @@ Redis 不存储不可恢复的交易真相。
 | runtime 配置漂移 | immutable versions + activation audit + rollback |
 | 重复提交 | atomic claim intent + idempotency + capital lock |
 | venue ambiguous | reconciliation queue + held capital |
-| 自动交易失控 | mode preflight + kill switch + breaker + caps |
+| policy-automatic 入场失控 | authorization preflight + kill switch + breaker + caps |
 | 提现导致资金不足 | capital/account snapshot + budget cap + operational freeze SOP |
 
 ## 17. Observability
@@ -761,7 +772,8 @@ Redis 不存储不可恢复的交易真相。
 - `execution_order_id`；
 - `market_id` / `token_id`；
 - `decision_policy_snapshot_id` 与参与决策的 policy revision ids；
-- `quant_runtime_mode`；
+- `entry_authorization_policy` / `authorization_kind`；
+- `route_economic_health_id` / `route_economic_health_state`；
 - `kill_switch_state`；
 - `admission_check_id`；
 - `reconciliation_id`。
@@ -773,19 +785,20 @@ Redis 不存储不可恢复的交易真相。
 
 | Failure | Detection | System behavior | Operator action |
 |---------|-----------|-----------------|-----------------|
-| Missing private key | startup validation | fail start / fail mode preflight | inject secret |
+| Missing private key | startup validation | fail start / fail authorization preflight | inject secret |
 | Missing funder | startup/account validation | fail report generation | set correct funder |
 | CLOB auth fail | bootstrap/client connect | no account/execution | check key/topology/CLOB |
 | Gamma/Data lag | health/data quality | empty report or admission deny | freeze entries, wait/repair |
 | Book stale | data quality/admission | deny/defer | wait for WS recovery |
 | Budget exhausted | portfolio planner | empty report/rejected candidates | deposit, close positions, adjust caps |
-| Allowance insufficient | venue submit/reconciliation | order failure/ambiguous | perform approval, reconcile |
+| Tick/minimum/precision drift | PIT + live venue rules / unsigned payload verification | reject tier, deny admission, or cleanly reject before POST | wait for coherent CLOB facts; never hand-round an order |
+| Allowance insufficient | admission funding check / final client preflight | defer before claim；并发撤销则 clean prepare rejection、no POST | perform a separately governed approval, then re-run admission |
 | Ambiguous venue response | submit result | capital held | wait for reconciliation |
 | Unresolvable recon | recon worker | blocks auto preflight/attribution | manually resolve with evidence |
 | Policy revision bad | typed validation, dependency preflight or activation CAS | reject and retain previous snapshot | fix typed draft or explicitly roll back after review |
 | Catalog coverage/watermark missing | PIT resolver / integrity summary | block replay, dataset build, report | preserve ingest, repair Gamma ledger; never backdate |
 | Serving writer misses deadline | evidence completion / parity pending timeout | fail run, alert, open latch when terminal | repair writer/watermark, run covering full parity |
-| Deterministic parity mismatch | sampled/full replay | revoke report, cascade intent, open latch; block report/publish/entry | safe mode, fix forward, covering full parity, governed ack |
+| Deterministic parity mismatch | sampled/full replay | revoke report, cascade intent, open latch; block report/publish/entry | latch `ExitOnly`, fix forward, covering full parity, governed ack |
 | Unknown/corrupt dataset or model artifact | format/hash/deep loader validation | reject training/load/publish | rebuild the canonical artifact; never activate an unknown pointer |
 | Model degraded | quality gate/report | no positive signal/empty | rollback model/factor |
 | Breaker daily loss | breaker | trip kill switch | incident review |
@@ -809,13 +822,18 @@ flowchart TD
     E --> F["Verify seeded safe boot policy resources"]
     F --> G["Build canonical dataset/model artifacts"]
     G --> H["Subject-bound full parity passed"]
-    H --> I["Publish model and run ad-hoc canary"]
+    H --> I["Publish model and run non-money-moving ad-hoc report rehearsal"]
     I --> J["Enable schedule with conservative execution controls"]
     J --> K["Review deployment and recovery checklist"]
-    K --> L["Go live with runtime controls explicitly selected"]
+    K --> L["Begin separately authorized Operational Activation"]
 ```
 
 Activation failures retain the prior `DecisionPolicySnapshot`; they do not trigger automatic rollback. Operational incidents use explicit policy rollback or halt actions while ingest、exit、reconciliation 和 settlement continue. Scaling budget/caps remains a governed business decision after report/order/reconciliation/attribution evidence, not a deploy toggle.
+
+截至 Implementation Closure，`operational_activation_claimed=false`。上述订单规则和 preflight
+只证明实现路径会 fail closed，不授权真实 venue order 或 allowance approval；首次资金动作仍必须在
+独立 Operational Activation 中取得 exact account/route/action/amount/deployment digest 授权。
+
 ## 20. 设计边界与当前限制
 
 1. 只支持 Polymarket，不存在 multi-venue abstraction。
@@ -824,7 +842,7 @@ Activation failures retain the prior `DecisionPolicySnapshot`; they do not trigg
 4. 当前 order intent kind 是 buy entry；exit order 由 execution/exit subsystem 管理。
 5. 手动在 Polymarket UI 下单不会自动生成系统内 `OrderIntent`。
 6. 六类 policy resource、feature、dataset、model 和 internal format 只接受 boot version 1；未知 schema/format 不能激活、训练、publish 或 serving。
-7. `auto_execution` 仍受 admission、kill switch、capital 和 breaker 限制。
+7. `PolicyAutomatic` 仍受 recommendation ceiling、fresh Route health、admission、kill switch、capital 和 breaker 限制。
 8. ClickHouse 是 analytics plane，不是订单 truth。
 9. two-hour/twelve-reconciliation soak 与真实云身份、secret mount、WORM restore、retention/capacity、200-day readiness 仍待真实环境执行；代码与文档就绪不等于 production complete。
 
@@ -840,7 +858,7 @@ Activation failures retain the prior `DecisionPolicySnapshot`; they do not trigg
 - DecisionBoundary 双时间 PIT 与 frozen train/serve transform；
 - serving evidence completion barrier + deterministic parity latch；
 - activation prepare/CAS 失败时保持旧 snapshot；恢复或回滚必须显式治理；
-- mode transition preflight；
+- entry-authorization upgrade preflight；
 - kill switch fail-closed；
 - admission before every venue submit；
 - capital reservation atomic with intent/order transitions；

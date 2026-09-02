@@ -1,13 +1,14 @@
 //! Public HTTP, authentication, authorization, read-model, and WebSocket
 //! contracts exercised through the real production binary.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, thread::Builder as ThreadBuilder, time::Duration};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Error as AnyhowError, Result, bail, ensure};
+use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use quant_pivot_models::domain::api::FeedbackCycleTriggerRequest;
 use quant_pivot_system_tests::{
-    production_stack::{ProductionStack, ProductionStackFixture},
+    production_stack::{ProductionShutdownSignal, ProductionStack, ProductionStackFixture},
     stack::BOOTSTRAP_ADMIN_PASSWORD,
 };
 use reqwest::{
@@ -15,7 +16,7 @@ use reqwest::{
     header::{COOKIE, ORIGIN, SEC_WEBSOCKET_PROTOCOL, SET_COOKIE},
 };
 use serde_json::{Value, json};
-use tokio::{net::TcpStream, time::Instant};
+use tokio::{net::TcpStream, runtime::Builder as RuntimeBuilder, time::Instant};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Message, client::IntoClientRequest, http::HeaderValue},
@@ -23,6 +24,7 @@ use tokio_tungstenite::{
 
 const API_VERSION: (&str, &str) = ("accept-api-version", "v1");
 const BROWSER_ORIGIN: &str = "http://127.0.0.1:6099";
+const TEST_RUNTIME_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 struct ApiClient {
     base_url: String,
@@ -354,22 +356,50 @@ impl FeedbackSocket {
     }
 }
 
-#[tokio::test]
-async fn production_web_boundary_end() -> Result<()> {
+#[test]
+fn production_web_boundary_end() -> Result<()> {
     assert_feedback_fixture_shapes()?;
-    let mut stack = ProductionStack::start(ProductionStackFixture::GovernedFeedback).await?;
-    let artifacts = stack.run_dir().display().to_string();
-    let result = Box::pin(exercise_web_boundary(&mut stack)).await;
-    if let Err(error) = result {
-        let shutdown = Box::pin(stack.stop(false)).await;
-        if let Err(shutdown) = shutdown {
-            bail!(
-                "production web system contract failed; artifacts={artifacts}: {error:#}; shutdown failed: {shutdown:#}"
-            );
-        }
-        bail!("production web system contract failed; artifacts={artifacts}: {error:#}");
-    }
-    Box::pin(stack.stop(true)).await
+    // Real history decoding requires a multithreaded runtime, while the deep
+    // debug fixture graph needs the same bounded stack used by repository
+    // scenario tests. Keep the budget local instead of changing RUST_MIN_STACK.
+    ThreadBuilder::new()
+        .name("production-web-contract".to_owned())
+        .stack_size(TEST_RUNTIME_STACK_BYTES)
+        .spawn(|| -> Result<()> {
+            RuntimeBuilder::new_multi_thread()
+                .worker_threads(4)
+                .max_blocking_threads(4)
+                .thread_stack_size(TEST_RUNTIME_STACK_BYTES)
+                .enable_all()
+                .build()
+                .context("build production web contract runtime")?
+                .block_on(async {
+                    let stack = Box::pin(ProductionStack::start(
+                        ProductionStackFixture::GovernedFeedback,
+                    ))
+                    .await?;
+                    let artifacts = stack.run_dir().display().to_string();
+                    let result = async {
+                        Box::pin(exercise_web_boundary(&stack)).await?;
+                        stack.verify_pool_recycling().await
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        let shutdown =
+                            Box::pin(stack.stop(false, ProductionShutdownSignal::Interrupt)).await;
+                        if let Err(shutdown) = shutdown {
+                            bail!(
+                                "production web system contract failed; artifacts={artifacts}: {error:#}; shutdown failed: {shutdown:#}"
+                            );
+                        }
+                        bail!("production web system contract failed; artifacts={artifacts}: {error:#}");
+                    }
+                    Box::pin(stack.stop(true, ProductionShutdownSignal::Interrupt)).await
+                })
+        })
+        .context("spawn bounded production web contract thread")?
+        .join()
+        .map_err(|_| AnyhowError::msg("production web contract thread panicked"))?
 }
 
 fn feedback_trigger_body(profile_id: &str, reason: &str, idempotency_key: &str) -> Value {
@@ -411,7 +441,7 @@ fn feedback_fixture_shapes() {
     assert_feedback_fixture_shapes().expect("feedback trigger fixtures match the wire DTO");
 }
 
-async fn exercise_web_boundary(stack: &mut ProductionStack) -> Result<()> {
+async fn exercise_web_boundary(stack: &ProductionStack) -> Result<()> {
     let api = ApiClient::new(stack.base_url())?;
     api.assert_public_probes().await?;
     api.assert_version_authentication_boundary().await?;
@@ -1147,7 +1177,7 @@ async fn assert_feedback_mutations(api: &ApiClient, admin: &str, viewer: &str) -
         "missing feedback profile",
     )
     .await?;
-    let missing_route = ensure_status(
+    let invalid_route = ensure_status(
         api.post_governed(
             "/api/research/feedback-cycles",
             admin,
@@ -1155,21 +1185,22 @@ async fn assert_feedback_mutations(api: &ApiClient, admin: &str, viewer: &str) -
             feedback_trigger_body(
                 "pooled_1h_control",
                 "operator_retrain",
-                "web-feedback-missing-route",
+                "web-feedback-route-identity",
             ),
         )
         .await?,
         StatusCode::CONFLICT,
-        "feedback profile without an active serving route",
+        "feedback profile with mismatched serving route identity",
     )
     .await?
     .json::<Value>()
     .await?;
     ensure!(
-        missing_route["message"]
-            == "invalid feedback-cycle state: feedback profile pooled_1h_control has no active serving route Pooled"
-            && missing_route["data"].is_null(),
-        "missing feedback route lost its typed conflict envelope: {missing_route}"
+        invalid_route["code"] == 409
+            && invalid_route["message"]
+                == "invalid feedback-cycle identity: current Route, champion, profile, or serving contract differs"
+            && invalid_route["data"].is_null(),
+        "invalid feedback route lost its typed conflict envelope: {invalid_route}"
     );
     ensure_status(
         api.post(
@@ -1217,7 +1248,7 @@ async fn assert_feedback_mutations(api: &ApiClient, admin: &str, viewer: &str) -
 }
 
 async fn assert_feedback_ws(
-    stack: &mut ProductionStack,
+    stack: &ProductionStack,
     api: &ApiClient,
     admin: &Login,
     admin_id: &str,
@@ -1250,6 +1281,28 @@ struct FeedbackCancelSnapshot {
 }
 
 impl FeedbackCancelSnapshot {
+    fn cancellation_binding(cycle: &Value) -> Result<Value> {
+        let mut binding = cycle
+            .as_object()
+            .context("cancellation cycle is not an object")?
+            .clone();
+        for mutable in [
+            "status",
+            "decision",
+            "terminal_reason_code",
+            "generation",
+            "lease_expires_at",
+            "completed_at",
+            "updated_at",
+        ] {
+            ensure!(
+                binding.remove(mutable).is_some(),
+                "cycle omitted lifecycle field {mutable}"
+            );
+        }
+        Ok(Value::Object(binding))
+    }
+
     async fn read(api: &ApiClient, admin: &str, cycle_id: &str) -> Result<Self> {
         let detail = ensure_status(
             api.get(
@@ -1278,6 +1331,68 @@ impl FeedbackCancelSnapshot {
             cycle: detail["data"]["cycle"].clone(),
             events,
         })
+    }
+
+    async fn await_cancelled(
+        &self,
+        api: &ApiClient,
+        admin: &str,
+        cycle_id: &str,
+        cancellation_generation: i64,
+    ) -> Result<Self> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let binding = Self::cancellation_binding(&self.cycle)?;
+        let requested_at = self.cycle["cancel_requested_at"]
+            .as_str()
+            .context("cancellation request clock")?
+            .parse::<DateTime<Utc>>()?;
+        loop {
+            let observed = tokio::time::timeout_at(deadline, Self::read(api, admin, cycle_id))
+                .await
+                .context("governed cancellation did not reach Cancelled within 30 seconds")??;
+            ensure!(
+                Self::cancellation_binding(&observed.cycle)? == binding
+                    && observed.events == self.events,
+                "coordinator changed immutable cancellation identity or WORM evidence"
+            );
+            let generation = observed.cycle["generation"]
+                .as_i64()
+                .context("cancellation generation")?;
+            ensure!(
+                generation >= cancellation_generation,
+                "cancellation generation moved backwards"
+            );
+            match observed.cycle["status"].as_str() {
+                Some("cancelled") => {
+                    let completed_at = observed.cycle["completed_at"]
+                        .as_str()
+                        .context("Cancelled cycle has no completion clock")?
+                        .parse::<DateTime<Utc>>()?;
+                    ensure!(
+                        observed.cycle["feedback_cycle_id"] == cycle_id
+                            && generation > cancellation_generation
+                            && observed.cycle["lease_expires_at"].is_null()
+                            && observed.cycle["decision"].is_null()
+                            && observed.cycle["terminal_reason_code"]
+                                == self.events[0]["reason_code"]
+                            && completed_at >= requested_at,
+                        "Cancelled cycle lost its exact identity, generation, lease, reason, or completion: {}",
+                        observed.cycle
+                    );
+                    return Ok(observed);
+                }
+                Some("running") => {}
+                status => bail!(
+                    "cancellation entered an invalid lifecycle state {status:?}: {}",
+                    observed.cycle
+                ),
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "governed cancellation remained Running past its bounded deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
 
@@ -1413,16 +1528,11 @@ async fn assert_feedback_live(
     Ok(FeedbackLiveEvidence { trigger_revision })
 }
 
-async fn assert_feedback_cancel(
-    stack: &ProductionStack,
+async fn assert_cancel_request(
     api: &ApiClient,
     admin: &Login,
-    live: &FeedbackLiveEvidence,
-) -> Result<FeedbackCancelEvidence> {
-    let cancellation_cycle_id = stack
-        .governed_cancellation_cycle_id()
-        .context("GovernedFeedback fixture is missing its cancellation cycle")?
-        .to_string();
+    cancellation_cycle_id: &str,
+) -> Result<FeedbackCancelSnapshot> {
     let cancellation_detail = ensure_status(
         api.get(
             &format!("/api/research/feedback-cycles/{cancellation_cycle_id}"),
@@ -1439,9 +1549,25 @@ async fn assert_feedback_cancel(
         .as_i64()
         .context("governed cancellation target is missing generation")?;
     ensure!(
-        cancellation_detail["data"]["cycle"]["status"] == "running",
+        cancellation_detail["data"]["cycle"]["status"] == "running"
+            && cancellation_detail["data"]["cycle"]["cancel_requested_at"].is_null(),
         "governed cancellation target lost its live-worker state: {cancellation_detail}"
     );
+    let next_sequence = cancellation_detail["data"]["timeline"]
+        .as_array()
+        .context("cancellation target timeline")?
+        .iter()
+        .map(|event| {
+            event["event_sequence"]
+                .as_i64()
+                .context("cancellation target event sequence")
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .max()
+        .context("cancellation target has no trigger event")?
+        .checked_add(1)
+        .context("cancellation event sequence overflow")?;
     let cancelled = ensure_status(
         api.post_governed(
             &format!("/api/research/feedback-cycles/{cancellation_cycle_id}/cancel"),
@@ -1456,24 +1582,68 @@ async fn assert_feedback_cancel(
     .await?
     .json::<Value>()
     .await?;
+    let applied_generation = cancelled["data"]["cycle"]["generation"]
+        .as_i64()
+        .context("cancellation response generation")?;
     ensure!(
         cancelled["data"]["cycle"]["feedback_cycle_id"] == cancellation_cycle_id
-            && cancelled["data"]["cycle"]["generation"].as_i64()
-                == Some(cancellation_generation + 1)
+            && applied_generation > cancellation_generation
             && cancelled["data"]["cycle"]["status"] == "running"
             && cancelled["data"]["replayed"] == false,
-        "feedback cancellation did not apply one exact generation CAS: {cancelled}"
+        "feedback cancellation did not advance its observed generation: {cancelled}"
     );
+    // Lease renewal is another legitimate generation CAS between the initial
+    // GET and POST. The new WORM sequence and cancellation clock identify this
+    // exact request independently from that mutable worker lifecycle.
+    let mut expected_binding =
+        FeedbackCancelSnapshot::cancellation_binding(&cancellation_detail["data"]["cycle"])?;
+    expected_binding["cancel_requested_at"] =
+        cancelled["data"]["cycle"]["cancel_requested_at"].clone();
+    ensure!(
+        expected_binding
+            == FeedbackCancelSnapshot::cancellation_binding(&cancelled["data"]["cycle"])?
+            && expected_binding["cancel_requested_at"].is_string(),
+        "cancel request changed immutable cycle identity"
+    );
+    let cancelled_snapshot =
+        FeedbackCancelSnapshot::read(api, &admin.access_token, cancellation_cycle_id).await?;
+    ensure!(
+        FeedbackCancelSnapshot::cancellation_binding(&cancelled_snapshot.cycle)?
+            == expected_binding
+            && cancelled_snapshot.events[0]["feedback_cycle_id"] == cancellation_cycle_id
+            && cancelled_snapshot.events[0]["event_sequence"] == next_sequence
+            && cancelled_snapshot.events[0]["reason_code"] == "w4_e03_operator_cancelled"
+            && cancelled_snapshot.events[0]["actor"] == "admin@super_admin"
+            && cancelled_snapshot.events[0]["occurred_at"]
+                == expected_binding["cancel_requested_at"],
+        "governed cancellation response differs from its exact WORM request"
+    );
+    let cancelled_snapshot = cancelled_snapshot
+        .await_cancelled(
+            api,
+            &admin.access_token,
+            cancellation_cycle_id,
+            applied_generation,
+        )
+        .await?;
+    Ok(cancelled_snapshot)
+}
+
+async fn assert_feedback_cancel(
+    stack: &ProductionStack,
+    api: &ApiClient,
+    admin: &Login,
+    live: &FeedbackLiveEvidence,
+) -> Result<FeedbackCancelEvidence> {
+    let cancellation_cycle_id = stack
+        .governed_cancellation_cycle_id()
+        .context("GovernedFeedback fixture is missing its cancellation cycle")?
+        .to_string();
+    let cancelled_snapshot = assert_cancel_request(api, admin, &cancellation_cycle_id).await?;
     let offline_revision = feedback_revision(api, &admin.access_token).await?;
     ensure!(
         offline_revision > live.trigger_revision,
         "offline cancellation did not persist a newer outbox revision"
-    );
-    let cancelled_snapshot =
-        FeedbackCancelSnapshot::read(api, &admin.access_token, &cancellation_cycle_id).await?;
-    ensure!(
-        cancelled_snapshot.cycle == cancelled["data"]["cycle"],
-        "governed cancellation response differs from its durable cycle"
     );
     let cancel_replay = ensure_status(
         api.post_governed(
@@ -1529,6 +1699,13 @@ async fn assert_feedback_cancel(
     )
     .await?;
 
+    let conflict_snapshot =
+        FeedbackCancelSnapshot::read(api, &admin.access_token, &cancellation_cycle_id).await?;
+    ensure!(
+        conflict_snapshot == cancelled_snapshot,
+        "conflicting cancellation changed the terminal cycle or WORM request"
+    );
+
     Ok(FeedbackCancelEvidence {
         cycle_id: cancellation_cycle_id,
         offline_revision: replay_revision,
@@ -1536,7 +1713,7 @@ async fn assert_feedback_cancel(
 }
 
 async fn assert_feedback_restart(
-    stack: &mut ProductionStack,
+    stack: &ProductionStack,
     api: &ApiClient,
     admin: &Login,
     live: &FeedbackLiveEvidence,

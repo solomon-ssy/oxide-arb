@@ -8,7 +8,7 @@
 
 use std::{
     collections::{
-        BTreeMap, BTreeSet, HashMap, HashSet,
+        BTreeMap, BTreeSet, HashMap,
         hash_map::Entry::{Occupied, Vacant},
     },
     sync::Arc,
@@ -55,15 +55,16 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    FeatureRepository, OperationLogRepository, OrderIntentRepository, PolicyRepository,
-    PortfolioPlanRepository, QuantFactReadRepository, RecommendationReportRepository,
-    RecommendationRepository, ReportRunRepository, ServingEvidenceRepository,
+    ExchangeHistoryRepository, FeatureRepository, OperationLogRepository, OrderIntentRepository,
+    PolicyRepository, PortfolioPlanRepository, QuantFactReadRepository,
+    RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
+    ServingEvidenceRepository,
 };
 
 use crate::{
     observability::serving_evidence::verify_completion,
     report::{AdHocReportRequest, ReportLifecycleService, RetryAdHocReportRequest},
-    service::durable_feature_parity::{persisted_capture, report_decision_boundary},
+    service::{durable_feature_parity::persisted_capture, report_boundary::ReportBoundaryEvidence},
 };
 
 /// Web-facing report port assembled from the report plane.
@@ -76,6 +77,7 @@ pub struct CoreQuantReportPort {
     lifecycle: Arc<ReportLifecycleService>,
     serving_evidence: Arc<dyn ServingEvidenceRepository>,
     feature_repo: Arc<dyn FeatureRepository>,
+    exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
     runtime_config_repo: Arc<dyn PolicyRepository>,
     quant_fact_read: Arc<dyn QuantFactReadRepository>,
     operation_logs: Arc<dyn OperationLogRepository>,
@@ -94,6 +96,7 @@ pub struct CoreQuantReportPortDeps {
     pub lifecycle: Arc<ReportLifecycleService>,
     pub serving_evidence: Arc<dyn ServingEvidenceRepository>,
     pub feature_repo: Arc<dyn FeatureRepository>,
+    pub exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
     pub runtime_config_repo: Arc<dyn PolicyRepository>,
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     pub operation_logs: Arc<dyn OperationLogRepository>,
@@ -112,6 +115,7 @@ impl CoreQuantReportPort {
             lifecycle: deps.lifecycle,
             serving_evidence: deps.serving_evidence,
             feature_repo: deps.feature_repo,
+            exchange_history_repo: deps.exchange_history_repo,
             runtime_config_repo: deps.runtime_config_repo,
             quant_fact_read: deps.quant_fact_read,
             operation_logs: deps.operation_logs,
@@ -165,7 +169,9 @@ impl CoreQuantReportPort {
     async fn load_report_boundary(
         &self,
         report: &RecommendationReportInfo,
-    ) -> QuantResult<DecisionBoundary> {
+        quality: &ReportDataQualitySnapshotInfo,
+        route_runs: &[ReportRouteRunInfo],
+    ) -> QuantResult<(DecisionBoundary, Vec<FeatureVectorInfo>)> {
         let version = self
             .runtime_config_repo
             .load_snapshot(&report.decision_policy_snapshot_id)
@@ -176,7 +182,6 @@ impl CoreQuantReportPort {
                     report.recommendation_report_id, report.decision_policy_snapshot_id
                 ),
             })?;
-        let config = version.snapshot;
         let run = self
             .report_run_repo
             .find_by_output_report(&report.recommendation_report_id)
@@ -187,7 +192,20 @@ impl CoreQuantReportPort {
                     report.recommendation_report_id
                 ),
             })?;
-        report_decision_boundary(report, &run, &config)
+        let evidence =
+            ReportBoundaryEvidence::try_new(report, &run, &version, quality, route_runs)?;
+        let vectors = self
+            .feature_repo
+            .find_by_ids(evidence.feature_ids())
+            .await?;
+        let boundary = evidence
+            .restore(
+                &vectors,
+                self.exchange_history_repo.as_ref(),
+                self.quant_fact_read.as_ref(),
+            )
+            .await?;
+        Ok((boundary, vectors))
     }
 
     async fn load_report_data_quality(
@@ -204,20 +222,6 @@ impl CoreQuantReportPort {
                     report.recommendation_report_id, report.data_quality_snapshot_ref
                 ),
             })?;
-        let snapshot_matches =
-            snapshot.report_data_quality_snapshot_id == report.data_quality_snapshot_ref;
-        let decision_matches = snapshot.decision_at == report.decision_at;
-        let config_matches =
-            snapshot.decision_policy_snapshot_id == report.decision_policy_snapshot_id;
-        if !snapshot_matches || !decision_matches || !config_matches {
-            return Err(ResearchError::Determinism {
-                detail: format!(
-                    "report {} data-quality snapshot is not bound to its decision/config",
-                    report.recommendation_report_id
-                ),
-            }
-            .into());
-        }
         Ok(snapshot)
     }
 
@@ -226,10 +230,12 @@ impl CoreQuantReportPort {
         report: &RecommendationReportInfo,
         snapshot: &ReportDataQualitySnapshotInfo,
         boundary: &DecisionBoundary,
+        infos: Vec<FeatureVectorInfo>,
     ) -> QuantResult<PreInferenceFeatureEvidence> {
-        let vector_ids = pre_inference_vector_ids(report, snapshot)?;
-
-        let infos = self.feature_repo.find_by_ids(&vector_ids).await?;
+        let vector_ids = infos
+            .iter()
+            .map(|info| info.feature_vector_id)
+            .collect::<Vec<_>>();
         let mut infos_by_id = infos
             .into_iter()
             .map(|info| (info.feature_vector_id, info))
@@ -250,10 +256,9 @@ impl CoreQuantReportPort {
                 .await?,
         );
         let observed_boundary = decision_boundary(&cells)?;
-        let expected_boundary = DecisionBoundaryEvidenceView::from(boundary);
         if observed_boundary
             .as_ref()
-            .is_some_and(|observed| observed != &expected_boundary)
+            .is_some_and(|observed| !FeatureClockProjection::from(boundary).matches(observed))
         {
             return Err(ResearchError::Determinism {
                 detail: format!(
@@ -274,14 +279,7 @@ impl CoreQuantReportPort {
 
         let mut complete = true;
         for token in &snapshot.tokens_json.0 {
-            let vector_id =
-                token
-                    .feature_vector_id
-                    .as_ref()
-                    .ok_or_else(|| ResearchError::Determinism {
-                        detail: "validated data-quality row lost its feature-vector binding"
-                            .to_owned(),
-                    })?;
+            let vector_id = &token.feature_vector_id;
             let info = infos_by_id
                 .remove(vector_id)
                 .ok_or_else(|| ResearchError::Determinism {
@@ -321,36 +319,6 @@ struct PreInferenceFeatureEvidence {
     cells: Vec<QuantFeatureEventRow>,
     complete: bool,
     vector_count: u64,
-}
-
-fn pre_inference_vector_ids(
-    report: &RecommendationReportInfo,
-    snapshot: &ReportDataQualitySnapshotInfo,
-) -> QuantResult<Vec<FeatureVectorId>> {
-    let mut vector_ids = Vec::with_capacity(snapshot.tokens_json.0.len());
-    let mut unique_ids = HashSet::with_capacity(snapshot.tokens_json.0.len());
-    let mut unique_markets = HashSet::with_capacity(snapshot.tokens_json.0.len());
-    for token in &snapshot.tokens_json.0 {
-        let vector_id = token
-            .feature_vector_id
-            .ok_or_else(|| ResearchError::Determinism {
-                detail: format!(
-                    "report {} contains legacy-unbound data-quality evidence",
-                    report.recommendation_report_id
-                ),
-            })?;
-        if !unique_ids.insert(vector_id) || !unique_markets.insert(token.market_id.clone()) {
-            return Err(ResearchError::Determinism {
-                detail: format!(
-                    "report {} data-quality evidence contains duplicate vector or market bindings",
-                    report.recommendation_report_id
-                ),
-            }
-            .into());
-        }
-        vector_ids.push(vector_id);
-    }
-    Ok(vector_ids)
 }
 
 #[async_trait]
@@ -478,18 +446,23 @@ impl QuantReportPort for CoreQuantReportPort {
         let Some(report) = self.report_repo.find_by_id(report_id).await? else {
             return Ok(None);
         };
-        let boundary = self.load_report_boundary(&report).await?;
         let data_quality = self.load_report_data_quality(&report).await?;
+        let route_runs = self
+            .report_repo
+            .find_route_runs(&[report.report_run_id])
+            .await?;
+        let (boundary, vectors) = self
+            .load_report_boundary(&report, &data_quality, &route_runs)
+            .await?;
         let selection_count = u64::from(report.summary_json.market_selection_count);
         let global = if data_quality.tokens_json.0.is_empty() {
             pre_inference_selection_diagnostics(selection_count)
         } else {
             let evidence = self
-                .load_pre_inference_features(&report, &data_quality, &boundary)
+                .load_pre_inference_features(&report, &data_quality, &boundary, vectors)
                 .await?;
             pre_inference_diagnostics(selection_count, evidence)?
         };
-        let route_runs = self.report_repo.list_route_runs(report_id).await?;
         let route_order = route_runs.iter().map(|run| run.route).collect::<Vec<_>>();
         if route_order != report.represented_routes_json.routes {
             return Err(ResearchError::Determinism {
@@ -593,7 +566,7 @@ impl QuantReportPort for CoreQuantReportPort {
             .await?;
         let route_runs = self
             .report_repo
-            .list_route_runs(report_id)
+            .find_route_runs(&[report.report_run_id])
             .await?
             .into_iter()
             .map(|run| (run.report_route_run_id, run))
@@ -1113,10 +1086,9 @@ fn model_run_diagnostics(
     let feature_rows = latest_feature_cells(features.to_vec());
     let input_rows = latest_model_inputs(inputs.to_vec());
     let observed_boundary = decision_boundary(&feature_rows)?;
-    let expected_boundary = DecisionBoundaryEvidenceView::from(boundary);
     if observed_boundary
         .as_ref()
-        .is_some_and(|observed| observed != &expected_boundary)
+        .is_some_and(|observed| !FeatureClockProjection::from(boundary).matches(observed))
     {
         return Err(ResearchError::Determinism {
             detail: "serving evidence does not match the report's frozen decision boundary"
@@ -1336,6 +1308,35 @@ fn decision_boundary(
     }))
 }
 
+/// `ClickHouse` scalar clocks use milliseconds; JSON source cutoffs remain exact.
+struct FeatureClockProjection {
+    decision_at_ms: i64,
+    knowledge_cutoff_ms: i64,
+    per_source_cutoffs: BTreeMap<String, DateTime<Utc>>,
+}
+
+impl From<&DecisionBoundary> for FeatureClockProjection {
+    fn from(boundary: &DecisionBoundary) -> Self {
+        Self {
+            decision_at_ms: boundary.decision_at().timestamp_millis(),
+            knowledge_cutoff_ms: boundary.knowledge_cutoff().timestamp_millis(),
+            per_source_cutoffs: boundary
+                .per_source_cutoffs()
+                .iter()
+                .map(|(source, cutoff)| (source.as_str().to_owned(), *cutoff))
+                .collect(),
+        }
+    }
+}
+
+impl FeatureClockProjection {
+    fn matches(&self, observed: &DecisionBoundaryEvidenceView) -> bool {
+        observed.decision_at.timestamp_millis() == self.decision_at_ms
+            && observed.knowledge_cutoff.timestamp_millis() == self.knowledge_cutoff_ms
+            && observed.per_source_cutoffs == self.per_source_cutoffs
+    }
+}
+
 fn parse_source_cutoffs(value: &str) -> QuantResult<BTreeMap<String, DateTime<Utc>>> {
     serde_json::from_str(value).map_err(|error| {
         ResearchError::Serialization {
@@ -1473,13 +1474,18 @@ fn non_empty_count<T>(rows: &[T], entity: &'static str) -> QuantResult<Option<u6
 
 #[cfg(test)]
 mod diagnostics_tests {
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::data_plane::{DecisionBoundary, DecisionClock},
+        domain::{
+            api::DecisionBoundaryEvidenceView,
+            data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
+        },
         enums::quant::FeatureParityStage,
     };
 
-    use super::{model_run_diagnostics, pre_inference_selection_diagnostics};
+    use super::{
+        FeatureClockProjection, model_run_diagnostics, pre_inference_selection_diagnostics,
+    };
 
     fn boundary() -> DecisionBoundary {
         DecisionClock::new(30)
@@ -1515,5 +1521,42 @@ mod diagnostics_tests {
         assert_eq!(view.feature_cell_count, None);
         assert_eq!(view.model_input_state_counts, None);
         assert_eq!(view.model_input_count, None);
+    }
+
+    #[test]
+    fn projects_scalar_clocks_only() {
+        let decision_at = Utc
+            .timestamp_opt(1_700_000_000, 123_456_000)
+            .single()
+            .expect("precise decision");
+        let watermark = decision_at - Duration::seconds(30) - Duration::microseconds(17);
+        let boundary = DecisionClock::new(2)
+            .serving_boundary(decision_at, 5, 7)
+            .expect("configured sources")
+            .with_source_watermark(DecisionSource::FinalizedExecution, watermark)
+            .expect("source watermark");
+        let projection = FeatureClockProjection::from(&boundary);
+        let mut observed = DecisionBoundaryEvidenceView::from(&boundary);
+        observed.decision_at =
+            DateTime::from_timestamp_millis(decision_at.timestamp_millis()).expect("CH decision");
+        observed.knowledge_cutoff =
+            DateTime::from_timestamp_millis(boundary.knowledge_cutoff().timestamp_millis())
+                .expect("CH cutoff");
+        assert!(projection.matches(&observed));
+        assert_ne!(observed.decision_at, boundary.decision_at());
+        observed.decision_at += Duration::milliseconds(1);
+        assert!(!projection.matches(&observed));
+        observed.decision_at -= Duration::milliseconds(1);
+        observed.knowledge_cutoff -= Duration::milliseconds(1);
+        assert!(!projection.matches(&observed));
+        observed.knowledge_cutoff += Duration::milliseconds(1);
+        observed.per_source_cutoffs.insert(
+            DecisionSource::FinalizedExecution.as_str().to_owned(),
+            watermark - Duration::microseconds(1),
+        );
+        assert!(
+            !projection.matches(&observed),
+            "JSON source cutoffs never lose sub-millisecond precision"
+        );
     }
 }

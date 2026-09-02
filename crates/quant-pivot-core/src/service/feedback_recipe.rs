@@ -1,10 +1,14 @@
 //! Production execution of governed feedback recipe planning.
 
-use std::{cmp::Ordering, collections::BTreeSet, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_compute::OFFLINE_MEMORY_BYTES;
+use quant_pivot_compute::{ComputeExecutor, OFFLINE_MEMORY_BYTES, OfflineMemory};
 use quant_pivot_error::{
     QuantError, QuantResult, feedback::FeedbackError, research::ResearchError,
     storage::StorageError,
@@ -22,8 +26,8 @@ use quant_pivot_models::{
             FeedbackRecipeTemplate,
         },
         quant::{
-            FeedbackCohortWindow, FeedbackCycleInfo, JobProgressSink, ModelSpecInfo,
-            ResearchJobArtifactRef, ResearchJobInfo,
+            FeedbackCohortWindow, FeedbackCycleInfo, FeedbackStageEventInfo, JobProgressSink,
+            ModelSpecInfo, ResearchJobArtifactRef, ResearchJobInfo,
         },
     },
     enums::quant::{
@@ -34,8 +38,9 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::ResearchValidationConfig,
     types::{
-        ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetSourceLineage, ResearchJobParams,
-        ResearchJobProgress, ResearchProfileArtifact, TrainingDatasetId,
+        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetSourceLineage,
+        FeedbackCycleId, ResearchJobId, ResearchJobParams, ResearchJobProgress,
+        ResearchProfileArtifact, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::traits::{
@@ -46,7 +51,7 @@ use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     attribution::{AttributionArtifact, AttributionArtifactCodec},
     feedback::{DriftGateOutcome, FeedbackDriftCodec},
-    feedback_comparison::{FeedbackComparisonCodec, RomanoWolfOutcome},
+    feedback_comparison::{FeedbackComparisonArtifact, FeedbackComparisonCodec, RomanoWolfOutcome},
     feedback_governance::FeedbackGovernanceCodec,
     feedback_recipe::CandidateRecipePlanCodec,
 };
@@ -57,13 +62,16 @@ use crate::{
         feedback_mutation::FeedbackCycleFreezePlan,
         training_dataset::{CoreTrainingDatasetPort, FeedbackSourceFreeze},
     },
-    service::model_serving_preimage::ModelServingPreimageService,
+    service::model_serving_preimage::{
+        ModelPreimageReadContext, ModelServingPreimageService, VerifiedModelServingPreimage,
+    },
 };
 
 const DATASET_PLAN_DOMAIN: &str = "quant-pivot/feedback-dataset-plan";
 const DATASET_PLAN_VERSION: u32 = 2;
 
 pub struct CandidateRecipePlanExecutionDeps {
+    pub compute: Arc<ComputeExecutor>,
     pub cycles: Arc<dyn FeedbackCycleRepository>,
     pub templates: Arc<dyn FeedbackRecipeTemplateRepository>,
     pub models: Arc<dyn ModelRegistryRepository>,
@@ -75,6 +83,7 @@ pub struct CandidateRecipePlanExecutionDeps {
 }
 
 pub struct CandidateRecipePlanExecutionService {
+    compute: Arc<ComputeExecutor>,
     cycles: Arc<dyn FeedbackCycleRepository>,
     templates: Arc<dyn FeedbackRecipeTemplateRepository>,
     models: Arc<dyn ModelRegistryRepository>,
@@ -92,6 +101,17 @@ struct CandidateRecipeSealInput<'a> {
     templates: Vec<SelectedRecipeTemplate>,
     plan: &'a FeedbackCycleFreezePlan,
     source_lineage: &'a DatasetSourceLineage,
+    cancel: &'a CancellationToken,
+}
+
+struct RecipeTemplateSelectionInput<'a> {
+    cycle: &'a FeedbackCycleInfo,
+    params: &'a CandidateRecipePlanJobParams,
+    profile: &'a ResearchProfileArtifact,
+    model_spec: &'a ModelSpecInfo,
+    validation: &'a ResearchValidationConfig,
+    diagnostics: &'a [AvailableDiagnosticEvidence],
+    cancel: &'a CancellationToken,
 }
 
 enum RecipeTemplateSelection {
@@ -109,6 +129,24 @@ struct SelectedRecipeTemplate {
     matched_triggers: Vec<FeedbackDriftMetric>,
     diagnostic_evidence: Vec<FeedbackRecipeDiagnosticEvidence>,
     historical_oos: Option<FeedbackRecipeOosSummary>,
+}
+
+struct HistoricalOosIndex {
+    cycles: HashMap<FeedbackCycleId, FeedbackCycleInfo>,
+    events: HashMap<FeedbackCycleId, Vec<FeedbackStageEventInfo>>,
+    jobs: HashMap<ResearchJobId, ResearchJobInfo>,
+    artifacts: HashMap<ContentHash, HistoricalArtifact>,
+}
+
+enum HistoricalArtifact {
+    RecipePlan(Box<CandidateRecipePlanArtifact>),
+    Comparison(Box<FeedbackComparisonArtifact>),
+}
+
+struct HistoricalArtifactBytes {
+    kind: ResearchJobResultKind,
+    bytes: Vec<u8>,
+    expected: ContentHash,
 }
 
 impl SelectedRecipeTemplate {
@@ -139,10 +177,39 @@ impl SelectedRecipeTemplate {
     }
 }
 
+impl HistoricalArtifactBytes {
+    fn decode(self) -> QuantResult<HistoricalArtifact> {
+        match self.kind {
+            ResearchJobResultKind::CandidateRecipePlanArtifact => {
+                CandidateRecipePlanExecutionService::require_hash(
+                    self.expected,
+                    CanonicalDigest::content_hash_bytes(&self.bytes),
+                )?;
+                CandidateRecipePlanCodec::decode(&self.bytes)
+                    .map(Box::new)
+                    .map(HistoricalArtifact::RecipePlan)
+            }
+            ResearchJobResultKind::FeedbackComparisonArtifact => {
+                CandidateRecipePlanExecutionService::require_hash(
+                    self.expected,
+                    FeedbackComparisonCodec::bytes_hash(&self.bytes),
+                )?;
+                FeedbackComparisonCodec::decode(&self.bytes)
+                    .map(Box::new)
+                    .map(HistoricalArtifact::Comparison)
+            }
+            _ => Err(CandidateRecipePlanExecutionService::invalid(
+                "historical RecipePlan index contains an unexpected result kind",
+            )),
+        }
+    }
+}
+
 impl CandidateRecipePlanExecutionService {
     #[must_use]
     pub fn new(deps: CandidateRecipePlanExecutionDeps) -> Self {
         Self {
+            compute: deps.compute,
             cycles: deps.cycles,
             templates: deps.templates,
             models: deps.models,
@@ -154,13 +221,11 @@ impl CandidateRecipePlanExecutionService {
         }
     }
 
-    async fn build_artifact(
+    async fn load_context(
         &self,
         params: &CandidateRecipePlanJobParams,
-        progress: &dyn JobProgressSink,
-        cancel: &CancellationToken,
-    ) -> QuantResult<CandidateRecipePlanArtifact> {
-        Self::require_active(cancel)?;
+        context: &ModelPreimageReadContext<'_>,
+    ) -> QuantResult<(FeedbackCycleInfo, VerifiedModelServingPreimage)> {
         let cycle = self
             .cycles
             .find_cycle(&params.feedback_cycle_id)
@@ -176,8 +241,43 @@ impl CandidateRecipePlanExecutionService {
             .ok_or_else(|| {
                 StorageError::not_found("quant_model_version", cycle.champion_model_version_id)
             })?;
-        let preimage = self.serving_preimages.load(&champion).await?;
+        let preimage = self.serving_preimages.load(&champion, context).await?;
         preimage.verify_feedback_cycle(&cycle)?;
+        Ok((cycle, preimage))
+    }
+
+    async fn run_cpu<T, F>(&self, cancel: &CancellationToken, work: F) -> QuantResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QuantResult<T> + Send + 'static,
+    {
+        Self::require_active(cancel)?;
+        let memory = OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES)?;
+        self.compute
+            .run_offline_cancellable(memory, cancel, work)
+            .await
+    }
+
+    async fn run_finalize<T, F>(&self, work: F) -> QuantResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QuantResult<T> + Send + 'static,
+    {
+        self.compute
+            .run_offline(OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES)?, work)
+            .await
+    }
+
+    async fn build_artifact(
+        &self,
+        params: &CandidateRecipePlanJobParams,
+        progress: &dyn JobProgressSink,
+        cancel: &CancellationToken,
+    ) -> QuantResult<CandidateRecipePlanArtifact> {
+        Self::require_active(cancel)?;
+        let context = ModelPreimageReadContext::new(cancel, None);
+        let (cycle, preimage) = self.load_context(params, &context).await?;
+        drop(context);
         let profile = preimage.profile().clone();
         let model_spec = preimage.model_spec();
         let bundle = self
@@ -232,23 +332,26 @@ impl CandidateRecipePlanExecutionService {
                 CandidateRecipeReadinessBlocker::ShadowOccupied,
             );
         }
-        let attribution = self.verify_attribution(&cycle, params).await?;
-        self.verify_drift(&cycle, params).await?;
-        let diagnostics = self.load_diagnostic_evidence(&cycle, &attribution).await?;
+        let attribution = self.verify_attribution(&cycle, params, cancel).await?;
+        self.verify_drift(&cycle, params, cancel).await?;
+        let diagnostics = self
+            .load_diagnostic_evidence(&cycle, &attribution, cancel)
+            .await?;
         let templates = match self
-            .select_templates(
-                &cycle,
+            .select_templates(RecipeTemplateSelectionInput {
+                cycle: &cycle,
                 params,
-                &profile,
+                profile: &profile,
                 model_spec,
-                &bundle
+                validation: &bundle
                     .snapshot
                     .profile_artifacts
                     .research_method
                     .research
                     .validation,
-                &diagnostics,
-            )
+                diagnostics: &diagnostics,
+                cancel,
+            })
             .await?
         {
             RecipeTemplateSelection::Ready(templates) => templates,
@@ -261,14 +364,24 @@ impl CandidateRecipePlanExecutionService {
             0,
             1,
         ));
-        let plan = FeedbackCycleFreezePlan::derive_at_cutoff(
-            &profile,
-            cycle.champion_model_spec_id,
-            cycle.champion_model_spec_definition_hash,
-            cycle.decision_policy_snapshot_id,
-            cycle.decision_policy_snapshot_hash,
-            cycle.label_cutoff,
-        )?;
+        let plan_profile = profile.clone();
+        let model_spec_id = cycle.champion_model_spec_id;
+        let model_spec_hash = cycle.champion_model_spec_definition_hash;
+        let policy_snapshot_id = cycle.decision_policy_snapshot_id;
+        let policy_snapshot_hash = cycle.decision_policy_snapshot_hash;
+        let label_cutoff = cycle.label_cutoff;
+        let plan = self
+            .run_cpu(cancel, move || {
+                FeedbackCycleFreezePlan::derive_at_cutoff(
+                    &plan_profile,
+                    model_spec_id,
+                    model_spec_hash,
+                    policy_snapshot_id,
+                    policy_snapshot_hash,
+                    label_cutoff,
+                )
+            })
+            .await?;
         let source_lineage = self
             .training_datasets
             .freeze_feedback_source(
@@ -288,25 +401,35 @@ impl CandidateRecipePlanExecutionService {
             )
             .await?;
         Self::require_active(cancel)?;
-        Self::seal_plan(CandidateRecipeSealInput {
-            params,
-            cycle: &cycle,
-            profile: &profile,
-            templates,
-            plan: &plan,
-            source_lineage: &source_lineage,
+        let params = params.clone();
+        let work_cancel = cancel.clone();
+        self.run_cpu(cancel, move || {
+            Self::seal_plan(CandidateRecipeSealInput {
+                params: &params,
+                cycle: &cycle,
+                profile: &profile,
+                templates,
+                plan: &plan,
+                source_lineage: &source_lineage,
+                cancel: &work_cancel,
+            })
         })
+        .await
     }
 
     async fn select_templates(
         &self,
-        cycle: &FeedbackCycleInfo,
-        params: &CandidateRecipePlanJobParams,
-        profile: &ResearchProfileArtifact,
-        model_spec: &ModelSpecInfo,
-        validation: &ResearchValidationConfig,
-        diagnostics: &[AvailableDiagnosticEvidence],
+        input: RecipeTemplateSelectionInput<'_>,
     ) -> QuantResult<RecipeTemplateSelection> {
+        let RecipeTemplateSelectionInput {
+            cycle,
+            params,
+            profile,
+            model_spec,
+            validation,
+            diagnostics,
+            cancel,
+        } = input;
         let mut templates = self
             .templates
             .list_approved(&cycle.profile_ref, cycle.route, cycle.champion_model_family)
@@ -364,31 +487,56 @@ impl CandidateRecipePlanExecutionService {
                 CandidateRecipeReadinessBlocker::NoTriggerCompatibleTemplate,
             ));
         }
-        let mut selected = Vec::with_capacity(trigger_compatible.len());
+        let mut compatible = Vec::with_capacity(trigger_compatible.len());
         for (template, matched_triggers) in trigger_compatible {
             let Some(diagnostic_evidence) = Self::match_diagnostics(&template, diagnostics)? else {
                 continue;
             };
-            let historical_oos = self
-                .historical_oos(cycle, cycle.label_cutoff, &template, &diagnostic_evidence)
-                .await?;
-            selected.push(SelectedRecipeTemplate {
-                template,
-                matched_triggers,
-                diagnostic_evidence,
-                historical_oos,
-            });
+            compatible.push((template, matched_triggers, diagnostic_evidence));
         }
-        if selected.is_empty() {
+        if compatible.is_empty() {
             return Ok(RecipeTemplateSelection::NoAction(
                 CandidateRecipeReadinessBlocker::NoDiagnosticCompatibleTemplate,
             ));
         }
-        selected.sort_by(SelectedRecipeTemplate::stable_order);
+        let source_cycle_ids = compatible
+            .iter()
+            .flat_map(|(_, _, evidence)| evidence.iter().map(|item| item.source_feedback_cycle_id))
+            .collect::<HashSet<_>>();
+        let historical = self
+            .prefetch_historical(
+                source_cycle_ids.into_iter().collect(),
+                cycle.label_cutoff,
+                cancel,
+            )
+            .await?;
+        let cycle = cycle.clone();
+        let work_cancel = cancel.clone();
         let max_challengers = usize::try_from(params.max_challengers)
             .map_err(|error| Self::invalid(format!("challenger bound overflow: {error}")))?;
-        selected.truncate(max_challengers);
-        Ok(RecipeTemplateSelection::Ready(selected))
+        self.run_cpu(cancel, move || {
+            let mut selected = Vec::with_capacity(compatible.len());
+            for (template, matched_triggers, diagnostic_evidence) in compatible {
+                let historical_oos = Self::historical_oos(
+                    &cycle,
+                    cycle.label_cutoff,
+                    &template,
+                    &diagnostic_evidence,
+                    &historical,
+                    &work_cancel,
+                )?;
+                selected.push(SelectedRecipeTemplate {
+                    template,
+                    matched_triggers,
+                    diagnostic_evidence,
+                    historical_oos,
+                });
+            }
+            selected.sort_by(SelectedRecipeTemplate::stable_order);
+            selected.truncate(max_challengers);
+            Ok(RecipeTemplateSelection::Ready(selected))
+        })
+        .await
     }
 
     fn seal_plan(input: CandidateRecipeSealInput<'_>) -> QuantResult<CandidateRecipePlanArtifact> {
@@ -399,6 +547,7 @@ impl CandidateRecipePlanExecutionService {
             templates,
             plan,
             source_lineage,
+            cancel,
         } = input;
         let evaluation = Self::dataset_request(
             DatasetPurpose::Evaluation,
@@ -410,6 +559,7 @@ impl CandidateRecipePlanExecutionService {
         let mut candidates = Vec::with_capacity(templates.len());
         let mut selections = Vec::with_capacity(templates.len());
         for selected in templates {
+            Self::require_active(cancel)?;
             let template = selected.template;
             let training_window = Self::bounded_window(
                 plan.training(),
@@ -499,50 +649,64 @@ impl CandidateRecipePlanExecutionService {
         &self,
         cycle: &FeedbackCycleInfo,
         attribution: &FeedbackAttributionManifest,
+        cancel: &CancellationToken,
     ) -> QuantResult<Vec<AvailableDiagnosticEvidence>> {
         let mut evidence = Vec::with_capacity(attribution.uses.len());
         for use_ in &attribution.uses {
-            let bytes = self.artifacts.get(&use_.artifact_uri).await?;
-            Self::require_hash(use_.artifact_hash, AttributionArtifactCodec::hash(&bytes))?;
-            let artifact = AttributionArtifactCodec::decode(&bytes)?;
-            let lineage = artifact.lineage();
-            if artifact.kind() != use_.artifact_kind
-                || lineage.source_feedback_cycle_id != use_.source_feedback_cycle_id
-                || lineage.source_cohort != use_.source_cohort
-                || lineage.source_cutoff != use_.source_cutoff
-                || use_.available_at > cycle.label_cutoff
-            {
-                return Err(Self::invalid(
-                    "recipe diagnostic payload differs from its PIT attribution use",
-                ));
-            }
-            let feature_names = match artifact {
-                AttributionArtifact::PredictionExplanation(artifact) => artifact
-                    .contributions
-                    .iter()
-                    .map(|contribution| contribution.input_name.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-                AttributionArtifact::DecisionInterventionReplay(artifact) => artifact
-                    .interventions
-                    .iter()
-                    .map(|intervention| intervention.input_name.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-                AttributionArtifact::ResolutionOutcomeAssociation(_)
-                | AttributionArtifact::ExecutionOutcomeAssociation(_)
-                | AttributionArtifact::ExecutionTrajectory(_)
-                | AttributionArtifact::PolicyCounterfactualOutcome(_) => Vec::new(),
-            };
-            evidence.push(AvailableDiagnosticEvidence {
-                use_: use_.clone(),
-                feature_names,
-            });
+            let bytes = load_artifact(self.artifacts.as_ref(), &use_.artifact_uri, cancel).await?;
+            bounded_artifact_size(bytes.len(), "recipe diagnostic artifact")?;
+            let use_ = use_.clone();
+            let cycle = cycle.clone();
+            let work_cancel = cancel.clone();
+            evidence.push(
+                self.run_cpu(cancel, move || {
+                    Self::require_active(&work_cancel)?;
+                    Self::require_hash(use_.artifact_hash, AttributionArtifactCodec::hash(&bytes))?;
+                    let artifact = AttributionArtifactCodec::decode(&bytes)?;
+                    let lineage = artifact.lineage();
+                    if artifact.kind() != use_.artifact_kind
+                        || lineage.source_feedback_cycle_id != use_.source_feedback_cycle_id
+                        || lineage.source_cohort != use_.source_cohort
+                        || lineage.source_cutoff != use_.source_cutoff
+                        || use_.available_at > cycle.label_cutoff
+                    {
+                        return Err(Self::invalid(
+                            "recipe diagnostic payload differs from its PIT attribution use",
+                        ));
+                    }
+                    let feature_names = match artifact {
+                        AttributionArtifact::PredictionExplanation(artifact) => artifact
+                            .contributions
+                            .iter()
+                            .map(|contribution| contribution.input_name.clone())
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect(),
+                        AttributionArtifact::DecisionInterventionReplay(artifact) => artifact
+                            .interventions
+                            .iter()
+                            .map(|intervention| intervention.input_name.clone())
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect(),
+                        AttributionArtifact::ResolutionOutcomeAssociation(_)
+                        | AttributionArtifact::ExecutionOutcomeAssociation(_)
+                        | AttributionArtifact::ExecutionTrajectory(_)
+                        | AttributionArtifact::PolicyCounterfactualOutcome(_) => Vec::new(),
+                    };
+                    Ok(AvailableDiagnosticEvidence {
+                        use_,
+                        feature_names,
+                    })
+                })
+                .await?,
+            );
         }
-        evidence.sort_by_key(|item| item.use_.artifact_hash);
-        Ok(evidence)
+        self.run_cpu(cancel, move || {
+            evidence.sort_by_key(|item| item.use_.artifact_hash);
+            Ok(evidence)
+        })
+        .await
     }
 
     fn match_diagnostics(
@@ -602,12 +766,95 @@ impl CandidateRecipePlanExecutionService {
         Ok(Some(evidence))
     }
 
-    async fn historical_oos(
+    async fn prefetch_historical(
         &self,
+        mut source_cycle_ids: Vec<FeedbackCycleId>,
+        cutoff: DateTime<Utc>,
+        cancel: &CancellationToken,
+    ) -> QuantResult<HistoricalOosIndex> {
+        Self::require_active(cancel)?;
+        source_cycle_ids.sort_by_key(|id| id.as_uuid());
+        source_cycle_ids.dedup();
+        let cycles = self.cycles.find_cycles(&source_cycle_ids).await?;
+        if cycles.len() != source_cycle_ids.len() {
+            return Err(StorageError::invariant_violation(
+                Some("quant_feedback_cycle"),
+                "historical evidence references a missing feedback cycle",
+            )
+            .into());
+        }
+        Self::require_active(cancel)?;
+        let events = self.cycles.find_stage_events(&source_cycle_ids).await?;
+        Self::require_active(cancel)?;
+        let events_by_cycle = pit_stage_events(events, cutoff);
+        let mut job_ids = Vec::new();
+        for events in events_by_cycle.values() {
+            for event in events {
+                event.validate()?;
+                if let Some(job_id) = event.research_job_id {
+                    job_ids.push(job_id);
+                }
+            }
+        }
+        job_ids.sort_by_key(|id| id.as_uuid());
+        job_ids.dedup();
+        Self::require_active(cancel)?;
+        let jobs = self.jobs.find_by_ids(&job_ids).await?;
+        Self::require_active(cancel)?;
+        if jobs.len() != job_ids.len() {
+            return Err(StorageError::invariant_violation(
+                Some("quant_research_job"),
+                "historical stage evidence references a missing research job",
+            )
+            .into());
+        }
+        let jobs = jobs
+            .into_iter()
+            .map(|job| (job.job_id, job))
+            .collect::<HashMap<_, _>>();
+        let mut artifact_refs = jobs
+            .values()
+            .filter_map(|job| {
+                job.result()
+                    .zip(job.result_artifact())
+                    .map(|(result, artifact)| (result.kind, artifact))
+            })
+            .collect::<Vec<_>>();
+        artifact_refs.sort_by_key(|(_, artifact)| artifact.content_hash);
+        let mut artifacts = HashMap::with_capacity(artifact_refs.len());
+        for (kind, artifact) in artifact_refs {
+            if artifacts.contains_key(&artifact.content_hash) {
+                continue;
+            }
+            let bytes = load_artifact(self.artifacts.as_ref(), &artifact.uri, cancel).await?;
+            bounded_artifact_size(bytes.len(), "historical recipe artifact")?;
+            let expected = artifact.content_hash;
+            let owned = HistoricalArtifactBytes {
+                kind,
+                bytes,
+                expected,
+            };
+            let decoded = self.run_cpu(cancel, move || owned.decode()).await?;
+            artifacts.insert(expected, decoded);
+        }
+        Ok(HistoricalOosIndex {
+            cycles: cycles
+                .into_iter()
+                .map(|cycle| (cycle.feedback_cycle_id, cycle))
+                .collect(),
+            events: events_by_cycle,
+            jobs,
+            artifacts,
+        })
+    }
+
+    fn historical_oos(
         cycle: &FeedbackCycleInfo,
         cutoff: DateTime<Utc>,
         template: &FeedbackRecipeTemplate,
         diagnostics: &[FeedbackRecipeDiagnosticEvidence],
+        historical: &HistoricalOosIndex,
+        cancel: &CancellationToken,
     ) -> QuantResult<Option<FeedbackRecipeOosSummary>> {
         let mut source_cycles = diagnostics
             .iter()
@@ -617,7 +864,8 @@ impl CandidateRecipePlanExecutionService {
         source_cycles.dedup();
         let mut evidence = Vec::new();
         for source_cycle_id in source_cycles {
-            let Some(source_cycle) = self.cycles.find_cycle(&source_cycle_id).await? else {
+            Self::require_active(cancel)?;
+            let Some(source_cycle) = historical.cycles.get(&source_cycle_id) else {
                 return Err(
                     StorageError::not_found("quant_feedback_cycle", source_cycle_id).into(),
                 );
@@ -632,15 +880,14 @@ impl CandidateRecipePlanExecutionService {
                     "historical OOS source violates cycle/profile/route/family PIT isolation",
                 ));
             }
-            let Some((plan_job, plan_ref, _)) = self
-                .historical_stage(
-                    &source_cycle,
-                    FeedbackStage::RecipePlan,
-                    ResearchJobKind::FeedbackRecipePlan,
-                    ResearchJobResultKind::CandidateRecipePlanArtifact,
-                    cutoff,
-                )
-                .await?
+            let Some((plan_job, plan_ref, _)) = Self::historical_stage(
+                source_cycle,
+                FeedbackStage::RecipePlan,
+                ResearchJobKind::FeedbackRecipePlan,
+                ResearchJobResultKind::CandidateRecipePlanArtifact,
+                cutoff,
+                historical,
+            )?
             else {
                 continue;
             };
@@ -649,12 +896,17 @@ impl CandidateRecipePlanExecutionService {
                     "historical RecipePlan job lost its typed parameters",
                 ));
             };
-            let plan_bytes = self.artifacts.get(&plan_ref.uri).await?;
-            Self::require_hash(
-                plan_ref.content_hash,
-                CanonicalDigest::content_hash_bytes(&plan_bytes),
-            )?;
-            let plan = CandidateRecipePlanCodec::decode(&plan_bytes)?;
+            let plan = historical
+                .artifacts
+                .get(&plan_ref.content_hash)
+                .ok_or_else(|| {
+                    Self::invalid("historical RecipePlan artifact was not prefetched")
+                })?;
+            let HistoricalArtifact::RecipePlan(plan) = plan else {
+                return Err(Self::invalid(
+                    "historical RecipePlan artifact has the wrong typed result",
+                ));
+            };
             if plan.feedback_cycle_id != source_cycle_id
                 || plan.artifact_id != plan_params.artifact_id
                 || plan.input_hash != plan_params.input_hash()?
@@ -670,15 +922,14 @@ impl CandidateRecipePlanExecutionService {
             }) else {
                 continue;
             };
-            let Some((comparison_job, comparison_ref, available_at)) = self
-                .historical_stage(
-                    &source_cycle,
-                    FeedbackStage::Comparison,
-                    ResearchJobKind::FeedbackComparison,
-                    ResearchJobResultKind::FeedbackComparisonArtifact,
-                    cutoff,
-                )
-                .await?
+            let Some((comparison_job, comparison_ref, available_at)) = Self::historical_stage(
+                source_cycle,
+                FeedbackStage::Comparison,
+                ResearchJobKind::FeedbackComparison,
+                ResearchJobResultKind::FeedbackComparisonArtifact,
+                cutoff,
+                historical,
+            )?
             else {
                 continue;
             };
@@ -689,12 +940,17 @@ impl CandidateRecipePlanExecutionService {
                     "historical Comparison job lost its typed parameters",
                 ));
             };
-            let comparison_bytes = self.artifacts.get(&comparison_ref.uri).await?;
-            Self::require_hash(
-                comparison_ref.content_hash,
-                FeedbackComparisonCodec::bytes_hash(&comparison_bytes),
-            )?;
-            let comparison = FeedbackComparisonCodec::decode(&comparison_bytes)?;
+            let comparison = historical
+                .artifacts
+                .get(&comparison_ref.content_hash)
+                .ok_or_else(|| {
+                    Self::invalid("historical Comparison artifact was not prefetched")
+                })?;
+            let HistoricalArtifact::Comparison(comparison) = comparison else {
+                return Err(Self::invalid(
+                    "historical Comparison artifact has the wrong typed result",
+                ));
+            };
             comparison.validate_for(comparison_params)?;
             let RomanoWolfOutcome::Compared {
                 evidence: comparison_evidence,
@@ -729,34 +985,31 @@ impl CandidateRecipePlanExecutionService {
         }
     }
 
-    async fn historical_stage(
-        &self,
+    fn historical_stage(
         cycle: &FeedbackCycleInfo,
         stage: FeedbackStage,
         kind: ResearchJobKind,
         result_kind: ResearchJobResultKind,
         cutoff: DateTime<Utc>,
+        historical: &HistoricalOosIndex,
     ) -> QuantResult<Option<(ResearchJobInfo, ResearchJobArtifactRef, DateTime<Utc>)>> {
-        let events = self
-            .cycles
-            .list_stage_events(&cycle.feedback_cycle_id)
-            .await?;
-        let Some(event) = events.iter().rev().find(|event| {
-            event.stage == stage && event.event_kind == FeedbackStageEventKind::Succeeded
-        }) else {
+        let events = historical
+            .events
+            .get(&cycle.feedback_cycle_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let Some(event) = events.iter().find(|event| event.stage == stage) else {
             return Ok(None);
         };
         event.validate()?;
-        if event.occurred_at > cutoff {
-            return Ok(None);
-        }
+        debug_assert!(event.occurred_at <= cutoff);
         let job_id = event
             .research_job_id
             .ok_or_else(|| Self::invalid(format!("historical {stage} event has no job")))?;
-        let job = self
+        let job = historical
             .jobs
-            .find_by_id(&job_id)
-            .await?
+            .get(&job_id)
+            .cloned()
             .ok_or_else(|| StorageError::not_found("quant_research_job", job_id))?;
         let artifact = job.result_artifact().ok_or_else(|| {
             Self::invalid(format!("historical {stage} job has no terminal artifact"))
@@ -801,31 +1054,60 @@ impl CandidateRecipePlanExecutionService {
         &self,
         cycle: &FeedbackCycleInfo,
         params: &CandidateRecipePlanJobParams,
+        cancel: &CancellationToken,
     ) -> QuantResult<FeedbackAttributionManifest> {
-        let bytes = self.artifacts.get(&params.attribution.artifact.uri).await?;
-        Self::require_hash(
-            params.attribution.artifact.content_hash,
-            FeedbackGovernanceCodec::bytes_hash(&bytes),
-        )?;
-        let artifact = FeedbackGovernanceCodec::decode_attribution(&bytes)?;
-        let cycle_identity_exact = artifact.cycle_idempotency_hash == cycle.idempotency_hash;
-        if artifact.feedback_cycle_id != cycle.feedback_cycle_id
-            || !cycle_identity_exact
-            || artifact.use_set_hash != params.attribution.use_set_hash
-            || artifact.produced_set_hash != params.attribution.produced_set_hash
-        {
-            return Err(Self::invalid(
-                "recipe-plan attribution manifest differs from its cycle",
-            ));
+        let bytes = load_artifact(
+            self.artifacts.as_ref(),
+            &params.attribution.artifact.uri,
+            cancel,
+        )
+        .await?;
+        let expected_hash = params.attribution.artifact.content_hash;
+        let work_cycle = cycle.clone();
+        let work_params = params.clone();
+        let artifact = self
+            .run_cpu(cancel, move || {
+                Self::require_hash(expected_hash, FeedbackGovernanceCodec::bytes_hash(&bytes))?;
+                let artifact = FeedbackGovernanceCodec::decode_attribution(&bytes)?;
+                let cycle_identity_exact =
+                    artifact.cycle_idempotency_hash == work_cycle.idempotency_hash;
+                if artifact.feedback_cycle_id != work_cycle.feedback_cycle_id
+                    || !cycle_identity_exact
+                    || artifact.use_set_hash != work_params.attribution.use_set_hash
+                    || artifact.produced_set_hash != work_params.attribution.produced_set_hash
+                {
+                    return Err(Self::invalid(
+                        "recipe-plan attribution manifest differs from its cycle",
+                    ));
+                }
+                Ok(artifact)
+            })
+            .await?;
+        let mut source_ids = artifact
+            .uses
+            .iter()
+            .map(|use_| use_.source_feedback_cycle_id)
+            .collect::<Vec<_>>();
+        source_ids.sort_by_key(|id| id.as_uuid());
+        source_ids.dedup();
+        let sources = self
+            .cycles
+            .find_cycles(&source_ids)
+            .await?
+            .into_iter()
+            .map(|source| (source.feedback_cycle_id, source))
+            .collect::<HashMap<_, _>>();
+        if sources.len() != source_ids.len() {
+            return Err(StorageError::invariant_violation(
+                Some("quant_feedback_cycle"),
+                "attribution evidence references a missing feedback cycle",
+            )
+            .into());
         }
         for use_ in &artifact.uses {
-            let source = self
-                .cycles
-                .find_cycle(&use_.source_feedback_cycle_id)
-                .await?
-                .ok_or_else(|| {
-                    StorageError::not_found("quant_feedback_cycle", use_.source_feedback_cycle_id)
-                })?;
+            let source = sources.get(&use_.source_feedback_cycle_id).ok_or_else(|| {
+                StorageError::not_found("quant_feedback_cycle", use_.source_feedback_cycle_id)
+            })?;
             let available_before_cutoff = use_.available_at <= cycle.label_cutoff;
             if source.feedback_cycle_id == cycle.feedback_cycle_id
                 || source.profile_ref != cycle.profile_ref
@@ -845,36 +1127,41 @@ impl CandidateRecipePlanExecutionService {
         &self,
         cycle: &FeedbackCycleInfo,
         params: &CandidateRecipePlanJobParams,
+        cancel: &CancellationToken,
     ) -> QuantResult<()> {
-        let bytes = self.artifacts.get(&params.drift.artifact.uri).await?;
-        Self::require_hash(
-            params.drift.artifact.content_hash,
-            FeedbackDriftCodec::bytes_hash(&bytes),
-        )?;
-        let artifact = FeedbackDriftCodec::decode(&bytes)?;
-        let exceeded_metrics = match artifact.gate_outcome {
-            DriftGateOutcome::Advance { exceeded_metrics } => exceeded_metrics,
-            DriftGateOutcome::NoAction { .. }
-                if cycle.evaluation_mode == FeedbackEvaluationMode::ForcedRetraining =>
+        let bytes =
+            load_artifact(self.artifacts.as_ref(), &params.drift.artifact.uri, cancel).await?;
+        let expected_hash = params.drift.artifact.content_hash;
+        let cycle = cycle.clone();
+        let params = params.clone();
+        self.run_cpu(cancel, move || {
+            Self::require_hash(expected_hash, FeedbackDriftCodec::bytes_hash(&bytes))?;
+            let artifact = FeedbackDriftCodec::decode(&bytes)?;
+            let exceeded_metrics = match artifact.gate_outcome {
+                DriftGateOutcome::Advance { exceeded_metrics } => exceeded_metrics,
+                DriftGateOutcome::NoAction { .. }
+                    if cycle.evaluation_mode == FeedbackEvaluationMode::ForcedRetraining =>
+                {
+                    Vec::new()
+                }
+                DriftGateOutcome::NoAction { .. } => {
+                    return Err(Self::invalid(
+                        "conditional recipe-plan cannot bypass a Drift NoAction",
+                    ));
+                }
+            };
+            let cycle_identity_exact = artifact.cycle_idempotency_hash == cycle.idempotency_hash;
+            if artifact.feedback_cycle_id != cycle.feedback_cycle_id
+                || !cycle_identity_exact
+                || exceeded_metrics != params.drift.exceeded_metrics
             {
-                Vec::new()
-            }
-            DriftGateOutcome::NoAction { .. } => {
                 return Err(Self::invalid(
-                    "conditional recipe-plan cannot bypass a Drift NoAction",
+                    "recipe-plan Drift manifest differs from the exact predecessor",
                 ));
             }
-        };
-        let cycle_identity_exact = artifact.cycle_idempotency_hash == cycle.idempotency_hash;
-        if artifact.feedback_cycle_id != cycle.feedback_cycle_id
-            || !cycle_identity_exact
-            || exceeded_metrics != params.drift.exceeded_metrics
-        {
-            return Err(Self::invalid(
-                "recipe-plan Drift manifest differs from the exact predecessor",
-            ));
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     fn dataset_request(
@@ -939,22 +1226,41 @@ impl CandidateRecipePlanExecutionService {
 
     async fn persist(
         &self,
-        artifact: &CandidateRecipePlanArtifact,
+        artifact: CandidateRecipePlanArtifact,
+        cancel: &CancellationToken,
     ) -> QuantResult<ResearchJobArtifactRef> {
-        let bytes = CandidateRecipePlanCodec::encode(artifact)?;
-        let content_hash = CanonicalDigest::content_hash_bytes(&bytes);
+        let (artifact, bytes, content_hash) = self
+            .run_cpu(cancel, move || {
+                let bytes = CandidateRecipePlanCodec::encode(&artifact)?;
+                let content_hash = CanonicalDigest::content_hash_bytes(&bytes);
+                Ok((artifact, bytes, content_hash))
+            })
+            .await?;
         let key = ArtifactKey::new(
             ArtifactNamespace::FeedbackRecipePlan,
             content_hash.hex(),
             "json",
         )?;
+        Self::require_active(cancel)?;
         let uri = self.artifacts.put(key, &bytes).await?;
+        // The successful immutable PUT is the commit boundary. Readback and
+        // canonical verification must finish even if cancellation races after
+        // that boundary; the job supervisor keeps polling this future so the
+        // durable outcome is never abandoned as unknown.
         let persisted = self.artifacts.get(&uri).await?;
-        Self::require_hash(
-            content_hash,
-            CanonicalDigest::content_hash_bytes(&persisted),
-        )?;
-        CandidateRecipePlanCodec::decode(&persisted)?;
+        self.run_finalize(move || {
+            Self::require_hash(
+                content_hash,
+                CanonicalDigest::content_hash_bytes(&persisted),
+            )?;
+            if CandidateRecipePlanCodec::decode(&persisted)? != artifact {
+                return Err(Self::invalid(
+                    "recipe-plan readback differs from the encoded artifact",
+                ));
+            }
+            Ok(())
+        })
+        .await?;
         Ok(ResearchJobArtifactRef { uri, content_hash })
     }
 
@@ -1005,6 +1311,54 @@ impl CandidateRecipePlanExecutionService {
     }
 }
 
+fn pit_stage_events(
+    events: Vec<FeedbackStageEventInfo>,
+    cutoff: DateTime<Utc>,
+) -> HashMap<FeedbackCycleId, Vec<FeedbackStageEventInfo>> {
+    let mut selected = HashMap::<FeedbackCycleId, Vec<FeedbackStageEventInfo>>::new();
+    for event in events {
+        if event.event_kind != FeedbackStageEventKind::Succeeded
+            || event.occurred_at > cutoff
+            || !matches!(
+                event.stage,
+                FeedbackStage::RecipePlan | FeedbackStage::Comparison
+            )
+        {
+            continue;
+        }
+        let cycle_events = selected.entry(event.feedback_cycle_id).or_default();
+        if let Some(stored) = cycle_events
+            .iter_mut()
+            .find(|stored| stored.stage == event.stage)
+        {
+            *stored = event;
+        } else {
+            cycle_events.push(event);
+        }
+    }
+    selected
+}
+
+fn bounded_artifact_size(bytes: usize, owner: &'static str) -> QuantResult<()> {
+    if bytes > OFFLINE_MEMORY_BYTES {
+        return Err(CandidateRecipePlanExecutionService::invalid(format!(
+            "{owner} exceeded the governed offline memory budget"
+        )));
+    }
+    Ok(())
+}
+
+async fn load_artifact(
+    artifacts: &dyn ArtifactStore,
+    uri: &ArtifactUri,
+    cancel: &CancellationToken,
+) -> QuantResult<Vec<u8>> {
+    CandidateRecipePlanExecutionService::require_active(cancel)?;
+    let bytes = artifacts.get(uri).await?;
+    CandidateRecipePlanExecutionService::require_active(cancel)?;
+    Ok(bytes)
+}
+
 #[async_trait]
 impl CandidateRecipePlanExecutionPort for CandidateRecipePlanExecutionService {
     async fn plan_recipe(
@@ -1015,9 +1369,10 @@ impl CandidateRecipePlanExecutionPort for CandidateRecipePlanExecutionService {
     ) -> QuantResult<CandidateRecipePlanExecutionResult> {
         params.validate()?;
         let artifact = Box::pin(self.build_artifact(&params, progress.as_ref(), &cancel)).await?;
-        let result = self.persist(&artifact).await?;
+        let artifact_id = artifact.artifact_id;
+        let result = self.persist(artifact, &cancel).await?;
         Ok(CandidateRecipePlanExecutionResult {
-            artifact_id: artifact.artifact_id,
+            artifact_id,
             artifact: result,
         })
     }
@@ -1041,6 +1396,8 @@ fn selection_order(left: &CandidateRecipeSelection, right: &CandidateRecipeSelec
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
         domain::ports::{
@@ -1049,26 +1406,32 @@ mod tests {
             FeedbackRecipeOosSummary, FeedbackRecipeResourceBudget, FeedbackRecipeTemplate,
             FeedbackRecipeTemplateInput, FeedbackRecipeTrainingSpec,
         },
+        domain::quant::FeedbackStageEventInfo,
         enums::{
             model::ModelFamily,
             quant::{
                 AttributionArtifactKind, AttributionCohort, CalibrationMethod, DownsideSource,
-                FeedbackDriftMetric, FeedbackRecipeTemplateStatus,
+                FeedbackDriftMetric, FeedbackRecipeTemplateStatus, FeedbackStage,
+                FeedbackStageEventKind, ResearchJobResultKind,
             },
         },
+        hashing::CanonicalDigest,
         runtime_config::{BuyModelRoute, ResearchValidationConfig},
         types::{
             ArtifactUri, Bps, ContentHash, FeedbackCycleId, FeedbackRecipeTemplateId,
-            ModelInputContract, ModelSpecId, ModelTrainingContract, RoleCode, UserId,
-            builtin_research_profiles,
+            FeedbackStageEventId, ModelInputContract, ModelSpecId, ModelTrainingContract,
+            ResearchJobId, RoleCode, UserId, builtin_research_profiles,
         },
     };
+    use quant_pivot_research::artifact::LocalArtifactStore;
     use rust_decimal::Decimal;
+    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     use super::{
-        AvailableDiagnosticEvidence, CandidateRecipePlanExecutionService, OFFLINE_MEMORY_BYTES,
-        SelectedRecipeTemplate,
+        AvailableDiagnosticEvidence, CandidateRecipePlanExecutionService, HistoricalArtifactBytes,
+        OFFLINE_MEMORY_BYTES, SelectedRecipeTemplate, bounded_artifact_size, load_artifact,
+        pit_stage_events,
     };
 
     fn hash(seed: char) -> ContentHash {
@@ -1188,6 +1551,30 @@ mod tests {
         }
     }
 
+    fn stage_event(
+        cycle_id: FeedbackCycleId,
+        sequence: i64,
+        occurred_at: DateTime<Utc>,
+        job_seed: u128,
+    ) -> FeedbackStageEventInfo {
+        FeedbackStageEventInfo {
+            feedback_stage_event_id: FeedbackStageEventId::new(Uuid::from_u128(job_seed + 0x100)),
+            feedback_cycle_id: cycle_id,
+            event_sequence: sequence,
+            stage: FeedbackStage::RecipePlan,
+            event_kind: FeedbackStageEventKind::Succeeded,
+            trigger_family: None,
+            research_job_id: Some(ResearchJobId::new(Uuid::from_u128(job_seed))),
+            actor: None,
+            reason_code: None,
+            evidence_uri: None,
+            evidence_hash: None,
+            occurred_at,
+            event_hash: hash('9'),
+            created_at: occurred_at,
+        }
+    }
+
     #[test]
     fn trigger_match_precedes_oos() {
         let mut selected = [
@@ -1232,5 +1619,63 @@ mod tests {
                 FeedbackRecipeTemplateId::new(Uuid::from_u128(1)),
             ]
         );
+    }
+
+    #[test]
+    fn pit_selection_excludes_old() {
+        let cycle_id = FeedbackCycleId::new(Uuid::from_u128(0x501));
+        let cutoff = observed_at();
+        let selected = pit_stage_events(
+            vec![
+                stage_event(cycle_id, 1, cutoff - Duration::hours(2), 1),
+                stage_event(cycle_id, 2, cutoff - Duration::hours(1), 2),
+                stage_event(cycle_id, 3, cutoff + Duration::hours(1), 3),
+            ],
+            cutoff,
+        );
+        let jobs = selected
+            .get(&cycle_id)
+            .expect("cycle has one PIT stage")
+            .iter()
+            .filter_map(|event| event.research_job_id)
+            .collect::<Vec<_>>();
+        assert_eq!(jobs, vec![ResearchJobId::new(Uuid::from_u128(2))]);
+    }
+
+    #[test]
+    fn artifact_size_is_bounded() {
+        bounded_artifact_size(OFFLINE_MEMORY_BYTES, "fixture")
+            .expect("exact single-object budget is accepted");
+        let error = bounded_artifact_size(OFFLINE_MEMORY_BYTES + 1, "fixture")
+            .expect_err("one byte over budget fails closed");
+        assert!(error.to_string().contains("offline memory budget"));
+    }
+
+    #[test]
+    fn typed_history_rejects_malformed() {
+        let bytes = br#"{"not":"a recipe plan"}"#.to_vec();
+        let expected = CanonicalDigest::content_hash_bytes(&bytes);
+        let result = HistoricalArtifactBytes {
+            kind: ResearchJobResultKind::CandidateRecipePlanArtifact,
+            bytes,
+            expected,
+        }
+        .decode();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_load_skips_io() {
+        let root = env::temp_dir().join(format!("recipe-cancel-{}", Uuid::now_v7()));
+        let store = LocalArtifactStore::new(&root);
+        let uri = ArtifactUri::parse(format!("file://{}/missing.json", root.display()))
+            .expect("valid missing fixture URI");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = load_artifact(&store, &uri, &cancel)
+            .await
+            .expect_err("cancelled load must stop before filesystem I/O");
+        assert!(error.to_string().contains("cancelled"));
     }
 }

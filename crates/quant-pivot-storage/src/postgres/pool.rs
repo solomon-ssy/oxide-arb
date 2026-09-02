@@ -18,7 +18,7 @@ use sea_orm::{
     ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
     sqlx::postgres::PgListener,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use super::ensure;
 
@@ -174,11 +174,13 @@ impl PostgresPool {
         Ok(())
     }
 
-    /// Gracefully close the connection pool.
-    pub async fn close(self) {
-        if let Err(e) = self.db.close().await {
-            error!("Error closing PostgreSQL pool: {e}");
-        }
+    /// Close the shared pool and await every checked-out connection's return.
+    ///
+    /// The composition root calls this after all database consumers have
+    /// drained, while the pool's owning Tokio runtime is still alive.
+    pub async fn close(&self) -> Result<(), StorageError> {
+        self.db.close_by_ref().await?;
+        Ok(())
     }
 
     /// Verify that session-level GUC parameters actually took effect.
@@ -294,7 +296,24 @@ fn parse_pg_duration_ms(value: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use quant_pivot_error::storage::StorageError;
+    use quant_pivot_models::config::PostgresConfig;
+    use sea_orm::{DatabaseConnection, DbErr};
+
+    use super::{PostgresPool, duration_matches_ms, parse_pg_duration_ms};
+
+    #[tokio::test]
+    async fn close_reports_disconnection() {
+        let pool = PostgresPool {
+            db: DatabaseConnection::default(),
+            config: PostgresConfig::default(),
+        };
+
+        assert!(matches!(
+            pool.close().await,
+            Err(StorageError::Database(DbErr::Conn(_)))
+        ));
+    }
 
     #[test]
     fn parse_pg_duration_zero() {

@@ -594,7 +594,7 @@ impl ModelRunner {
         // The full ranked candidate set feeds the signal-layer shadow comparison.
         let active_candidates = output.candidates.clone();
         let (rows, accepted, decisions) =
-            project_candidate_decisions(output.candidates, event_time);
+            project_candidate_decisions(output.candidates, *run_version_id, event_time);
         Ok(ActiveResult {
             output_hash,
             accepted,
@@ -726,7 +726,7 @@ impl ModelRunner {
         let rows: Vec<_> = output
             .candidates
             .iter()
-            .map(|candidate| signal_candidate_event(candidate, "", event_time))
+            .map(|candidate| signal_candidate_event(candidate, *shadow_version_id, "", event_time))
             .collect();
         let weight_source = runtime.weight_source();
 
@@ -1044,6 +1044,7 @@ async fn finalize_shadow_failure(
 /// normalization; raw model score/confidence never excludes a global candidate.
 fn project_candidate_decisions(
     candidates: Vec<SignalCandidate>,
+    model_version_id: ModelVersionId,
     event_time: i64,
 ) -> (
     Vec<QuantSignalCandidateEventRow>,
@@ -1061,7 +1062,12 @@ fn project_candidate_decisions(
             gate_passed: true,
             primary_reason: None,
         });
-        rows.push(signal_candidate_event(&candidate, "", event_time));
+        rows.push(signal_candidate_event(
+            &candidate,
+            model_version_id,
+            "",
+            event_time,
+        ));
         accepted.push(candidate);
     }
     (rows, accepted, decisions)

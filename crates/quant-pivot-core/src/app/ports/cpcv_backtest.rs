@@ -37,7 +37,9 @@ use crate::{
             CpcvBacktestServiceDeps, PreparedCpcvRun,
         },
         historical_replay::ReplayConfig,
-        model_serving_preimage::{ModelServingPreimageService, VerifiedModelServingPreimage},
+        model_serving_preimage::{
+            ModelPreimageReadContext, ModelServingPreimageService, VerifiedModelServingPreimage,
+        },
     },
 };
 
@@ -187,10 +189,11 @@ impl CoreCpcvBacktestPort {
         model_version_id: &ModelVersionId,
         training_dataset_id: &TrainingDatasetId,
         decision_policy_snapshot_id: &DecisionPolicySnapshotId,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<ResolvedCpcvRun> {
         let version = self.load_version(model_version_id).await?;
         CpcvBacktestService::validate_family(version.model_family)?;
-        let source = Arc::new(self.serving_preimages.load(&version).await?);
+        let source = Arc::new(self.serving_preimages.load(&version, context).await?);
         let contract = source.artifact().header().serving_contract();
         let bindings = contract.bindings();
         let dataset = source.training_dataset();
@@ -214,6 +217,7 @@ impl CoreCpcvBacktestPort {
             dataset,
             DatasetPurpose::Training,
             &bindings.policy_snapshot,
+            context,
         ))
         .await?;
         let parent = match version.verified_derivation().map_err(|error| {
@@ -227,7 +231,10 @@ impl CoreCpcvBacktestPort {
                 ..
             } => {
                 let parent_version = self.load_version(&parent_model_version_id).await?;
-                let parent_source = self.serving_preimages.load(&parent_version).await?;
+                let parent_source = self
+                    .serving_preimages
+                    .load(&parent_version, context)
+                    .await?;
                 Some((parent_version, parent_source))
             }
         };
@@ -359,11 +366,7 @@ impl CoreCpcvBacktestPort {
         );
         self.create_run(&model_run_id, &resolved).await?;
 
-        let outcome = match resolved
-            .service
-            .run(cpcv_input, progress.as_ref(), &cancel)
-            .await
-        {
+        let outcome = match resolved.service.run(cpcv_input, progress, &cancel).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.fail_model_run(&model_run_id, &error).await;
@@ -510,12 +513,15 @@ impl CpcvBacktestPort for CoreCpcvBacktestPort {
             model_run_id,
             request,
         } = params;
+        let context = ModelPreimageReadContext::new(&cancel, None);
         let resolved = Box::pin(self.resolve_run(
             &model_version_id,
             &request.training_dataset_id,
             &request.decision_policy_snapshot_id,
+            &context,
         ))
         .await?;
+        drop(context);
         if let Some(path_set_id) = &request.path_set_id
             && let Some(view) = self.find_version_path_set(path_set_id, &resolved).await?
         {
@@ -548,12 +554,15 @@ impl CpcvBacktestPort for CoreCpcvBacktestPort {
         else {
             return Ok(None);
         };
+        let context = ModelPreimageReadContext::default();
         let resolved = Box::pin(self.resolve_run(
             &info.model_version_id,
             &info.training_dataset_id,
             &info.decision_policy_snapshot_id,
+            &context,
         ))
         .await?;
+        drop(context);
         self.verify_path_set(&info, &resolved).await?;
         Ok(Some(BacktestPathSetView::from(info)))
     }
@@ -570,12 +579,15 @@ impl CpcvBacktestPort for CoreCpcvBacktestPort {
         let Some(info) = rows.into_iter().next() else {
             return Ok(None);
         };
+        let context = ModelPreimageReadContext::default();
         let resolved = Box::pin(self.resolve_run(
             model_version_id,
             &info.training_dataset_id,
             &info.decision_policy_snapshot_id,
+            &context,
         ))
         .await?;
+        drop(context);
         self.verify_path_set(&info, &resolved).await?;
         Ok(Some(BacktestPathSetView::from(info)))
     }

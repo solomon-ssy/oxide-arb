@@ -18,7 +18,7 @@ use alloy::{
     transports::http::Http,
 };
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use quant_pivot_error::{hashing::CanonicalDigestError, rpc::RpcError};
 use quant_pivot_models::{
     config::OnchainConfig,
@@ -35,6 +35,7 @@ use quant_pivot_models::{
     },
 };
 use reqwest::{Client, Url};
+use tokio::time::Instant as TokioInstant;
 
 use super::typed::{IntoAlloyAddress, IntoEvmAddress, IntoEvmBlockHash, SettlementValueError};
 use crate::wallet::{
@@ -45,6 +46,16 @@ use crate::wallet::{
 const POLYGON_CHAIN_ID: u64 = 137;
 const TOKEN_DECIMALS: u8 = 6;
 const MAX_CHAIN_OBSERVATION_AGE_SECONDS: i64 = 120;
+// Polygon Bor rejects post-Giugliano headers more than 30 seconds in the
+// future. Mirror that consensus bound so an accepted second-granularity block
+// is not rejected merely because the verifier's wall clock has subsecond
+// precision.
+const MAX_CHAIN_OBSERVATION_FUTURE_SKEW_SECONDS: i64 = 30;
+// A deployment inspection that cannot finish within one freshness horizon is
+// not allowed to advance the wall-clock reference used to mint a capability.
+const MAX_SETTLEMENT_INSPECTION_SECONDS: i64 = 120;
+const MAX_SETTLEMENT_INSPECTION_DURATION: Duration =
+    Duration::from_secs(MAX_SETTLEMENT_INSPECTION_SECONDS.unsigned_abs());
 const CONTRACTS_DOCUMENTATION_URL: &str = "https://docs.polymarket.com/resources/contracts";
 const CLOB_V2_CHANGELOG_URL: &str = "https://docs.polymarket.com/changelog#jul-14-2026";
 const CTF_EXCHANGE_V2_README_URL: &str =
@@ -597,6 +608,8 @@ pub struct SettlementChainSnapshot {
     pub block_number: u64,
     pub block_hash: EvmBlockHash,
     pub block_timestamp: DateTime<Utc>,
+    /// Wall-clock time after the complete pinned-block inspection was read.
+    pub observed_at: DateTime<Utc>,
     pub adapter_code: Vec<u8>,
     pub conditional_tokens_code: Vec<u8>,
     pub collateral_token_code: Vec<u8>,
@@ -893,9 +906,31 @@ where
         checked_at: DateTime<Utc>,
     ) -> Result<VerifiedSettlementDeployment, SettlementReadiness> {
         let (request, advisories) = self.catalog.inspection_request(route);
-        let snapshot = match self.reader.inspect(&request, topology).await {
-            Ok(snapshot) => snapshot,
-            Err(SettlementChainReadError::WrongChain { expected, actual }) => {
+        let inspection_started = TokioInstant::now();
+        let inspection = tokio::time::timeout(
+            MAX_SETTLEMENT_INSPECTION_DURATION,
+            self.reader.inspect(&request, topology),
+        )
+        .await;
+        let snapshot = match inspection {
+            Err(_) => {
+                return Err(SettlementReadiness::blocked(
+                    route,
+                    topology.kind,
+                    vec![
+                        SettlementReadinessReason::SettlementInspectionWindowInvalid {
+                            request_admitted_at: checked_at,
+                            inspection_completed_at: Utc::now(),
+                            max_duration_seconds: MAX_SETTLEMENT_INSPECTION_SECONDS,
+                        },
+                    ],
+                    None,
+                    None,
+                    checked_at,
+                ));
+            }
+            Ok(Ok(snapshot)) => snapshot,
+            Ok(Err(SettlementChainReadError::WrongChain { expected, actual })) => {
                 return Err(SettlementReadiness::blocked(
                     route,
                     topology.kind,
@@ -905,11 +940,11 @@ where
                     checked_at,
                 ));
             }
-            Err(SettlementChainReadError::CanonicalBlockChanged {
+            Ok(Err(SettlementChainReadError::CanonicalBlockChanged {
                 block_number,
                 observed_hash,
                 current_hash,
-            }) => {
+            })) => {
                 return Err(SettlementReadiness::blocked(
                     route,
                     topology.kind,
@@ -923,7 +958,7 @@ where
                     checked_at,
                 ));
             }
-            Err(SettlementChainReadError::Rpc(error)) => {
+            Ok(Err(SettlementChainReadError::Rpc(error))) => {
                 return Err(SettlementReadiness::blocked(
                     route,
                     topology.kind,
@@ -954,6 +989,7 @@ where
             credential_gate,
             &funder,
             checked_at,
+            inspection_started.elapsed(),
         );
         if !reasons.is_empty() {
             return Err(SettlementReadiness::blocked(
@@ -1008,8 +1044,9 @@ fn verify_snapshot(
     credential_gate: SettlementCredentialGate,
     funder: &EvmAddress,
     checked_at: DateTime<Utc>,
+    inspection_elapsed: Duration,
 ) -> Vec<SettlementReadinessReason> {
-    let mut reasons = verify_deployment_snapshot(request, snapshot, checked_at);
+    let mut reasons = verify_deployment_snapshot(request, snapshot, checked_at, inspection_elapsed);
     check_wallet_topology(&mut reasons, topology, funder, &snapshot.funder_code);
     check_deposit_wallet(&mut reasons, request, snapshot, topology, funder);
     if let SettlementCredentialGate::Required(credentials) = credential_gate {
@@ -1022,6 +1059,7 @@ fn verify_deployment_snapshot(
     request: &SettlementInspectionRequest,
     snapshot: &SettlementChainSnapshot,
     checked_at: DateTime<Utc>,
+    inspection_elapsed: Duration,
 ) -> Vec<SettlementReadinessReason> {
     let mut reasons = Vec::new();
     if snapshot.chain_id != request.chain_id {
@@ -1030,7 +1068,7 @@ fn verify_deployment_snapshot(
             actual: snapshot.chain_id,
         });
     }
-    check_chain_freshness(&mut reasons, snapshot, checked_at);
+    check_chain_freshness(&mut reasons, snapshot, checked_at, inspection_elapsed);
     check_code(
         &mut reasons,
         "adapter",
@@ -1543,17 +1581,50 @@ fn check_chain_freshness(
     reasons: &mut Vec<SettlementReadinessReason>,
     snapshot: &SettlementChainSnapshot,
     checked_at: DateTime<Utc>,
+    inspection_elapsed: Duration,
 ) {
-    let age_seconds = checked_at
-        .signed_duration_since(snapshot.block_timestamp)
-        .num_seconds();
-    if !(0..=MAX_CHAIN_OBSERVATION_AGE_SECONDS).contains(&age_seconds) {
-        reasons.push(SettlementReadinessReason::ChainObservationNotFresh {
+    let inspection_limit = TimeDelta::seconds(MAX_SETTLEMENT_INSPECTION_SECONDS);
+    let observation_clock_valid = snapshot.observed_at >= checked_at
+        && snapshot.observed_at.signed_duration_since(checked_at) <= inspection_limit;
+    if !observation_clock_valid || inspection_elapsed > MAX_SETTLEMENT_INSPECTION_DURATION {
+        reasons.push(
+            SettlementReadinessReason::SettlementInspectionWindowInvalid {
+                request_admitted_at: checked_at,
+                inspection_completed_at: snapshot.observed_at,
+                max_duration_seconds: MAX_SETTLEMENT_INSPECTION_SECONDS,
+            },
+        );
+    }
+    // A valid completion timestamp accounts for block advancement during the
+    // pinned multi-call inspection. An invalid timestamp is never trusted to
+    // widen freshness; the request-admission clock remains the fail-closed
+    // reference instead.
+    let freshness_checked_at = if observation_clock_valid {
+        snapshot.observed_at
+    } else {
+        checked_at
+    };
+    let observation_age = freshness_checked_at.signed_duration_since(snapshot.block_timestamp);
+    if observation_age > TimeDelta::seconds(MAX_CHAIN_OBSERVATION_AGE_SECONDS) {
+        reasons.push(SettlementReadinessReason::ChainObservationStale {
             block_number: snapshot.block_number,
             block_timestamp: snapshot.block_timestamp,
-            checked_at,
+            checked_at: freshness_checked_at,
             max_age_seconds: MAX_CHAIN_OBSERVATION_AGE_SECONDS,
         });
+    }
+    let future_skew = snapshot
+        .block_timestamp
+        .signed_duration_since(freshness_checked_at);
+    if future_skew > TimeDelta::seconds(MAX_CHAIN_OBSERVATION_FUTURE_SKEW_SECONDS) {
+        reasons.push(
+            SettlementReadinessReason::ChainObservationFutureSkewExceeded {
+                block_number: snapshot.block_number,
+                block_timestamp: snapshot.block_timestamp,
+                checked_at: freshness_checked_at,
+                max_future_skew_seconds: MAX_CHAIN_OBSERVATION_FUTURE_SKEW_SECONDS,
+            },
+        );
     }
 }
 
@@ -1865,11 +1936,12 @@ impl SettlementChainReader for AlloySettlementChainReader {
         let deposit_wallet = self
             .read_deposit_wallet(topology, head.block, funder_code.clone())
             .await?;
-        let snapshot = SettlementChainSnapshot {
+        let mut snapshot = SettlementChainSnapshot {
             chain_id: head.chain_id,
             block_number: head.block_number,
             block_hash: head.block_hash.clone(),
             block_timestamp: head.block_timestamp,
+            observed_at: head.block_timestamp,
             adapter_code: self
                 .read_code(adapter, head.block, "eth_getCode(adapter)")
                 .await?,
@@ -1951,6 +2023,7 @@ impl SettlementChainReader for AlloySettlementChainReader {
         };
         self.recheck_canonical_head(head.block_number, head.block_hash)
             .await?;
+        snapshot.observed_at = Utc::now();
         Ok(snapshot)
     }
 
@@ -2377,6 +2450,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     use alloy::primitives::{Address, B256};
@@ -2395,11 +2469,13 @@ mod tests {
     };
 
     use super::{
-        ContractDeploymentVerifier, POLYGON_CHAIN_ID, SettlementAdapterBindings,
-        SettlementChainReadError, SettlementChainReader, SettlementChainSnapshot,
-        SettlementCodeFingerprint, SettlementCredentialAvailability, SettlementDeploymentCatalog,
+        ContractDeploymentVerifier, MAX_CHAIN_OBSERVATION_AGE_SECONDS,
+        MAX_CHAIN_OBSERVATION_FUTURE_SKEW_SECONDS, MAX_SETTLEMENT_INSPECTION_SECONDS,
+        POLYGON_CHAIN_ID, SettlementAdapterBindings, SettlementChainReadError,
+        SettlementChainReader, SettlementChainSnapshot, SettlementCodeFingerprint,
+        SettlementCredentialAvailability, SettlementDeploymentCatalog,
         SettlementDepositWalletSnapshot, SettlementFinalizedHead, SettlementInspectionRequest,
-        VerifiedSettlementDeployment,
+        VerifiedSettlementDeployment, check_chain_freshness,
     };
     use crate::wallet::{WalletTopology, deposit_wallet_runtime_code};
 
@@ -2409,6 +2485,10 @@ mod tests {
 
     enum MockResult {
         Snapshot(Box<SettlementChainSnapshot>),
+        DelayedSnapshot {
+            snapshot: Box<SettlementChainSnapshot>,
+            delay: Duration,
+        },
         WrongChain,
         CanonicalBlockChanged,
         RpcFailure,
@@ -2429,6 +2509,16 @@ mod tests {
                 },
                 calls,
             )
+        }
+
+        fn delayed_snapshot(snapshot: SettlementChainSnapshot, delay: Duration) -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                result: MockResult::DelayedSnapshot {
+                    snapshot: Box::new(snapshot),
+                    delay,
+                },
+            }
         }
 
         fn wrong_chain() -> Self {
@@ -2463,6 +2553,10 @@ mod tests {
             self.calls.fetch_add(1, Ordering::Relaxed);
             match &self.result {
                 MockResult::Snapshot(snapshot) => Ok(snapshot.as_ref().clone()),
+                MockResult::DelayedSnapshot { snapshot, delay } => {
+                    tokio::time::sleep(*delay).await;
+                    Ok(snapshot.as_ref().clone())
+                }
                 MockResult::WrongChain => Err(SettlementChainReadError::WrongChain {
                     expected: request.chain_id,
                     actual: 1,
@@ -2487,7 +2581,9 @@ mod tests {
             _block_number: u64,
         ) -> Result<Option<EvmBlockHash>, SettlementChainReadError> {
             match &self.result {
-                MockResult::Snapshot(snapshot) => Ok(Some(snapshot.block_hash.clone())),
+                MockResult::Snapshot(snapshot) | MockResult::DelayedSnapshot { snapshot, .. } => {
+                    Ok(Some(snapshot.block_hash.clone()))
+                }
                 MockResult::WrongChain => Err(SettlementChainReadError::WrongChain {
                     expected: POLYGON_CHAIN_ID,
                     actual: 1,
@@ -2505,10 +2601,12 @@ mod tests {
             &self,
         ) -> Result<SettlementFinalizedHead, SettlementChainReadError> {
             match &self.result {
-                MockResult::Snapshot(snapshot) => Ok(SettlementFinalizedHead {
-                    block_number: snapshot.block_number,
-                    block_hash: snapshot.block_hash.clone(),
-                }),
+                MockResult::Snapshot(snapshot) | MockResult::DelayedSnapshot { snapshot, .. } => {
+                    Ok(SettlementFinalizedHead {
+                        block_number: snapshot.block_number,
+                        block_hash: snapshot.block_hash.clone(),
+                    })
+                }
                 MockResult::WrongChain => Err(SettlementChainReadError::WrongChain {
                     expected: POLYGON_CHAIN_ID,
                     actual: 1,
@@ -2663,6 +2761,7 @@ mod tests {
             block_number: 73_000_000,
             block_hash: block_hash('3'),
             block_timestamp: checked_at(),
+            observed_at: checked_at(),
             adapter_code: ADAPTER_CODE.to_vec(),
             conditional_tokens_code: vec![0x60],
             collateral_token_code: COLLATERAL_PROXY_CODE.to_vec(),
@@ -3032,27 +3131,284 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_chain_cannot_mint() {
-        let catalog = SettlementDeploymentCatalog::resolved_fixture();
-        let wallet = topology(ExecutionWalletKind::Eoa);
-        for block_timestamp in [
-            checked_at() - TimeDelta::seconds(121),
-            checked_at() + TimeDelta::seconds(1),
-        ] {
-            let mut snapshot = valid_snapshot(&catalog, SettlementRoute::StandardV2, wallet.kind);
-            snapshot.block_timestamp = block_timestamp;
+    async fn chain_time_boundaries_hold() {
+        let admitted_at = checked_at();
+        let one_nanosecond = TimeDelta::nanoseconds(1);
+        for route in [SettlementRoute::StandardV2, SettlementRoute::NegRiskV2] {
+            let catalog = SettlementDeploymentCatalog::resolved_fixture();
+            let wallet = topology(ExecutionWalletKind::Eoa);
+            for block_timestamp in [
+                admitted_at - TimeDelta::seconds(MAX_CHAIN_OBSERVATION_AGE_SECONDS),
+                admitted_at,
+                admitted_at + TimeDelta::seconds(MAX_CHAIN_OBSERVATION_FUTURE_SKEW_SECONDS),
+            ] {
+                let mut snapshot = valid_snapshot(&catalog, route, wallet.kind);
+                snapshot.block_timestamp = block_timestamp;
+                let (reader, _) = MockChainReader::snapshot(snapshot);
+                ContractDeploymentVerifier::new(catalog.clone(), reader)
+                    .verify(
+                        route,
+                        &wallet,
+                        SettlementCredentialAvailability::DirectEoaSigner,
+                        admitted_at,
+                    )
+                    .await
+                    .expect("inclusive chain freshness boundary must mint a capability");
+            }
+
+            let mut stale = valid_snapshot(&catalog, route, wallet.kind);
+            stale.block_timestamp = admitted_at
+                - TimeDelta::seconds(MAX_CHAIN_OBSERVATION_AGE_SECONDS)
+                - one_nanosecond;
             let readiness = blocked(
                 catalog.clone(),
+                stale,
+                route,
+                wallet,
+                SettlementCredentialAvailability::DirectEoaSigner,
+            )
+            .await;
+            assert_eq!(readiness.reasons.len(), 1);
+            assert!(matches!(
+                readiness.reasons.as_slice(),
+                [SettlementReadinessReason::ChainObservationStale { .. }]
+            ));
+
+            let mut future = valid_snapshot(&catalog, route, wallet.kind);
+            future.block_timestamp = admitted_at
+                + TimeDelta::seconds(MAX_CHAIN_OBSERVATION_FUTURE_SKEW_SECONDS)
+                + one_nanosecond;
+            let readiness = blocked(
+                catalog.clone(),
+                future,
+                route,
+                wallet,
+                SettlementCredentialAvailability::DirectEoaSigner,
+            )
+            .await;
+            assert_eq!(readiness.reasons.len(), 1);
+            assert!(matches!(
+                readiness.reasons.as_slice(),
+                [SettlementReadinessReason::ChainObservationFutureSkewExceeded { .. }]
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn crossing_block_stays_fresh() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
+        let wallet = topology(ExecutionWalletKind::Eoa);
+        let admitted_at = checked_at();
+        let mut snapshot = valid_snapshot(&catalog, SettlementRoute::StandardV2, wallet.kind);
+        snapshot.block_timestamp = admitted_at + TimeDelta::seconds(1);
+        snapshot.observed_at = admitted_at + TimeDelta::seconds(2);
+        let (reader, _) = MockChainReader::snapshot(snapshot);
+
+        ContractDeploymentVerifier::new(catalog, reader)
+            .verify(
+                SettlementRoute::StandardV2,
+                &wallet,
+                SettlementCredentialAvailability::DirectEoaSigner,
+                admitted_at,
+            )
+            .await
+            .expect("chain may advance while the pinned-block inspection is in flight");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inspection_timeout_blocks() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
+        let wallet = topology(ExecutionWalletKind::Eoa);
+        let snapshot = valid_snapshot(&catalog, SettlementRoute::StandardV2, wallet.kind);
+        let reader = MockChainReader::delayed_snapshot(
+            snapshot,
+            Duration::from_secs(MAX_SETTLEMENT_INSPECTION_SECONDS.unsigned_abs() + 1),
+        );
+        let readiness = ContractDeploymentVerifier::new(catalog, reader)
+            .verify(
+                SettlementRoute::StandardV2,
+                &wallet,
+                SettlementCredentialAvailability::DirectEoaSigner,
+                checked_at(),
+            )
+            .await
+            .expect_err("monotonic inspection timeout must block capability minting");
+
+        assert_eq!(readiness.checked_block, None);
+        assert!(matches!(
+            readiness.reasons.as_slice(),
+            [SettlementReadinessReason::SettlementInspectionWindowInvalid {
+                max_duration_seconds,
+                ..
+            }] if max_duration_seconds == &MAX_SETTLEMENT_INSPECTION_SECONDS
+        ));
+    }
+
+    #[test]
+    fn monotonic_overrun_blocks() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
+        let mut snapshot = valid_snapshot(
+            &catalog,
+            SettlementRoute::StandardV2,
+            ExecutionWalletKind::Eoa,
+        );
+        snapshot.observed_at = checked_at() + TimeDelta::seconds(1);
+        let mut reasons = Vec::new();
+
+        check_chain_freshness(
+            &mut reasons,
+            &snapshot,
+            checked_at(),
+            Duration::from_secs(MAX_SETTLEMENT_INSPECTION_SECONDS.unsigned_abs() + 1),
+        );
+
+        assert!(matches!(
+            reasons.as_slice(),
+            [SettlementReadinessReason::SettlementInspectionWindowInvalid { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn inspection_window_fails_closed() {
+        let admitted_at = checked_at();
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
+        let wallet = topology(ExecutionWalletKind::Eoa);
+        let mut boundary = valid_snapshot(&catalog, SettlementRoute::StandardV2, wallet.kind);
+        boundary.observed_at = admitted_at + TimeDelta::seconds(MAX_SETTLEMENT_INSPECTION_SECONDS);
+        let (reader, _) = MockChainReader::snapshot(boundary);
+        ContractDeploymentVerifier::new(catalog.clone(), reader)
+            .verify(
+                SettlementRoute::StandardV2,
+                &wallet,
+                SettlementCredentialAvailability::DirectEoaSigner,
+                admitted_at,
+            )
+            .await
+            .expect("inclusive inspection deadline must remain valid");
+
+        for (observed_at, block_timestamp, expects_stale, expects_future_block) in [
+            (
+                admitted_at - TimeDelta::nanoseconds(1),
+                admitted_at,
+                false,
+                false,
+            ),
+            (
+                admitted_at
+                    + TimeDelta::seconds(MAX_SETTLEMENT_INSPECTION_SECONDS)
+                    + TimeDelta::nanoseconds(1),
+                admitted_at,
+                false,
+                false,
+            ),
+            (
+                admitted_at - TimeDelta::nanoseconds(1),
+                admitted_at
+                    - TimeDelta::seconds(MAX_CHAIN_OBSERVATION_AGE_SECONDS)
+                    - TimeDelta::nanoseconds(1),
+                true,
+                false,
+            ),
+            (
+                admitted_at + TimeDelta::seconds(MAX_SETTLEMENT_INSPECTION_SECONDS + 1),
+                admitted_at + TimeDelta::seconds(MAX_CHAIN_OBSERVATION_FUTURE_SKEW_SECONDS + 1),
+                false,
+                true,
+            ),
+        ] {
+            let catalog = SettlementDeploymentCatalog::resolved_fixture();
+            let wallet = topology(ExecutionWalletKind::Eoa);
+            let mut snapshot = valid_snapshot(&catalog, SettlementRoute::StandardV2, wallet.kind);
+            snapshot.block_timestamp = block_timestamp;
+            snapshot.observed_at = observed_at;
+            let readiness = blocked(
+                catalog,
                 snapshot,
                 SettlementRoute::StandardV2,
                 wallet,
                 SettlementCredentialAvailability::DirectEoaSigner,
             )
             .await;
+            assert_eq!(readiness.checked_at, admitted_at);
             assert!(readiness.reasons.iter().any(|reason| matches!(
                 reason,
-                SettlementReadinessReason::ChainObservationNotFresh { .. }
+                SettlementReadinessReason::SettlementInspectionWindowInvalid {
+                    request_admitted_at,
+                    inspection_completed_at,
+                    max_duration_seconds,
+                } if request_admitted_at == &admitted_at
+                    && inspection_completed_at == &observed_at
+                    && max_duration_seconds == &MAX_SETTLEMENT_INSPECTION_SECONDS
             )));
+            assert_eq!(
+                readiness.reasons.iter().any(|reason| matches!(
+                    reason,
+                    SettlementReadinessReason::ChainObservationStale { .. }
+                )),
+                expects_stale
+            );
+            assert_eq!(
+                readiness.reasons.iter().any(|reason| matches!(
+                    reason,
+                    SettlementReadinessReason::ChainObservationFutureSkewExceeded { .. }
+                )),
+                expects_future_block
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_time_detects_stale() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
+        let wallet = topology(ExecutionWalletKind::Eoa);
+        let admitted_at = checked_at();
+        let mut snapshot = valid_snapshot(&catalog, SettlementRoute::StandardV2, wallet.kind);
+        snapshot.block_timestamp = admitted_at - TimeDelta::seconds(119);
+        snapshot.observed_at = admitted_at + TimeDelta::seconds(2);
+        let readiness = blocked(
+            catalog,
+            snapshot,
+            SettlementRoute::StandardV2,
+            wallet,
+            SettlementCredentialAvailability::DirectEoaSigner,
+        )
+        .await;
+        assert!(readiness.reasons.iter().any(|reason| matches!(
+            reason,
+            SettlementReadinessReason::ChainObservationStale {
+                checked_at,
+                ..
+            } if checked_at == &(admitted_at + TimeDelta::seconds(2))
+        )));
+    }
+
+    #[tokio::test]
+    async fn r15_skew_stays_fresh() {
+        let admitted_at = DateTime::parse_from_rfc3339("2026-09-01T16:30:55.868846Z")
+            .expect("R15 admission timestamp")
+            .with_timezone(&Utc);
+        let inspection_completed_at = DateTime::parse_from_rfc3339("2026-09-01T16:30:55.874259Z")
+            .expect("R15 inspection completion timestamp")
+            .with_timezone(&Utc);
+        let block_timestamp = DateTime::parse_from_rfc3339("2026-09-01T16:30:56Z")
+            .expect("R15 block timestamp")
+            .with_timezone(&Utc);
+        for route in [SettlementRoute::StandardV2, SettlementRoute::NegRiskV2] {
+            let catalog = SettlementDeploymentCatalog::resolved_fixture();
+            let wallet = topology(ExecutionWalletKind::Eoa);
+            let mut snapshot = valid_snapshot(&catalog, route, wallet.kind);
+            snapshot.observed_at = inspection_completed_at;
+            snapshot.block_timestamp = block_timestamp;
+            let (reader, _) = MockChainReader::snapshot(snapshot);
+            ContractDeploymentVerifier::new(catalog, reader)
+                .verify(
+                    route,
+                    &wallet,
+                    SettlementCredentialAvailability::DirectEoaSigner,
+                    admitted_at,
+                )
+                .await
+                .expect("accepted subsecond Polygon timestamp skew must stay fresh");
         }
     }
 

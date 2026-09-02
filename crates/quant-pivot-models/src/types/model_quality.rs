@@ -27,7 +27,7 @@ const QUALITY_GATE_REPORT_HASH_DOMAIN: &str = "quant-pivot/model-quality-gate-re
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum GateSubject {
-    /// A model version under candidate, publish, or auto-execution evaluation.
+    /// A model version under candidate, publish, or `PolicyAutomatic` evaluation.
     ModelVersion(ModelVersionId),
 }
 

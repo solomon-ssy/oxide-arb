@@ -44,7 +44,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         CatalogEventChangeId, CatalogEventObjectId, CatalogMarketIds, CatalogMarketObjectId,
-        CatalogSyncBatchId, EventId, HistoryCoverage, MarketId,
+        CatalogSyncBatchId, ContentHash, EventId, HistoryCoverage, MarketId,
     },
 };
 use sea_orm::{
@@ -54,6 +54,7 @@ use sea_orm::{
 };
 
 use crate::{
+    batch::IN_LIST_CHUNK,
     postgres::{
         catalog::{event::PgEventRepository, market::PgMarketRepository},
         primitives,
@@ -204,6 +205,220 @@ impl PgCatalogLedgerRepository {
             .await
             .map_err(StorageError::from)
     }
+
+    async fn canonical_event_heads(
+        txn: &DatabaseTransaction,
+        event_ids: &[EventId],
+    ) -> Result<Vec<CatalogEventChangeInfo>, StorageError> {
+        let mut heads = Vec::with_capacity(event_ids.len());
+        for chunk in event_ids.chunks(IN_LIST_CHUNK) {
+            let changes = Entity::find()
+                .inner_join(CatalogSyncBatchEntity)
+                .filter(CatalogSyncBatchColumn::Status.eq(CatalogSyncStatus::Committed))
+                .filter(Column::EventId.is_in(chunk.iter().cloned()))
+                .distinct_on([(Entity, Column::EventId)])
+                .order_by_asc(Column::EventId)
+                .order_by_desc(Column::SourceEffectiveAt)
+                .order_by_desc(CatalogSyncBatchColumn::CommittedAt)
+                .order_by_desc(Column::EventChangeId)
+                .all(txn)
+                .await
+                .map_err(StorageError::from)?;
+            heads.extend(Self::hydrate_event_changes(txn, changes).await?);
+        }
+        if heads.len() != event_ids.len() {
+            return Err(StorageError::invariant_violation(
+                Some("catalog_event_change"),
+                format!(
+                    "canonical event head count {} differs from affected event count {}",
+                    heads.len(),
+                    event_ids.len()
+                ),
+            ));
+        }
+        Ok(heads)
+    }
+
+    async fn canonical_market_heads(
+        txn: &DatabaseTransaction,
+        market_ids: &[MarketId],
+    ) -> Result<Vec<CatalogMarketChangeInfo>, StorageError> {
+        let mut heads = Vec::with_capacity(market_ids.len());
+        for chunk in market_ids.chunks(IN_LIST_CHUNK) {
+            let changes = CatalogMarketChangeEntity::find()
+                .inner_join(CatalogSyncBatchEntity)
+                .filter(CatalogSyncBatchColumn::Status.eq(CatalogSyncStatus::Committed))
+                .filter(CatalogMarketChangeColumn::MarketId.is_in(chunk.iter().cloned()))
+                .distinct_on([(
+                    CatalogMarketChangeEntity,
+                    CatalogMarketChangeColumn::MarketId,
+                )])
+                .order_by_asc(CatalogMarketChangeColumn::MarketId)
+                .order_by_desc(CatalogMarketChangeColumn::SourceEffectiveAt)
+                .order_by_desc(CatalogSyncBatchColumn::CommittedAt)
+                .order_by_desc(CatalogMarketChangeColumn::MarketChangeId)
+                .all(txn)
+                .await
+                .map_err(StorageError::from)?;
+            heads.extend(Self::hydrate_market_changes(txn, changes).await?);
+        }
+        if heads.len() != market_ids.len() {
+            return Err(StorageError::invariant_violation(
+                Some("catalog_market_change"),
+                format!(
+                    "canonical market head count {} differs from affected market count {}",
+                    heads.len(),
+                    market_ids.len()
+                ),
+            ));
+        }
+        Ok(heads)
+    }
+
+    async fn reproject_events(
+        txn: &DatabaseTransaction,
+        event_ids: &[EventId],
+        current: &BTreeMap<EventId, ContentHash>,
+    ) -> Result<(), StorageError> {
+        let heads = Self::canonical_event_heads(txn, event_ids).await?;
+        let mut projections = Vec::with_capacity(heads.len());
+        for head in heads {
+            if current.get(&head.event_id) == Some(&head.content_hash) {
+                continue;
+            }
+            let raw_hash = CanonicalDigest::content_hash_typed(
+                "quant-pivot/catalog-event-object",
+                u32::try_from(head.schema_version).map_err(|_| {
+                    StorageError::invariant_violation(
+                        Some("catalog_event_object"),
+                        "canonical event head schema version must be non-negative",
+                    )
+                })?,
+                &head.payload,
+            )
+            .map_err(|error| {
+                StorageError::invariant_violation(
+                    Some("catalog_event_object"),
+                    format!("hash canonical event head {}: {error}", head.event_id),
+                )
+            })?;
+            if raw_hash != head.content_hash {
+                return Err(StorageError::invariant_violation(
+                    Some("catalog_event_object"),
+                    format!(
+                        "canonical event head {} payload hash disagrees with its ledger object",
+                        head.event_id
+                    ),
+                ));
+            }
+            let source = serde_json::from_value::<EventRegistryInfo>(head.payload.into_inner())
+                .map_err(|error| {
+                    StorageError::invariant_violation(
+                        Some("catalog_event_object"),
+                        format!("decode canonical event head {}: {error}", head.event_id),
+                    )
+                })?;
+            if source.event_id != head.event_id {
+                return Err(StorageError::invariant_violation(
+                    Some("catalog_event_object"),
+                    format!(
+                        "canonical event head {} payload identity is {}",
+                        head.event_id, source.event_id
+                    ),
+                ));
+            }
+            projections.push(UpsertEvent {
+                event_id: source.event_id,
+                title: source.title,
+                slug: source.slug,
+                series_slug: source.series_slug,
+                status: source.status,
+                tags: EventTags::from(source.tags),
+                neg_risk: source.neg_risk,
+                catalog_market_ids: CatalogMarketIds::from(source.market_ids),
+                end_date: source.end_date,
+                content_hash: head.content_hash,
+            });
+        }
+        if !projections.is_empty() {
+            PgEventRepository::with_txn(txn)
+                .upsert_batch(projections)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn reproject_markets(
+        txn: &DatabaseTransaction,
+        market_ids: &[MarketId],
+        current: &BTreeMap<MarketId, ContentHash>,
+    ) -> Result<(), StorageError> {
+        let heads = Self::canonical_market_heads(txn, market_ids).await?;
+        let mut projections = Vec::with_capacity(heads.len());
+        for head in heads {
+            if current.get(&head.market_id) == Some(&head.content_hash) {
+                continue;
+            }
+            let raw_hash = CanonicalDigest::content_hash_typed(
+                "quant-pivot/catalog-market-object",
+                u32::try_from(head.schema_version).map_err(|_| {
+                    StorageError::invariant_violation(
+                        Some("catalog_market_object"),
+                        "canonical market head schema version must be non-negative",
+                    )
+                })?,
+                &head.payload,
+            )
+            .map_err(|error| {
+                StorageError::invariant_violation(
+                    Some("catalog_market_object"),
+                    format!("hash canonical market head {}: {error}", head.market_id),
+                )
+            })?;
+            if raw_hash != head.content_hash {
+                return Err(StorageError::invariant_violation(
+                    Some("catalog_market_object"),
+                    format!(
+                        "canonical market head {} payload hash disagrees with its ledger object",
+                        head.market_id
+                    ),
+                ));
+            }
+            let source = serde_json::from_value::<MarketRegistryInfo>(head.payload.into_inner())
+                .map_err(|error| {
+                    StorageError::invariant_violation(
+                        Some("catalog_market_object"),
+                        format!("decode canonical market head {}: {error}", head.market_id),
+                    )
+                })?;
+            if source.market_id != head.market_id || source.event_id != head.event_id {
+                return Err(StorageError::invariant_violation(
+                    Some("catalog_market_object"),
+                    format!(
+                        "canonical market head {}/{} payload identity is {}/{}",
+                        head.event_id, head.market_id, source.event_id, source.market_id
+                    ),
+                ));
+            }
+            let mut projection = UpsertMarket::try_from(&source).map_err(|error| {
+                StorageError::invariant_violation(
+                    Some("catalog_market_object"),
+                    format!(
+                        "normalize canonical market head {}: {error}",
+                        head.market_id
+                    ),
+                )
+            })?;
+            projection.content_hash = head.content_hash;
+            projections.push(projection);
+        }
+        if !projections.is_empty() {
+            PgMarketRepository::with_txn(txn)
+                .upsert_batch(projections)
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -267,6 +482,15 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
         }
         validate_and_normalize_candidates(&batch_id, &mut events, &mut markets)?;
 
+        let event_ids = events
+            .iter()
+            .map(|candidate| candidate.projection.event_id.clone())
+            .collect::<Vec<_>>();
+        let market_ids = markets
+            .iter()
+            .map(|candidate| candidate.projection.market_id.clone())
+            .collect::<Vec<_>>();
+
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         Self::acquire_catalog_writer_lock(&txn).await?;
         let baseline_exists = CatalogSyncBatchEntity::find()
@@ -298,12 +522,7 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
 
         let event_repo = PgEventRepository::with_txn(&txn);
         let current_events = event_repo
-            .find_by_ids(
-                &events
-                    .iter()
-                    .map(|candidate| candidate.projection.event_id.clone())
-                    .collect::<Vec<_>>(),
-            )
+            .find_by_ids(&event_ids)
             .await?
             .into_iter()
             .map(|event| (event.event_id, event.content_hash))
@@ -312,7 +531,6 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
         let mut changed_event_ids = BTreeSet::new();
         let mut event_objects = Vec::new();
         let mut event_changes = Vec::new();
-        let mut event_projections = Vec::new();
         let mut event_change_by_object = BTreeMap::new();
         let mut unchanged_event_objects = Vec::new();
         for mut candidate in events {
@@ -327,7 +545,6 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
                 );
                 event_objects.push(candidate.object);
                 event_changes.push(candidate.change);
-                event_projections.push(candidate.projection);
             } else {
                 unchanged_event_objects.push(candidate.object.event_object_id);
             }
@@ -335,20 +552,12 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
 
         Self::insert_event_objects(&txn, event_objects).await?;
         Self::insert_event_changes(&txn, event_changes).await?;
-        if !event_projections.is_empty() {
-            event_repo.upsert_batch(event_projections).await?;
-        }
         event_change_by_object
             .extend(Self::latest_object_changes(&txn, unchanged_event_objects).await?);
 
         let market_repo = PgMarketRepository::with_txn(&txn);
         let current_markets = market_repo
-            .find_by_ids(
-                &markets
-                    .iter()
-                    .map(|candidate| candidate.projection.market_id.clone())
-                    .collect::<Vec<_>>(),
-            )
+            .find_by_ids(&market_ids)
             .await?
             .into_iter()
             .map(|market| (market.market_id.clone(), market.content_hash))
@@ -356,7 +565,6 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
 
         let mut market_objects = Vec::new();
         let mut market_changes = Vec::new();
-        let mut market_projections = Vec::new();
         for mut candidate in markets {
             let object_changed = current_markets.get(&candidate.projection.market_id)
                 != Some(&candidate.projection.content_hash);
@@ -391,16 +599,15 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
                 source_created_at: candidate.source_created_at,
                 change_type: candidate.change_type,
             });
-            if object_changed {
-                market_projections.push(candidate.projection);
-            }
         }
 
         Self::insert_market_objects(&txn, market_objects).await?;
         Self::insert_market_changes(&txn, market_changes).await?;
-        if !market_projections.is_empty() {
-            market_repo.upsert_batch(market_projections).await?;
-        }
+        // Arrival order is not source order. Rebuild mutable projections from
+        // the bitemporal ledger head in the same writer transaction so a late
+        // re-observation remains auditable without regressing current state.
+        Self::reproject_events(&txn, &event_ids, &current_events).await?;
+        Self::reproject_markets(&txn, &market_ids, &current_markets).await?;
 
         match txn.commit().await {
             Ok(()) => Ok(batch_model.into()),

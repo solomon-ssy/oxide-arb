@@ -18,10 +18,10 @@ pub use domain_event::{
     WeatherObservationReport, WeatherObservationReportKind,
 };
 pub use domain_observation::{
-    DomainCursorStatus, DomainCursorStatusEnum, DomainCursorStatusIter,
-    DomainCursorStatusParseError, DomainCursorStatusVariant, DomainCursorStatusVariantIter,
-    DomainObservation, DomainSourceCheckpoint, DomainSourceCursorCasOutcome,
-    DomainSourceCursorInfo, UpsertDomainSourceCursor,
+    CryptoCheckpointError, CryptoCheckpointKey, DomainCursorStatus, DomainCursorStatusEnum,
+    DomainCursorStatusIter, DomainCursorStatusParseError, DomainCursorStatusVariant,
+    DomainCursorStatusVariantIter, DomainObservation, DomainSourceCheckpoint,
+    DomainSourceCursorCasOutcome, DomainSourceCursorInfo, UpsertDomainSourceCursor,
 };
 pub use domain_source_expectation::{
     AffectedMarketIds, AffectedProfileIds, DomainSourceExpectationDefinition,

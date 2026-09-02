@@ -25,7 +25,8 @@ polymarket_client_sdk_v2 = { workspace = true }
 
 # Ethereum / Polygon
 alloy = { workspace = true }
-hypersync-client = { workspace = true }
+hypersync-format = { workspace = true }
+hypersync-net-types = { workspace = true }
 
 # Networking
 reqwest = { workspace = true }

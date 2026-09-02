@@ -567,10 +567,11 @@ impl PgRecommendationExecutionRollupRepository {
             .await
             .map_err(StorageError::from)?;
         let now = primitives::statement_timestamp(transaction).await?;
+        let ready_at = primitives::queue_ready_at(available_through, now);
         for recommendation_id in rows {
             TaskEntity::insert(TaskActiveModel {
                 recommendation_id: Set(recommendation_id),
-                ready_at: Set(available_through),
+                ready_at: Set(ready_at),
                 status: Set(OutcomeReconciliationTaskStatus::Pending),
                 attempt_count: Set(0),
                 claim_owner: Set(None),

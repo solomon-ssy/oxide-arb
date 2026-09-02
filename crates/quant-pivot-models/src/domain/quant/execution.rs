@@ -295,7 +295,7 @@ pub struct ExecutionOrderPatch {
 /// Result of an approval attempt after the in-transaction invalidation re-check.
 #[derive(Debug, Clone)]
 pub enum ApproveOrderIntentOutcome {
-    /// Intent transitioned to `Approved` (capital unchanged or downscaled).
+    /// Intent transitioned to `Authorized` (capital unchanged or downscaled).
     Approved(OrderIntentInfo),
     /// A governed fact changed inside the approval transaction; intent invalidated
     /// and capital released (HTTP origin — no operation-log row in this txn).

@@ -3,11 +3,20 @@
 use std::str::FromStr;
 
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::types::{NullReason, Price, Usd, stable_name::FeatureName};
+use crate::{
+    enums::quant::DataQualityStatus,
+    types::{
+        Bps, ContentHash, EconomicTierId, NullReason, PortfolioScenarioArtifactId, Price, Usd,
+        stable_name::FeatureName,
+    },
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportFunnelStage {
     CatalogVisible,
@@ -64,7 +73,7 @@ impl FromStr for ReportFunnelStage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportFunnelReason {
     NotOpen,
@@ -178,18 +187,32 @@ impl FromStr for ReportFunnelReason {
 /// This document crosses the `ClickHouse` boundary as canonical JSON text, but
 /// its schema is fully owned by this system. `None` is explicit so callers do
 /// not overload `{}` with several incompatible meanings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
 pub enum ReportFunnelDiagnostics {
     None {},
     MissingModelFeatures {
+        #[schemars(with = "Vec<String>")]
         features: Vec<FeatureName>,
     },
     FeatureDataQuality {
-        missing: Vec<MissingFeatureDiagnostic>,
+        status: DataQualityStatus,
+        missing_required: Vec<MissingFeatureDiagnostic>,
     },
     PlannerRejection {
         detail: String,
+    },
+    ProfitProbabilityFloor {
+        economic_tier_id: EconomicTierId,
+        scenario_artifact_id: PortfolioScenarioArtifactId,
+        scenario_artifact_hash: ContentHash,
+        nominal_profit_probability_bps: Bps,
+        lower_profit_probability_bps: u32,
+        minimum_profit_probability_bps: u32,
+        probability_interval_width_bps: u32,
+        maximum_probability_interval_width_bps: u32,
+        nominal_expected_net_usd: Usd,
+        robust_expected_net_usd: Usd,
     },
     InsufficientLiveDepth {
         visible_usd: Usd,
@@ -221,8 +244,9 @@ impl ReportFunnelDiagnostics {
             Self::MissingModelFeatures { features } => {
                 reason == ReportFunnelReason::ModelFeatureUnavailable && !features.is_empty()
             }
-            Self::FeatureDataQuality { missing } => {
-                reason == ReportFunnelReason::FeatureDataQualityRejected && !missing.is_empty()
+            Self::FeatureDataQuality { status, .. } => {
+                reason == ReportFunnelReason::FeatureDataQualityRejected
+                    && *status == DataQualityStatus::Insufficient
             }
             Self::PlannerRejection { detail } => {
                 matches!(
@@ -230,13 +254,43 @@ impl ReportFunnelDiagnostics {
                     ReportFunnelReason::ScenarioExitCapacityInsufficient
                         | ReportFunnelReason::NominalExpectedNetBelowFloor
                         | ReportFunnelReason::RobustExpectedNetBelowFloor
-                        | ReportFunnelReason::ProfitProbabilityBelowFloor
                         | ReportFunnelReason::ProbabilityIntervalTooWide
                         | ReportFunnelReason::LiquidityBufferInsufficient
                         | ReportFunnelReason::SingleRecommendationExposureExceeded
                         | ReportFunnelReason::ExistingStructuralConflict
                         | ReportFunnelReason::NotSelectedByGlobalOptimum
                 ) && !detail.trim().is_empty()
+            }
+            Self::ProfitProbabilityFloor {
+                economic_tier_id,
+                scenario_artifact_id,
+                scenario_artifact_hash,
+                nominal_profit_probability_bps,
+                lower_profit_probability_bps,
+                minimum_profit_probability_bps,
+                probability_interval_width_bps,
+                maximum_probability_interval_width_bps,
+                nominal_expected_net_usd,
+                robust_expected_net_usd,
+            } => {
+                let nominal = nominal_profit_probability_bps.inner();
+                let lower = Decimal::from(*lower_profit_probability_bps);
+                let upper = lower + Decimal::from(*probability_interval_width_bps);
+                reason == ReportFunnelReason::ProfitProbabilityBelowFloor
+                    && !economic_tier_id.as_uuid().is_nil()
+                    && *scenario_artifact_hash != ContentHash::from_bytes([0; 32])
+                    && *scenario_artifact_id
+                        == PortfolioScenarioArtifactId::from_content_hash(scenario_artifact_hash)
+                    && lower_profit_probability_bps < minimum_profit_probability_bps
+                    && *minimum_profit_probability_bps <= 10_000
+                    && *probability_interval_width_bps <= 10_000
+                    && *maximum_probability_interval_width_bps <= 10_000
+                    && (Decimal::ZERO..=Decimal::from(10_000_u32)).contains(&nominal)
+                    && lower <= nominal
+                    && nominal <= upper
+                    && upper <= Decimal::from(10_000_u32)
+                    && robust_expected_net_usd >= &Usd::ZERO
+                    && nominal_expected_net_usd >= robust_expected_net_usd
             }
             Self::InsufficientLiveDepth {
                 visible_usd,
@@ -255,16 +309,24 @@ impl ReportFunnelDiagnostics {
 }
 
 /// One required feature rejected by the governed data-quality policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MissingFeatureDiagnostic {
+    #[schemars(with = "String")]
     pub feature_name: FeatureName,
     pub reason: NullReason,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ReportFunnelDiagnostics, ReportFunnelReason};
+    use rust_decimal_macros::dec;
+
+    use crate::enums::quant::DataQualityStatus;
+
+    use super::{
+        Bps, ContentHash, EconomicTierId, PortfolioScenarioArtifactId, ReportFunnelDiagnostics,
+        ReportFunnelReason, Usd,
+    };
 
     #[test]
     fn diagnostics_bound_primary_reason() {
@@ -278,13 +340,70 @@ mod tests {
         );
         assert!(
             diagnostics
+                .validate_for(ReportFunnelReason::ProfitProbabilityBelowFloor)
+                .is_err()
+        );
+        assert!(
+            diagnostics
                 .validate_for(ReportFunnelReason::Published)
                 .is_err()
+        );
+        let scenario_hash = ContentHash::from_bytes([7; 32]);
+        let mut probability = ReportFunnelDiagnostics::ProfitProbabilityFloor {
+            economic_tier_id: EconomicTierId::from_v7(),
+            scenario_artifact_id: PortfolioScenarioArtifactId::from_content_hash(&scenario_hash),
+            scenario_artifact_hash: scenario_hash,
+            nominal_profit_probability_bps: Bps::new(dec!(5175)),
+            lower_profit_probability_bps: 5_100,
+            minimum_profit_probability_bps: 5_200,
+            probability_interval_width_bps: 75,
+            maximum_probability_interval_width_bps: 2_000,
+            nominal_expected_net_usd: Usd::new(dec!(4.2)),
+            robust_expected_net_usd: Usd::new(dec!(2.8)),
+        };
+        assert!(
+            probability
+                .validate_for(ReportFunnelReason::ProfitProbabilityBelowFloor)
+                .is_ok()
+        );
+        assert!(
+            probability
+                .validate_for(ReportFunnelReason::RobustExpectedNetBelowFloor)
+                .is_err()
+        );
+        let ReportFunnelDiagnostics::ProfitProbabilityFloor {
+            maximum_probability_interval_width_bps,
+            ..
+        } = &mut probability
+        else {
+            panic!("probability fixture changed diagnostics kind");
+        };
+        *maximum_probability_interval_width_bps = 0;
+        assert!(
+            probability
+                .validate_for(ReportFunnelReason::ProfitProbabilityBelowFloor)
+                .is_ok()
         );
         assert!(
             ReportFunnelDiagnostics::None {}
                 .validate_for(ReportFunnelReason::FeatureDataQualityRejected)
                 .is_err()
+        );
+        assert!(
+            ReportFunnelDiagnostics::FeatureDataQuality {
+                status: DataQualityStatus::Insufficient,
+                missing_required: Vec::new(),
+            }
+            .validate_for(ReportFunnelReason::FeatureDataQualityRejected)
+            .is_ok()
+        );
+        assert!(
+            ReportFunnelDiagnostics::FeatureDataQuality {
+                status: DataQualityStatus::Degraded,
+                missing_required: Vec::new(),
+            }
+            .validate_for(ReportFunnelReason::FeatureDataQualityRejected)
+            .is_err()
         );
     }
 
@@ -295,5 +414,64 @@ mod tests {
             "legacy_detail": "must not be ignored"
         }));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn probability_diagnostics_fail_closed() {
+        let scenario_hash = ContentHash::from_bytes([7; 32]);
+        let diagnostics = ReportFunnelDiagnostics::ProfitProbabilityFloor {
+            economic_tier_id: EconomicTierId::from_v7(),
+            scenario_artifact_id: PortfolioScenarioArtifactId::from_content_hash(&scenario_hash),
+            scenario_artifact_hash: scenario_hash,
+            nominal_profit_probability_bps: Bps::new(dec!(5175)),
+            lower_profit_probability_bps: 5_100,
+            minimum_profit_probability_bps: 5_200,
+            probability_interval_width_bps: 75,
+            maximum_probability_interval_width_bps: 2_000,
+            nominal_expected_net_usd: Usd::new(dec!(4.2)),
+            robust_expected_net_usd: Usd::new(dec!(2.8)),
+        };
+        let baseline = serde_json::to_value(diagnostics).expect("serialize diagnostics fixture");
+        let cases = [
+            (
+                "/economic_tier_id",
+                serde_json::json!("00000000-0000-0000-0000-000000000000"),
+            ),
+            (
+                "/scenario_artifact_id",
+                serde_json::json!(PortfolioScenarioArtifactId::from_v7()),
+            ),
+            (
+                "/scenario_artifact_hash",
+                serde_json::json!(ContentHash::from_bytes([0; 32])),
+            ),
+            ("/nominal_profit_probability_bps", serde_json::json!("-1")),
+            ("/nominal_profit_probability_bps", serde_json::json!("5000")),
+            ("/nominal_profit_probability_bps", serde_json::json!("5300")),
+            ("/lower_profit_probability_bps", serde_json::json!(5200)),
+            ("/minimum_profit_probability_bps", serde_json::json!(10001)),
+            ("/probability_interval_width_bps", serde_json::json!(6000)),
+            ("/probability_interval_width_bps", serde_json::json!(10001)),
+            (
+                "/maximum_probability_interval_width_bps",
+                serde_json::json!(10001),
+            ),
+            ("/nominal_expected_net_usd", serde_json::json!("2")),
+            ("/robust_expected_net_usd", serde_json::json!("-0.1")),
+        ];
+        for (pointer, replacement) in cases {
+            let mut value = baseline.clone();
+            *value
+                .pointer_mut(pointer)
+                .expect("diagnostics fixture field") = replacement;
+            let damaged: ReportFunnelDiagnostics =
+                serde_json::from_value(value).expect("decode damaged diagnostics");
+            assert!(
+                damaged
+                    .validate_for(ReportFunnelReason::ProfitProbabilityBelowFloor)
+                    .is_err(),
+                "damaged field {pointer} must fail closed"
+            );
+        }
     }
 }

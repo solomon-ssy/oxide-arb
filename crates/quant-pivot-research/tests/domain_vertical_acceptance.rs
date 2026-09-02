@@ -17,6 +17,7 @@ use quant_pivot_models::{
             fee::MarketMakerRebateEvidence,
             registry::{MarketRegistryInfo, TokenInfo},
         },
+        order::PolymarketOrderRules,
         quant::{
             CryptoSubject, GroundingProof, LinkageOutcome, LinkageSourceMetadata, MarketLinkage,
             MarketSubject, PriceComparator, ResolutionOracle, ResolvedBinding,
@@ -274,6 +275,9 @@ fn build_domain_test_vector(
         end_date: Some(as_of + Duration::days(1)),
         created_at: Some(as_of - Duration::days(1)),
         fee_schedule: None,
+        order_rules: Some(
+            PolymarketOrderRules::new(TickSize::Hundredth, Shares::ONE).expect("rules"),
+        ),
         maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
     };
     let registry = domain_test_registry(&market, &market_ctx, cutoff);
@@ -1127,19 +1131,20 @@ fn basis_vs_computes_oracle() {
     let oracle_instrument = DomainInstrumentKey::chainlink_data_streams(
         &ChainlinkFeedKey::parse("BTC-USD").expect("feed"),
     );
+    let oracle_time = as_of - Duration::minutes(1);
     let oracle = CryptoPriceReportWindow {
         cutoff: as_of,
         reports: vec![CryptoPriceReport {
             source_id: DomainSourceId::chainlink_data_streams(),
             instrument_key: oracle_instrument.clone(),
-            source_sequence: 1,
+            source_sequence: u64::try_from(oracle_time.timestamp()).expect("oracle timestamp"),
             price: Usd::new(dec!(100000)),
             quantity: None,
-            event_time: as_of - Duration::minutes(1),
-            published_at: as_of - Duration::minutes(1),
-            available_at: as_of - Duration::minutes(1),
-            valid_from: Some(as_of - Duration::minutes(1)),
-            observations_timestamp: Some(as_of - Duration::minutes(1)),
+            event_time: oracle_time,
+            published_at: oracle_time,
+            available_at: oracle_time,
+            valid_from: Some(oracle_time),
+            observations_timestamp: Some(oracle_time),
             expires_at: Some(as_of + Duration::minutes(1)),
             report_hash: content_hash('f'),
             raw_report: "fixture".to_owned(),

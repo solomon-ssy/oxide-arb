@@ -25,7 +25,7 @@
 | PERF-06 | 统一 ledger 与固定宽度 hash | done | PERF-03/05 | 无 checkpoint JSON/JCS | 唯一 ledger/固定 hash/typed replay/Source Slice format 2；Clippy/architecture 通过 |
 | PERF-07 | persistence coordinator/commit cursor | done | PERF-06 | 无逐行/逐批 ACK channel | 唯一 coordinator；8 watch cursors；8192 rows/20ms；Loom 与 workspace 全门禁通过 |
 | PERF-08 | 单写者 book/freshness/summary | done | PERF-05/07 | 热状态无 Mutex/DashMap | actor-owned book/telemetry；O(n+m) merge；summary/property/benchmark；全门禁通过 |
-| PERF-09 | LastTrade ledger materialized view | done | PERF-06/07 | canonical batch 只等待 ledger | 删除第二 durable ACK；26.1+ MV；async retry/source+MV exact-once 集成测试；Clippy/architecture 通过 |
+| PERF-09 | LastTrade ledger materialized view | done | PERF-06/07 | canonical batch 只等待 ledger | 删除第二 durable ACK；ClickHouse exact 26.5；所有 managed fact stream 由 app-owned bounded batch 执行 synchronous ACK/retry/dedupe；2026-07-22 async-insert evidence 已由 2026-08-28 contract supersede；Clippy/architecture 通过 |
 | PERF-10 | SessionHub 与 ByteString fanout | done | PERF-01 | 无全 session 扫描/String fanout | actor/index/refcount snapshot；ByteString 单分配；慢客户端语义；10K/1K smoke 45.596–49.836µs；production-stack PASS |
 | PERF-11 | destructive L2 reset/cutover | done | PERF-06/09 | 旧表/reader/hash 全删除 | 无 v2/迁移；双确认 clean bootstrap；PG/CH/Redis 隔离全流程 260.90s PASS |
 | PERF-12 | 全仓 clone/borrow/move 治理 | done | PERF-02/03 | clone lints 全仓 deny | 三项 clone lint deny；Arc slice 大批共享；ArcSwap/blocking/UUID/WS 架构门禁；workspace Clippy PASS |
@@ -47,7 +47,8 @@
 | 2026-07-22 | 最终表名为 `quant_book_l2_ledger` | 统一语义名，不使用版本后缀 |
 | 2026-07-22 | 不保留旧 L2 历史 | 用户明确选择 clean reset |
 | 2026-07-22 | 固定 8 partition actor | 8 vCPU 生产门禁；不按 token 数建 worker |
-| 2026-07-22 | ClickHouse 最低版本锁定为 26.1 | 26.1 才修复 acknowledged async-insert retry 在 dependent materialized view 上的端到端去重；旧版本 fail closed |
+| 2026-07-22 | ClickHouse 最低版本锁定为 26.1（已由 2026-08-28 exact 26.5 synchronous-insert contract supersede） | 当时依赖 acknowledged async-insert retry 的 dependent materialized view 去重；该 server async-insert 设计不再是当前合同 |
+| 2026-08-28 | ClickHouse 锁定 exact 26.5，全部 managed fact stream 使用 app-owned bounded batching + synchronous ACK/retry/dedupe | 未验证 minor/major 一律 fail closed；删除 server async-insert 第二调度器，全部 managed MergeTree 统一 10,000-block non-replicated dedup window |
 | 2026-07-22 | PERF-13～15 superseded，新增 PERF-16～22 收尾链 | 深度复核证明已有局部门禁未覆盖 session poison、invalid book 资金边界、完整业务负载和全局资源预算；禁止用缺 runner 掩盖实现缺口 |
 | 2026-07-22 | PERF-20 与 PERF-22 superseded，PERF-21 直接依赖 PERF-19 | 用户明确取消 ClickHouse durability/idempotency 收口与 fixed-runner/24h rollout；不得把未实施内容记为 done 或纳入最终闭环声明 |
 | 2026-07-22 | SessionHub 固定预算使用 private compile-time constants，不进入 DeployConfig | 这些值只有一个已验证组合；伪可配置会制造不存在的受支持状态空间。architecture check 锁定精确常量并拒绝 `WebSocketHubConfig` |
@@ -190,7 +191,7 @@
 - [x] 盘点 DurableWriter 的逐 row ACK、现有批处理边界和 shutdown 语义。
 - [x] 实现唯一 `LedgerPersistenceCoordinator`、8 个常驻 commit cursor 和 batch request。
 - [x] 删除 canonical path 的 `join_all` 与 row/batch 临时 ACK channel；ledger 不再创建 flume ACK。
-- [x] ClickHouse ledger 使用 borrowed batch insert，启用 `async_insert=1`、`wait_for_async_insert=1` 和 100ms server flush timeout；聚合 buffer 保留 capacity。
+- [x] ClickHouse ledger 使用 borrowed synchronous batch insert；应用 coordinator 已按 20ms / 8,192 rows 聚合并独占 critical lane，因此不再叠加不可控的 server async-insert queue；聚合 buffer 保留 capacity。
 - [x] 失败状态携带 generation；client 用 `borrow_and_update()` 处理 jump/close，并在 timeout 后先 reconcile 唯一 in-flight batch。
 - [x] coordinator cancellation 时 drain 已入队 request；partition 在 durable commit 后才执行 projection/apply，失败使相关 session 整批失效。
 - [x] `cargo test -p quant-pivot-core observability::ledger_persistence`：4 passed（含 Loom notification/read race model）。
@@ -218,9 +219,9 @@
 - [x] finalized exchange history 独立投影链上 V1/V2 execution 与 participant 事实，不消费 MarketWs `LastTrade` 作为替代来源。
 - [x] 两条事实链分别验证重试幂等、去重、hash、PIT availability 与 source 语义隔离；禁止 dual write。
 - [x] manifest 从隔离的 ClickHouse 26.5 clean database 实际 DDL 再生成；临时数据库随后删除，未触碰现有 `quant_pivot` 数据。
-- [x] `quant_book_l2_ledger` 启用 10,000-block non-replicated dedup window；async writer 显式设置 `async_insert=1`、`wait_for_async_insert=1`、`async_insert_deduplicate=1` 与 100ms flush timeout。
+- [x] 全部 managed fact table 启用 10,000-block non-replicated dedup window；canonical critical lane 与 app-batched bulk lane 均显式设置 `async_insert=0` / `insert_deduplicate=1`，通过同步 ACK、bounded retry 与 dedupe 完成 durability，禁止 server async-insert 第二调度器。
 - [x] execution history 使用 append-only acceptance revision、`FitSeal` 与 `ServingHeadSeal`；所有 serving query 同时绑定 exact chunk set 和 active revision predicate。
-- [x] runtime、schema plan/apply/verify/manifest 对 ClickHouse `<26.1` fail closed；parser/版本门槛单测通过。
+- [x] runtime、schema plan/apply/verify/manifest 仅接受 ClickHouse 26.5.x；任何未验证 minor/major 均 fail closed，不提供版本兼容路径；parser/版本门槛单测通过。
 - [x] `cargo test -p quant-pivot-core book_fact_writer`、execution-history grammar/rewind/seal tests、workspace Clippy 与 architecture check 构成当前恢复门禁。
 
 ### PERF-10
@@ -502,8 +503,11 @@
   `-D warnings`、architecture tests 21/21 与实际 architecture check 通过。
 - [x] 最终全仓测试发现 historical PIT 闭包进入 offline Rayon 后调用
   `Handle::current()` 会失去 Tokio reactor；现改为在 async 边界捕获显式 runtime handle，
-  worker 仅用该 handle 驱动已预取的内存 async facade。`core_business` 全场景回归通过，
-  未退回无预算 `spawn_blocking`。
+  worker 仅用该 handle 驱动已预取的内存 async facade。FeatureParity 进一步按 page 拆成
+  Tokio repository/artifact/fact prefetch 与 `ParityComputeBoundary` owned CPU kernel；PG/CH/S3
+  await 不持 offline job/CPU/memory lease，PIT materialization、selection、cross-section、factor、
+  inference 和 comparison 才短期持 lease。`core_business` 全场景回归通过，未退回无预算
+  `spawn_blocking`。
 
 ### PERF-21
 

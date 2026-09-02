@@ -293,8 +293,6 @@ expression: recommendation_immediate_entry()
       "cvar_contribution_usd": "40",
       "portfolio_cvar_cap_usd": "500",
       "maximum_scenario_loss_cap_usd": "750",
-      "requires_approval": true,
-      "auto_execution_allowed": false,
       "risk_notes": [
         "thin book"
       ],
@@ -321,14 +319,9 @@ expression: recommendation_immediate_entry()
     }
   ],
   "execution_eligibility": {
-    "eligible_modes": [
-      "report_only"
-    ],
-    "ineligibility_reasons": [
-      "report_only_mode"
-    ],
-    "approval_required": true,
-    "auto_policy_id": null
+    "ceiling": "analysis_only",
+    "blockers": [],
+    "policy_binding": null
   },
   "valid_from": "2023-11-14T22:13:20Z",
   "valid_until": "2023-11-15T22:13:20Z",

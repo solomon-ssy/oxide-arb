@@ -141,6 +141,7 @@ impl ResearchReadinessEvidenceRepository for PgResearchReadinessEvidenceReposito
             .filter(Column::ObservedAt.lte(as_of))
             .filter(Column::ExpiresAt.gt(as_of))
             .order_by_desc(Column::ObservedAt)
+            .order_by_desc(Column::EvidenceId)
             .one(&self.db)
             .await
             .map_err(StorageError::from)

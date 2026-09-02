@@ -15,14 +15,15 @@ use quant_pivot_models::{
         ResearchJobResultRef,
     },
     enums::quant::{
-        DatasetPurpose, FeatureParityRunKind, FeatureParityRunStatus, FeedbackCycleStatus,
-        FeedbackDecision, FeedbackDriftMetric, FeedbackStage, ResearchJobResultKind,
+        CohortCensorReason, DatasetPurpose, FeatureParityRunKind, FeatureParityRunStatus,
+        FeedbackCycleStatus, FeedbackDecision, FeedbackDriftMetric, FeedbackStage,
+        ResearchJobResultKind,
     },
     types::{
-        ArtifactUri, CapabilityRegistryHashes, DatasetCohortCounts, FeatureParityRunId,
-        FeatureValue, FeedbackCoverageArtifactId, FeedbackCycleId, FeedbackDriftArtifactId,
-        ModelVersionId, RecommendationId, ResearchJobParams, RoleCode, TrainingDatasetId, WorkerId,
-        stable_name::FeatureName,
+        ArtifactUri, CapabilityRegistryHashes, CohortCensorCount, DatasetCohortCounts,
+        FeatureParityRunId, FeatureValue, FeedbackCoverageArtifactId, FeedbackCycleId,
+        FeedbackDriftArtifactId, ModelVersionId, RecommendationId, ResearchJobParams, RoleCode,
+        TrainingDatasetId, WorkerId, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::{
@@ -118,7 +119,7 @@ pub fn coverage_artifact(
     )
     .expect("feedback evaluation window");
     let champion_baseline = baseline_ref(&evaluation_window);
-    let (policy_count, mature_count, new_mature_count) = match scenario {
+    let (model_candidate_count, mature_count, new_mature_count) = match scenario {
         CoverageScenario::NoLabels => (0, 0, 0),
         CoverageScenario::LowCoverage => (
             policy
@@ -134,6 +135,7 @@ pub fn coverage_artifact(
             policy.minimum_mature_labels,
         ),
     };
+    let policy_count = policy.minimum_mature_labels;
     let other_model = ModelVersionId::from_v7();
     assert_ne!(other_model, cycle.champion_model_version_id);
     let mut mature_labels = (0..mature_count)
@@ -153,9 +155,25 @@ pub fn coverage_artifact(
             label.label_available_at,
         )
     });
-    let model_learning =
-        DatasetCohortCounts::try_new(mature_count, mature_count, 0, Vec::new(), Vec::new())
-            .expect("model-learning coverage counts");
+    let censored_count = model_candidate_count
+        .checked_sub(mature_count)
+        .expect("mature labels fit model-learning candidates");
+    let censor_counts = if censored_count == 0 {
+        Vec::new()
+    } else {
+        vec![CohortCensorCount {
+            reason: CohortCensorReason::ResolutionUnavailableAtCutoff,
+            count: censored_count,
+        }]
+    };
+    let model_learning = DatasetCohortCounts::try_new(
+        model_candidate_count,
+        mature_count,
+        0,
+        Vec::new(),
+        censor_counts,
+    )
+    .expect("model-learning coverage counts");
     let policy_evaluation = DatasetCohortCounts::try_new(
         policy_count,
         policy_count,
@@ -165,7 +183,7 @@ pub fn coverage_artifact(
     )
     .expect("policy-evaluation coverage counts");
     let gate_input = CoverageGateInput {
-        policy_evaluation_count: policy_count,
+        model_learning_candidate_count: model_candidate_count,
         mature_label_count: mature_count,
         new_mature_label_count: new_mature_count,
         minimum_mature_labels: policy.minimum_mature_labels,
@@ -357,7 +375,7 @@ async fn open_parity(parity: &PgFeatureParityRepository) -> FeatureParityStateIn
             matched_count: 0,
             mismatched_count: 0,
             pending_materialization_count: 0,
-            feature_contract_hash: Some(content_hash('7')),
+            feature_contract_hash: content_hash('7'),
             transform_hash: None,
             failure_code: None,
             failure_detail: None,
@@ -382,7 +400,7 @@ async fn open_parity(parity: &PgFeatureParityRepository) -> FeatureParityStateIn
                 matched_count: 0,
                 mismatched_count: 1,
                 pending_materialization_count: 0,
-                feature_contract_hash: Some(content_hash('7')),
+                feature_contract_hash: content_hash('7'),
                 transform_hash: Some(content_hash('8')),
                 failure_code: None,
                 failure_detail: None,
@@ -684,7 +702,7 @@ pub async fn signal_stages_isolate_parity() {
             &fixture,
             &fixture.cycle,
             CoverageScenario::NoLabels,
-            CoverageNoActionReason::NoPolicyObservations,
+            CoverageNoActionReason::NoModelLearningCandidates,
         )
         .await;
     harness

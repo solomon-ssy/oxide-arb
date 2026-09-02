@@ -137,6 +137,7 @@ pub struct MetricsHub {
     pub book_snapshots_applied: IntCounter,
     pub price_changes_applied: IntCounter,
     pub ws_session_invalidated_tokens: IntCounter,
+    pub core_event_dropped: IntCounterVec,
     pub ws_fanout_best_effort_dropped: IntCounter,
     pub ws_fanout_best_effort_coalesced: IntCounter,
     pub ws_fanout_reliable_disconnects: IntCounter,
@@ -174,7 +175,10 @@ pub struct MetricsHub {
     // ── Infra / async writers ─────────────────────────────────────────────
     pub async_writer_dropped: IntCounterVec,
     pub async_writer_queue_depth: IntGaugeVec,
+    pub async_writer_inflight_items: IntGaugeVec,
+    pub async_writer_inflight_bytes: IntGaugeVec,
     pub async_writer_flush_failed: IntCounterVec,
+    pub ledger_persistence_stage_seconds: HistogramVec,
     pub shutdown_stage_progress_remaining: IntGaugeVec,
     pub shutdown_stage_timeouts: IntCounterVec,
 
@@ -273,11 +277,11 @@ pub struct MetricsHub {
     // ── Execution admission ────────────────────────────────────────
     /// Admission denials by the check id that determined the `Deny` outcome.
     pub admission_denied: IntCounterVec,
-    /// Order intents created by runtime mode and intent kind.
+    /// Order intents created by authorization kind.
     pub order_intents_created: IntCounterVec,
-    /// Order intents approved by runtime mode and intent kind.
+    /// Order intents approved by authorization kind.
     pub order_intents_approved: IntCounterVec,
-    /// Order intents rejected by runtime mode and intent kind.
+    /// Order intents rejected by authorization kind.
     pub order_intents_rejected: IntCounterVec,
 
     // ── Entry execution ────────────────────────────────────────────
@@ -331,6 +335,7 @@ struct PipelineMetrics {
     book_snapshots_applied: IntCounter,
     price_changes_applied: IntCounter,
     ws_session_invalidated_tokens: IntCounter,
+    core_event_dropped: IntCounterVec,
     ws_fanout_best_effort_dropped: IntCounter,
     ws_fanout_best_effort_coalesced: IntCounter,
     ws_fanout_reliable_disconnects: IntCounter,
@@ -366,7 +371,10 @@ struct SubscriptionMetrics {
 struct InfraMetrics {
     async_writer_dropped: IntCounterVec,
     async_writer_queue_depth: IntGaugeVec,
+    async_writer_inflight_items: IntGaugeVec,
+    async_writer_inflight_bytes: IntGaugeVec,
     async_writer_flush_failed: IntCounterVec,
+    ledger_persistence_stage: HistogramVec,
     shutdown_stage_progress_remaining: IntGaugeVec,
     shutdown_stage_timeouts: IntCounterVec,
 }
@@ -479,6 +487,12 @@ fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
             registry,
             "quant_pivot_ws_session_invalidated_tokens_total",
             "Tokens invalidated immediately when a WebSocket session loses continuity"
+        ),
+        core_event_dropped: register_counter_vec!(
+            registry,
+            "quant_pivot_core_event_dropped_total",
+            "Core runtime events dropped by bounded reason and event kind",
+            &["reason", "kind"]
         ),
         ws_fanout_best_effort_dropped: register_counter!(
             registry,
@@ -638,11 +652,30 @@ fn register_infra_metrics(registry: &Registry) -> InfraMetrics {
             "Pending items in the async writer channel",
             &["writer"]
         ),
+        async_writer_inflight_items: register_gauge_vec!(
+            registry,
+            "quant_pivot_system_async_writer_inflight_items",
+            "Items admitted by a weighted durable writer through dependent cursor commit",
+            &["writer"]
+        ),
+        async_writer_inflight_bytes: register_gauge_vec!(
+            registry,
+            "quant_pivot_system_async_writer_inflight_bytes",
+            "Resident bytes admitted by a weighted durable writer",
+            &["writer"]
+        ),
         async_writer_flush_failed: register_counter_vec!(
             registry,
             "quant_pivot_system_async_writer_flush_failed_total",
             "Async writer batch flush failures by writer name",
             &["writer"]
+        ),
+        ledger_persistence_stage: register_histogram_vec!(
+            registry,
+            "quant_book_l2_ledger_persistence_stage_seconds",
+            "Canonical L2 persistence latency split between admission/coordinator delay and sink acknowledgement",
+            &["stage"],
+            FACT_LAG_BUCKETS_SECS
         ),
         shutdown_stage_progress_remaining: register_gauge_vec!(
             registry,
@@ -1128,6 +1161,7 @@ impl MetricsHub {
             book_snapshots_applied: pipeline.book_snapshots_applied,
             price_changes_applied: pipeline.price_changes_applied,
             ws_session_invalidated_tokens: pipeline.ws_session_invalidated_tokens,
+            core_event_dropped: pipeline.core_event_dropped,
             ws_fanout_best_effort_dropped: pipeline.ws_fanout_best_effort_dropped,
             ws_fanout_best_effort_coalesced: pipeline.ws_fanout_best_effort_coalesced,
             ws_fanout_reliable_disconnects: pipeline.ws_fanout_reliable_disconnects,
@@ -1157,7 +1191,10 @@ impl MetricsHub {
             ingest_pipeline_lag_seconds,
             async_writer_dropped: infra.async_writer_dropped,
             async_writer_queue_depth: infra.async_writer_queue_depth,
+            async_writer_inflight_items: infra.async_writer_inflight_items,
+            async_writer_inflight_bytes: infra.async_writer_inflight_bytes,
             async_writer_flush_failed: infra.async_writer_flush_failed,
+            ledger_persistence_stage_seconds: infra.ledger_persistence_stage,
             shutdown_stage_progress_remaining: infra.shutdown_stage_progress_remaining,
             shutdown_stage_timeouts: infra.shutdown_stage_timeouts,
             report_generated_total: report.generated,
@@ -1325,7 +1362,7 @@ impl MetricsHub {
     }
 
     /// Count one exit signal re-inference outcome (`fresh`, `unavailable`, `error`,
-    /// `disabled`, `shadow_would_invalidate`, `shadow_hold`).
+    /// `disabled`, `skipped_non_active_policy`, `shadow_would_invalidate`, `shadow_hold`).
     pub fn inc_exit_signal_reinference(&self, outcome: &str) {
         self.exit_signal_reinference
             .with_label_values(&[outcome])
@@ -1333,7 +1370,7 @@ impl MetricsHub {
     }
 
     /// Count one opportunistic-Sell scorer evaluation outcome (`disabled`,
-    /// `skipped_non_auto`, `unavailable`, `error`, `hold`, `shadow_would_sell`,
+    /// `skipped_non_active_policy`, `unavailable`, `error`, `hold`, `shadow_would_sell`,
     /// `opportunistic_sell`).
     pub fn inc_opportunistic_sell_eval(&self, outcome: &str) {
         self.opportunistic_sell_eval
@@ -1414,11 +1451,26 @@ impl MetricsHub {
             .with_label_values(&[writer]);
         AsyncWriterObservability {
             queue_depth: Some(self.async_writer_queue_depth.with_label_values(&[writer])),
+            inflight_items: Some(
+                self.async_writer_inflight_items
+                    .with_label_values(&[writer]),
+            ),
+            inflight_bytes: Some(
+                self.async_writer_inflight_bytes
+                    .with_label_values(&[writer]),
+            ),
             flush_failed: Some(self.async_writer_flush_failed.with_label_values(&[writer])),
             flush_lag_ms: Some(Arc::new(move |lag_ms| {
                 lag_histogram.observe(lag_secs_from_ms(lag_ms));
             })),
+            stage_lag_ms: None,
         }
+    }
+
+    pub fn observe_ledger_stage(&self, stage: &str, lag_ms: u64) {
+        self.ledger_persistence_stage_seconds
+            .with_label_values(&[stage])
+            .observe(lag_secs_from_ms(lag_ms));
     }
 
     pub fn record_shutdown_timeout(&self, stage: &str, abandoned: usize) {
@@ -1632,6 +1684,19 @@ mod tests {
         assert!(body.contains("quant_order_intents_created_total"));
         assert!(body.contains("quant_order_intents_approved_total"));
         assert!(body.contains(r#"authorization_kind="active_policy""#));
+    }
+
+    #[test]
+    fn ledger_stage_metrics_contract() {
+        let hub = MetricsHub::new();
+        hub.observe_ledger_stage("admission_to_sink", 2_600);
+        hub.observe_ledger_stage("sink_ack", 55);
+
+        let (_, text) = hub.gather_prometheus_text().expect("gather");
+        let body = String::from_utf8(text).expect("utf8");
+        assert!(body.contains("quant_book_l2_ledger_persistence_stage_seconds"));
+        assert!(body.contains(r#"stage="admission_to_sink""#));
+        assert!(body.contains(r#"stage="sink_ack""#));
     }
 
     #[test]

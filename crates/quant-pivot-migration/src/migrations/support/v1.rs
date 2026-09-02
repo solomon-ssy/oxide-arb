@@ -570,6 +570,26 @@ const RESEARCH_JOB_GUARD_SQL: &str = "CREATE FUNCTION \
     NEW.updated_at = statement_timestamp(); \
     RETURN NEW; END; $function$";
 
+const ECONOMIC_TASK_GUARD_SQL: &str = "CREATE FUNCTION public.trigger_guard_economic_outcome_task() \
+    RETURNS trigger LANGUAGE plpgsql AS $function$ BEGIN \
+    IF TG_OP = 'DELETE' THEN \
+    RAISE EXCEPTION 'economic replay task cannot be deleted'; END IF; \
+    IF ROW(NEW.recommendation_id, NEW.horizon_at, NEW.created_at) IS DISTINCT FROM \
+       ROW(OLD.recommendation_id, OLD.horizon_at, OLD.created_at) THEN \
+    RAISE EXCEPTION 'economic replay task identity is immutable'; END IF; \
+    IF OLD.replay_until IS NOT NULL AND \
+       ROW(NEW.replay_until, NEW.source_cutoff_at, NEW.resolution_outcome_hash) IS DISTINCT FROM \
+       ROW(OLD.replay_until, OLD.source_cutoff_at, OLD.resolution_outcome_hash) THEN \
+    RAISE EXCEPTION 'economic replay first-claim boundary is immutable'; END IF; \
+    IF OLD.status = 'completed'::public.qp_outcome_reconciliation_task_status THEN \
+    RAISE EXCEPTION 'completed economic replay task is immutable'; END IF; \
+    IF NEW.status = 'completed'::public.qp_outcome_reconciliation_task_status AND NOT EXISTS \
+       (SELECT 1 FROM public.quant_recommendation_economic_outcome \
+        WHERE recommendation_id = NEW.recommendation_id) THEN \
+    RAISE EXCEPTION 'economic task completion requires its durable outcome'; END IF; \
+    NEW.updated_at = statement_timestamp(); \
+    RETURN NEW; END; $function$";
+
 /// Fail closed unless `public` contains only the migration infrastructure.
 /// `PostgreSQL`'s heterogeneous catalog cannot be expressed by `SeaQuery`, so the
 /// complete static statement is sealed inside this versioned dialect module.
@@ -625,6 +645,7 @@ pub(in crate::migrations) enum TriggerProgram {
     GuardFactorValue,
     GuardModelRun,
     GuardResearchJob,
+    GuardEconomicOutcomeTask,
     GuardSourceSlice,
     GuardTrainingDataset,
     SetUpdatedAt,
@@ -642,6 +663,7 @@ impl TriggerProgram {
             Self::GuardFactorValue => "trigger_guard_factor_value",
             Self::GuardModelRun => "trigger_guard_model_run",
             Self::GuardResearchJob => "trigger_guard_research_job",
+            Self::GuardEconomicOutcomeTask => "trigger_guard_economic_outcome_task",
             Self::GuardSourceSlice => "trigger_guard_source_slice",
             Self::GuardTrainingDataset => "trigger_guard_training_dataset",
             Self::SetUpdatedAt => "trigger_set_updated_at",
@@ -707,20 +729,6 @@ pub(in crate::migrations) async fn create_validation_programs(
     Ok(())
 }
 
-pub(in crate::migrations) async fn drop_validation_programs(
-    manager: &SchemaManager<'_>,
-) -> Result<(), DbErr> {
-    for signature in [
-        "validate_factor_serving_plane(jsonb, text, integer, text)",
-        "validate_factor_explanation(jsonb)",
-        "validate_factor_definition_document(jsonb)",
-        "validate_content_hash_array(jsonb)",
-    ] {
-        execute(manager, format!("DROP FUNCTION public.{signature}")).await?;
-    }
-    Ok(())
-}
-
 pub(in crate::migrations) async fn create_trigger_programs(
     manager: &SchemaManager<'_>,
 ) -> Result<(), DbErr> {
@@ -732,6 +740,7 @@ pub(in crate::migrations) async fn create_trigger_programs(
         MODEL_ROUTE_SHADOW_BINDING_GUARD_SQL,
         PROMOTION_PERMIT_GUARD_SQL,
         RESEARCH_JOB_GUARD_SQL,
+        ECONOMIC_TASK_GUARD_SQL,
         "CREATE FUNCTION public.trigger_guard_factor_value() RETURNS trigger LANGUAGE plpgsql AS \
          $function$ DECLARE \
          owning_kind public.qp_model_run_kind; \
@@ -861,32 +870,6 @@ pub(in crate::migrations) async fn create_trigger_programs(
         UPDATED_AT_TRIGGER_SQL,
     ] {
         execute(manager, statement.to_owned()).await?;
-    }
-    Ok(())
-}
-
-pub(in crate::migrations) async fn drop_trigger_programs(
-    manager: &SchemaManager<'_>,
-) -> Result<(), DbErr> {
-    for name in [
-        "trigger_set_updated_at",
-        "trigger_guard_training_dataset",
-        "trigger_guard_source_slice",
-        "trigger_guard_model_run",
-        "trigger_guard_research_job",
-        "trigger_guard_factor_value",
-        "trigger_guard_promotion_permit",
-        "trigger_guard_model_route_shadow_binding",
-        "trigger_guard_feedback_outbox",
-        "trigger_guard_feedback_cycle",
-        "trigger_guard_calibration_artifact",
-        "trigger_deny_write",
-    ] {
-        execute(
-            manager,
-            format!("DROP FUNCTION public.{}()", quote_identifier(name)),
-        )
-        .await?;
     }
     Ok(())
 }

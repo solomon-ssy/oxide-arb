@@ -9,15 +9,15 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    clickhouse::{ChPrice, ChProbability, QuantSignalCandidateEventRow},
+    clickhouse::{ChBps, ChPrice, ChProbability, QuantSignalCandidateEventRow},
     enums::{
         factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
         quant::{FactorDirection, OutcomeSide},
     },
     hashing::CanonicalDigest,
     types::{
-        Bps, ContentHash, FactorDefinitionId, MarketId, ModelRunId, Price, Probability,
-        SignalCandidateId, TokenId, calibration::CalibratedPayoutDistribution,
+        Bps, ContentHash, FactorDefinitionId, MarketId, ModelRunId, ModelVersionId, Price,
+        Probability, SignalCandidateId, TokenId, calibration::CalibratedPayoutDistribution,
     },
 };
 use rust_decimal::Decimal;
@@ -393,6 +393,7 @@ fn apply_bps(entry: Price, bps: Decimal, positive: bool) -> Price {
 #[must_use]
 pub fn signal_candidate_event(
     candidate: &SignalCandidate,
+    model_version_id: ModelVersionId,
     rejection_reason: &str,
     event_time: i64,
 ) -> QuantSignalCandidateEventRow {
@@ -400,11 +401,13 @@ pub fn signal_candidate_event(
         event_time,
         signal_candidate_id: candidate.signal_candidate_id,
         model_run_id: candidate.model_run_id,
+        model_version_id,
         market_id: candidate.market_id.clone(),
         token_id: candidate.token_id.clone(),
         side: candidate.outcome_side.into(),
         score: ChProbability::from(candidate.composite_score),
         confidence: ChProbability::from(candidate.confidence),
+        expected_return_bps: ChBps::from(Bps::new(candidate.expected_return_bps)),
         entry_price: ChPrice::from(candidate.entry_price_ref),
         target_price: ChPrice::from(apply_bps(
             candidate.entry_price_ref,
@@ -418,6 +421,7 @@ pub fn signal_candidate_event(
         )),
         route_rank: candidate.route_rank,
         rejection_reason: rejection_reason.to_owned(),
+        ingestion_time: event_time,
     }
 }
 
@@ -425,11 +429,12 @@ pub fn signal_candidate_event(
 #[must_use]
 pub fn signal_candidate_events(
     candidates: &[SignalCandidate],
+    model_version_id: ModelVersionId,
     event_time: i64,
 ) -> Vec<QuantSignalCandidateEventRow> {
     candidates
         .iter()
-        .map(|candidate| signal_candidate_event(candidate, "", event_time))
+        .map(|candidate| signal_candidate_event(candidate, model_version_id, "", event_time))
         .collect()
 }
 
@@ -444,8 +449,8 @@ mod tests {
             quant::FactorDirection,
         },
         types::{
-            FactorDefinitionId, MarketId, ModelRunId, PayoutRatio, Price, Probability,
-            SignalCandidateId, TokenId, calibration::CalibratedPayoutDistribution,
+            FactorDefinitionId, MarketId, ModelRunId, ModelVersionId, PayoutRatio, Price,
+            Probability, SignalCandidateId, TokenId, calibration::CalibratedPayoutDistribution,
         },
     };
     use rust_decimal::Decimal;
@@ -707,7 +712,12 @@ mod tests {
     #[test]
     fn signal_candidate_maps_row() {
         let candidate = SignalCandidate::test_fixture();
-        let row = signal_candidate_event(&candidate, "score_below_floor", 1_700_000_000_000);
+        let row = signal_candidate_event(
+            &candidate,
+            ModelVersionId::from_v7(),
+            "score_below_floor",
+            1_700_000_000_000,
+        );
 
         assert_eq!(row.event_time, 1_700_000_000_000);
         assert_eq!(row.signal_candidate_id, candidate.signal_candidate_id);
@@ -727,7 +737,8 @@ mod tests {
             Price::new(Decimal::new(380, 3))
         );
 
-        let batch = signal_candidate_events(slice::from_ref(&candidate), 1);
+        let batch =
+            signal_candidate_events(slice::from_ref(&candidate), ModelVersionId::from_v7(), 1);
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].rejection_reason, "");
     }

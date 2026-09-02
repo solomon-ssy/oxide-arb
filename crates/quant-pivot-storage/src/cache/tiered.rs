@@ -76,6 +76,17 @@ impl TieredCache {
         Ok(())
     }
 
+    pub async fn invalidate_many(&self, keys: &[String]) -> Result<(), StorageError> {
+        let key_refs = keys.iter().map(String::as_str).collect::<Vec<_>>();
+        let (r1, r2) = tokio::join!(
+            self.l1.delete_many(&key_refs),
+            self.l2.delete_many(&key_refs),
+        );
+        r1?;
+        r2?;
+        Ok(())
+    }
+
     /// Get a value using `serde_json` for deserialization.
     ///
     /// Use this for types that cannot derive `bitcode::Decode` (e.g. `SeaORM`
@@ -162,6 +173,14 @@ mod tests {
 
         async fn delete(&self, key: &str) -> Result<bool, StorageError> {
             Ok(self.data.lock().await.remove(key).is_some())
+        }
+
+        async fn delete_many(&self, keys: &[&str]) -> Result<usize, StorageError> {
+            let mut data = self.data.lock().await;
+            Ok(keys
+                .iter()
+                .filter(|key| data.remove(**key).is_some())
+                .count())
         }
 
         async fn exists(&self, key: &str) -> Result<bool, StorageError> {

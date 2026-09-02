@@ -31,6 +31,10 @@ use crate::{
     observability::metrics_hub::MetricsHub,
 };
 
+// Producers never block on dashboard revision hints. The sole consumer drains
+// this count-bounded mailbox after all producers during staged shutdown.
+const CORE_EVENT_CAPACITY: usize = 4_096;
+
 impl AppContext {
     /// Build all subsystems from deploy config.
     pub async fn build(
@@ -41,7 +45,13 @@ impl AppContext {
         let metrics = Arc::new(MetricsHub::new());
         let infra = InfraBundle::assemble(&deploy, Arc::clone(&metrics)).await?;
         let runtime = RuntimeSnapshot::bootstrap(&infra.repos, &deploy).await?;
-        let (events, event_rx) = CoreEventPublisher::bounded(4096);
+        let (events, event_rx) = CoreEventPublisher::bounded(CORE_EVENT_CAPACITY);
+        let event_drop_metric = metrics.core_event_dropped.clone();
+        let events = events.with_drop_hook(Arc::new(move |kind, reason| {
+            event_drop_metric
+                .with_label_values(&[reason.as_str(), kind])
+                .inc();
+        }));
         let intent_lifecycle = Arc::new(IntentLifecyclePublisher::new(events.clone()));
         let settlement_discovery_wake = SettlementDiscoveryWake::new();
         let data = DataBundle::assemble(&DataBundleDeps {
@@ -122,7 +132,7 @@ impl AppContext {
             .attach_execution_breaker(Arc::clone(&execution.breaker));
         governance.bootstrap_execution_recovery().await?;
         governance.bootstrap_bias_table().await?;
-        governance.start_policy_reconciler(
+        governance.prepare_policy_reconciler(
             Arc::clone(&infra.repos.runtime_config) as Arc<dyn PolicyRepository>
         )?;
 
@@ -182,7 +192,7 @@ fn new_execution_account(
 
 /// Resolve and validate the venue wallet topology from deploy config.
 ///
-/// The funder is mandatory in every mode (report sizing reads the real venue
+/// The funder is mandatory because report sizing reads the real venue
 /// account). For EOA it must equal the signer; for Proxy / Gnosis Safe it must
 /// either match the CREATE2-derived wallet (fast, offline) or — when the pinned
 /// SDK cannot reproduce that Polymarket wallet generation — be proven on-chain to

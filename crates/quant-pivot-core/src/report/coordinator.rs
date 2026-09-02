@@ -3,7 +3,11 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
+use quant_pivot_error::{
+    QuantError, QuantResult,
+    report::ReportError,
+    storage::{StorageError, entity::DECISION_POLICY_SNAPSHOT},
+};
 use quant_pivot_models::{
     domain::quant::{
         ClaimReportSchedule, MaterializeReportSchedule, ReconcileReportSchedule,
@@ -11,8 +15,7 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     runtime_config::{
-        DecisionPolicySnapshot, ReportScheduleConfig, ReportsConfig, due_schedule_window,
-        preview_fire_times,
+        DecisionPolicySnapshot, ReportScheduleConfig, due_schedule_window, preview_fire_times,
     },
     types::{DecisionPolicySnapshotId, WorkerId},
 };
@@ -39,6 +42,31 @@ pub struct ReportCoordinator {
     publisher: Arc<ReportPublisher>,
     config: ReportCoordinatorConfig,
     worker_id: WorkerId,
+}
+
+enum SchedulePass<T> {
+    Ready(T),
+    ConfigChanged,
+}
+
+impl<T> SchedulePass<T> {
+    fn classify(
+        result: Result<T, StorageError>,
+        expected: DecisionPolicySnapshotId,
+    ) -> QuantResult<Self> {
+        match result {
+            Ok(value) => Ok(Self::Ready(value)),
+            Err(error) if is_schedule_race(&error, expected) => {
+                tracing::info!(
+                    %error,
+                    expected_snapshot_id = %expected,
+                    "runtime config changed during report coordinator pass; retrying"
+                );
+                Ok(Self::ConfigChanged)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 impl ReportCoordinator {
@@ -79,24 +107,36 @@ impl ReportCoordinator {
     }
 
     async fn run_once(&self) -> QuantResult<()> {
-        let (version_id, config) = self.reconcile_active(None).await?;
+        let SchedulePass::Ready((version_id, config)) = self.reconcile_active().await? else {
+            return Ok(());
+        };
         let database_now = self.runs.database_time().await?;
-        self.materialize_due(&version_id, &config, database_now)
-            .await?;
+        if matches!(
+            self.materialize_due(&version_id, &config, database_now)
+                .await?,
+            SchedulePass::ConfigChanged
+        ) {
+            return Ok(());
+        }
         for abandoned in self.runs.abandon_expired_runs().await? {
             self.publisher.publish_run(&abandoned, database_now);
         }
         let claim_config = claim_config(&version_id, &config)?;
-        if let Some(run) = self
-            .runs
-            .claim_next_run(
-                self.worker_id,
-                self.config.lease_secs,
-                self.config.ad_hoc_ttl_secs,
-                claim_config,
-            )
-            .await?
-        {
+        let SchedulePass::Ready(run) = SchedulePass::classify(
+            self.runs
+                .claim_next_run(
+                    self.worker_id,
+                    self.config.lease_secs,
+                    self.config.ad_hoc_ttl_secs,
+                    claim_config,
+                )
+                .await,
+            version_id,
+        )?
+        else {
+            return Ok(());
+        };
+        if let Some(run) = run {
             self.publisher.publish_run(&run, Utc::now());
             Box::pin(self.execute_with_heartbeat(run)).await?;
         }
@@ -107,21 +147,25 @@ impl ReportCoordinator {
 
     async fn reconcile_active(
         &self,
-        expected: Option<&ReportsConfig>,
-    ) -> QuantResult<(DecisionPolicySnapshotId, DecisionPolicySnapshot)> {
-        let version = self.runtime_configs.load_current().await?.ok_or_else(|| {
-            ReportError::InvariantViolation {
-                stage: "report_schedule_reconcile",
-                detail: "no active runtime config".to_owned(),
-            }
-        })?;
+    ) -> QuantResult<SchedulePass<(DecisionPolicySnapshotId, DecisionPolicySnapshot)>> {
         let activation = self
             .runtime_configs
             .load_current_activation(None)
             .await?
             .ok_or_else(|| ReportError::InvariantViolation {
                 stage: "report_schedule_reconcile",
-                detail: "active runtime config has no activation row".to_owned(),
+                detail: "no active runtime config activation".to_owned(),
+            })?;
+        // Read the immutable snapshot named by this activation. A concurrent
+        // activation may replace the current pointer between reads; only the
+        // schedule repository's exact expected-id CAS decides whether to retry.
+        let version = self
+            .runtime_configs
+            .load_snapshot(&activation.decision_policy_snapshot_id)
+            .await?
+            .ok_or_else(|| ReportError::InvariantViolation {
+                stage: "report_schedule_reconcile",
+                detail: "active runtime config snapshot is missing".to_owned(),
             })?;
         if activation.decision_policy_snapshot_id != version.decision_policy_snapshot_id {
             return Err(ReportError::InvariantViolation {
@@ -131,29 +175,30 @@ impl ReportCoordinator {
             .into());
         }
         let config = version.snapshot;
-        if expected.is_some_and(|reports| reports != &config.recommendation.reports) {
-            return Err(ReportError::ContractViolation {
-                detail: "runtime apply payload differs from the already-active durable config"
-                    .to_owned(),
-            }
-            .into());
-        }
         let schedules = reconcile_commands(
             &version.decision_policy_snapshot_id,
             activation.activated_at,
             &config.report_schedule.schedules,
         )?;
-        let outcome = self
-            .runs
-            .reconcile_schedules(&version.decision_policy_snapshot_id, schedules)
-            .await?;
+        let SchedulePass::Ready(outcome) = SchedulePass::classify(
+            self.runs
+                .reconcile_schedules(&version.decision_policy_snapshot_id, schedules)
+                .await,
+            version.decision_policy_snapshot_id,
+        )?
+        else {
+            return Ok(SchedulePass::ConfigChanged);
+        };
         for gap in &outcome.gaps {
             self.publisher.record_schedule_gap(gap)?;
         }
         for skipped in outcome.skipped_runs {
             self.publisher.publish_run(&skipped, Utc::now());
         }
-        Ok((version.decision_policy_snapshot_id, config))
+        Ok(SchedulePass::Ready((
+            version.decision_policy_snapshot_id,
+            config,
+        )))
     }
 
     async fn materialize_due(
@@ -161,7 +206,7 @@ impl ReportCoordinator {
         version_id: &DecisionPolicySnapshotId,
         config: &DecisionPolicySnapshot,
         through: DateTime<Utc>,
-    ) -> QuantResult<()> {
+    ) -> QuantResult<SchedulePass<()>> {
         let schedule_by_id = config
             .report_schedule
             .schedules
@@ -204,7 +249,11 @@ impl ReportCoordinator {
                     .transpose()?,
                 earlier_missed_count,
             };
-            let outcome = self.runs.materialize_schedule(command).await?;
+            let SchedulePass::Ready(outcome) =
+                SchedulePass::classify(self.runs.materialize_schedule(command).await, *version_id)?
+            else {
+                return Ok(SchedulePass::ConfigChanged);
+            };
             for gap in &outcome.gaps {
                 self.publisher.record_schedule_gap(gap)?;
             }
@@ -213,7 +262,7 @@ impl ReportCoordinator {
             }
             self.publisher.publish_run(&outcome.run, Utc::now());
         }
-        Ok(())
+        Ok(SchedulePass::Ready(()))
     }
 
     async fn execute_with_heartbeat(&self, mut run: ReportRunInfo) -> QuantResult<()> {
@@ -250,6 +299,18 @@ impl ReportCoordinator {
         }
         Ok(())
     }
+}
+
+fn is_schedule_race(error: &StorageError, expected: DecisionPolicySnapshotId) -> bool {
+    matches!(
+        error,
+        StorageError::StateConflict {
+            entity: DECISION_POLICY_SNAPSHOT,
+            id: Some(id),
+            detail,
+        } if id == &expected.to_string()
+            && detail == "runtime config changed during report schedule operation"
+    )
 }
 
 fn reconcile_commands(
@@ -346,4 +407,79 @@ fn predecessor_occurrence(
         ),
     })?;
     Ok(window.latest)
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_error::{
+        QuantError,
+        storage::{StorageError, entity::DECISION_POLICY_SNAPSHOT},
+    };
+    use quant_pivot_models::types::DecisionPolicySnapshotId;
+
+    use super::{SchedulePass, is_schedule_race};
+
+    #[test]
+    fn config_race_is_retryable() {
+        let expected = DecisionPolicySnapshotId::from_v7();
+        let race = StorageError::StateConflict {
+            entity: DECISION_POLICY_SNAPSHOT,
+            id: Some(expected.to_string()),
+            detail: "runtime config changed during report schedule operation".to_owned(),
+        };
+
+        assert!(is_schedule_race(&race, expected));
+        assert!(matches!(
+            SchedulePass::<()>::classify(Err(race), expected),
+            Ok(SchedulePass::ConfigChanged)
+        ));
+    }
+
+    #[test]
+    fn other_conflicts_remain_errors() {
+        let expected = DecisionPolicySnapshotId::from_v7();
+        let expected_id = expected.to_string();
+        let schedule_change = "runtime config changed during report schedule operation";
+        for (entity, id, detail) in [
+            (DECISION_POLICY_SNAPSHOT, None, schedule_change),
+            (
+                DECISION_POLICY_SNAPSHOT,
+                Some(String::new()),
+                schedule_change,
+            ),
+            (
+                DECISION_POLICY_SNAPSHOT,
+                Some(DecisionPolicySnapshotId::from_v7().to_string()),
+                schedule_change,
+            ),
+            (DECISION_POLICY_SNAPSHOT, None, "no active runtime config"),
+            (
+                DECISION_POLICY_SNAPSHOT,
+                Some(expected_id.clone()),
+                "no active runtime config",
+            ),
+            (
+                DECISION_POLICY_SNAPSHOT,
+                Some(expected_id.clone()),
+                "concurrent activation",
+            ),
+            (
+                DECISION_POLICY_SNAPSHOT,
+                Some(expected_id.clone()),
+                "runtime config changed during report schedule operation; unrelated failure",
+            ),
+            ("report_run", Some(expected_id), schedule_change),
+        ] {
+            let error = StorageError::StateConflict {
+                entity,
+                id,
+                detail: detail.to_owned(),
+            };
+            assert!(!is_schedule_race(&error, expected), "misclassified {error}");
+            assert!(matches!(
+                SchedulePass::<()>::classify(Err(error), expected),
+                Err(QuantError::Storage(StorageError::StateConflict { .. }))
+            ));
+        }
+    }
 }

@@ -7,6 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use quant_pivot_compute::{ComputeExecutor, OFFLINE_MEMORY_BYTES, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
@@ -15,13 +16,16 @@ use quant_pivot_models::{
             FeedbackCoverageExecutionPort, FeedbackCoverageExecutionResult,
             FeedbackDriftExecutionPort, FeedbackDriftExecutionResult,
         },
-        quant::{FeedbackCohortWindow, FeedbackCycleInfo, JobProgressSink, ResearchJobArtifactRef},
+        quant::{
+            FeedbackCohortWindow, FeedbackCycleInfo, JobProgressSink, ResearchJobArtifactRef,
+            TrainingDatasetInfo,
+        },
     },
     enums::quant::{FeedbackCycleStatus, FeedbackDriftMetric},
     hashing::CanonicalDigest,
     types::{
         ContentHash, FeedbackCoverageArtifactId, FeedbackCycleId, FeedbackDriftArtifactId,
-        ModelRunId, ResearchJobProgress,
+        ModelRunId, ResearchFeedbackPolicy, ResearchJobProgress, ResearchProfileArtifact,
     },
 };
 use quant_pivot_repository::traits::{
@@ -41,6 +45,7 @@ use quant_pivot_research::{
     training::{TOKEN_PAYOUT_RATIO, TrainingExample},
 };
 use rust_decimal::Decimal;
+use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -53,7 +58,9 @@ use crate::{
             FeedbackCohortMaterializer, FeedbackCohortMaterializerDeps,
             FeedbackCoverageMaterialization,
         },
-        model_serving_preimage::{ModelServingPreimageService, VerifiedModelServingPreimage},
+        model_serving_preimage::{
+            ModelPreimageReadContext, ModelServingPreimageService, VerifiedModelServingPreimage,
+        },
         training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
     },
 };
@@ -71,6 +78,7 @@ pub struct FeedbackSignalServiceDeps {
     pub feature_repository: Arc<dyn FeatureRepository>,
     pub factor_repository: Arc<dyn FactorRepository>,
     pub artifact_store: Arc<dyn ArtifactStore>,
+    pub compute: Arc<ComputeExecutor>,
 }
 
 /// Executes coverage and drift through verified immutable preimages only.
@@ -81,12 +89,13 @@ pub struct FeedbackSignalService {
     preimages: Arc<ModelServingPreimageService>,
     materializer: FeedbackCohortMaterializer,
     artifact_store: Arc<dyn ArtifactStore>,
+    compute: Arc<ComputeExecutor>,
+    compute_memory: OfflineMemory,
 }
 
 impl FeedbackSignalService {
-    #[must_use]
-    pub fn new(deps: FeedbackSignalServiceDeps) -> Self {
-        Self {
+    pub fn try_new(deps: FeedbackSignalServiceDeps) -> QuantResult<Self> {
+        Ok(Self {
             cycles: deps.cycles,
             models: deps.models,
             policies: deps.policies,
@@ -97,7 +106,9 @@ impl FeedbackSignalService {
                 factors: deps.factor_repository,
             }),
             artifact_store: deps.artifact_store,
-        }
+            compute: deps.compute,
+            compute_memory: OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES)?,
+        })
     }
 
     async fn load_cycle(
@@ -125,6 +136,7 @@ impl FeedbackSignalService {
     async fn load_champion(
         &self,
         cycle: &FeedbackCycleInfo,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<VerifiedModelServingPreimage> {
         let version = self
             .models
@@ -133,7 +145,7 @@ impl FeedbackSignalService {
             .ok_or_else(|| {
                 StorageError::not_found("quant_model_version", cycle.champion_model_version_id)
             })?;
-        let preimage = self.preimages.load(&version).await?;
+        let preimage = self.preimages.load(&version, context).await?;
         preimage.verify_feedback_cycle(cycle)?;
         self.verify_cycle_policy(cycle, &preimage).await?;
         Ok(preimage)
@@ -191,10 +203,10 @@ impl FeedbackSignalService {
 
     fn evaluation_window(
         cycle: &FeedbackCycleInfo,
-        preimage: &VerifiedModelServingPreimage,
+        profile: &ResearchProfileArtifact,
     ) -> QuantResult<FeedbackCohortWindow> {
         let plan = FeedbackCycleFreezePlan::derive_at_cutoff(
-            preimage.profile(),
+            profile,
             cycle.champion_model_spec_id,
             cycle.champion_model_spec_definition_hash,
             cycle.decision_policy_snapshot_id,
@@ -204,8 +216,7 @@ impl FeedbackSignalService {
         Ok(plan.evaluation().clone())
     }
 
-    fn baseline_ref(preimage: &VerifiedModelServingPreimage) -> QuantResult<ChampionBaselineRef> {
-        let dataset = preimage.training_dataset();
+    fn baseline_ref(dataset: &TrainingDatasetInfo) -> QuantResult<ChampionBaselineRef> {
         let materialization = require_dataset_materialization(dataset)?;
         Ok(ChampionBaselineRef {
             training_dataset_id: dataset.training_dataset_id,
@@ -229,20 +240,14 @@ impl FeedbackSignalService {
 
     fn coverage_artifact(
         cycle: FeedbackCycleInfo,
-        preimage: &VerifiedModelServingPreimage,
+        profile: &ResearchProfileArtifact,
+        dataset: &TrainingDatasetInfo,
         evaluation_window: FeedbackCohortWindow,
         champion_baseline: ChampionBaselineRef,
         frozen: FeedbackCoverageMaterialization,
     ) -> QuantResult<FeedbackCoverageArtifact> {
-        let policy = preimage.profile().spec.feedback_policy.clone();
-        let gate_input = CoverageGateInput {
-            policy_evaluation_count: frozen.cohorts.policy_evaluation.eligible_count(),
-            mature_label_count: frozen.cohorts.model_learning.eligible_count(),
-            new_mature_label_count: frozen.new_mature_label_count,
-            minimum_mature_labels: policy.minimum_mature_labels,
-            minimum_new_mature_labels: policy.minimum_new_mature_labels,
-            minimum_coverage: policy.minimum_coverage,
-        };
+        let policy = profile.spec.feedback_policy.clone();
+        let gate_input = coverage_gate_input(&policy, &frozen);
         let artifact = FeedbackCoverageArtifact {
             format_version: FEEDBACK_COVERAGE_ARTIFACT_FORMAT_VERSION,
             artifact_id: FeedbackCoverageArtifactId::from_cycle_id(cycle.feedback_cycle_id),
@@ -252,11 +257,7 @@ impl FeedbackSignalService {
             profile_ref: cycle.profile_ref,
             feedback_policy: policy,
             feedback_policy_hash: cycle.feedback_policy_hash,
-            capability_registry_hashes: preimage
-                .training_dataset()
-                .source_lineage
-                .capability_registry_hashes
-                .clone(),
+            capability_registry_hashes: dataset.source_lineage.capability_registry_hashes.clone(),
             champion_model_version_id: cycle.champion_model_version_id,
             champion_serving_contract_hash: cycle.champion_serving_contract_hash,
             evaluation_window,
@@ -275,82 +276,168 @@ impl FeedbackSignalService {
 
     async fn persist_coverage(
         &self,
-        artifact: &FeedbackCoverageArtifact,
+        artifact: FeedbackCoverageArtifact,
+        cancel: &CancellationToken,
     ) -> QuantResult<ResearchJobArtifactRef> {
-        let bytes = FeedbackCoverageCodec::encode(artifact)?;
-        let content_hash = FeedbackCoverageCodec::bytes_hash(&bytes);
+        let artifact_id = artifact.artifact_id;
+        let (artifact, bytes, content_hash) = self
+            .run_compute(cancel, move || {
+                let bytes = FeedbackCoverageCodec::encode(&artifact)?;
+                let content_hash = FeedbackCoverageCodec::bytes_hash(&bytes);
+                Ok((artifact, bytes, content_hash))
+            })
+            .await?;
         let key = ArtifactKey::new(
             ArtifactNamespace::FeedbackCoverage,
-            artifact.artifact_id.to_string(),
+            artifact_id.to_string(),
             "json",
         )?;
+        require_running(cancel, "coverage artifact commit")?;
         let uri = self.artifact_store.put(key, &bytes).await?;
         let persisted = self.artifact_store.get(&uri).await?;
-        if FeedbackCoverageCodec::bytes_hash(&persisted) != content_hash
-            || FeedbackCoverageCodec::decode(&persisted)? != *artifact
-        {
-            return Err(ResearchError::ArtifactHashMismatch {
-                expected: content_hash.to_string(),
-                actual: FeedbackCoverageCodec::bytes_hash(&persisted).to_string(),
-            }
-            .into());
-        }
+        self.run_finalize(move || {
+            verify_readback(
+                &persisted,
+                content_hash,
+                &artifact,
+                FeedbackCoverageCodec::bytes_hash,
+                FeedbackCoverageCodec::decode,
+            )
+        })
+        .await?;
         Ok(ResearchJobArtifactRef { uri, content_hash })
     }
 
     async fn load_coverage(
         &self,
         params: &FeedbackDriftJobParams,
+        cancel: &CancellationToken,
     ) -> QuantResult<FeedbackCoverageArtifact> {
         let bytes = self
             .artifact_store
             .get(&params.coverage_artifact_uri)
             .await?;
-        let hash = FeedbackCoverageCodec::bytes_hash(&bytes);
-        if hash != params.coverage_artifact_hash {
-            return Err(ResearchError::ArtifactHashMismatch {
-                expected: params.coverage_artifact_hash.to_string(),
-                actual: hash.to_string(),
+        let expected_hash = params.coverage_artifact_hash;
+        let artifact_id = params.coverage_artifact_id;
+        let feedback_cycle_id = params.feedback_cycle_id;
+        let cycle_idempotency_hash = params.cycle_idempotency_hash;
+        self.run_compute(cancel, move || {
+            let hash = FeedbackCoverageCodec::bytes_hash(&bytes);
+            if hash != expected_hash {
+                return Err(ResearchError::ArtifactHashMismatch {
+                    expected: expected_hash.to_string(),
+                    actual: hash.to_string(),
+                }
+                .into());
             }
-            .into());
-        }
-        let artifact = FeedbackCoverageCodec::decode(&bytes)?;
-        let coverage_id_matches = artifact.artifact_id == params.coverage_artifact_id;
-        if artifact.feedback_cycle_id != params.feedback_cycle_id
-            || artifact.cycle_idempotency_hash != params.cycle_idempotency_hash
-            || !coverage_id_matches
-        {
-            return Err(contract(
-                "drift job coverage reference differs from the decoded artifact",
-            ));
-        }
-        Ok(artifact)
+            let artifact = FeedbackCoverageCodec::decode(&bytes)?;
+            if artifact.artifact_id != artifact_id
+                || artifact.feedback_cycle_id != feedback_cycle_id
+                || artifact.cycle_idempotency_hash != cycle_idempotency_hash
+            {
+                return Err(contract(
+                    "drift job coverage reference differs from the decoded artifact",
+                ));
+            }
+            Ok(artifact)
+        })
+        .await
     }
 
     async fn persist_drift(
         &self,
-        artifact: &FeedbackDriftArtifact,
+        artifact: FeedbackDriftArtifact,
+        cancel: &CancellationToken,
     ) -> QuantResult<ResearchJobArtifactRef> {
-        let bytes = FeedbackDriftCodec::encode(artifact)?;
-        let content_hash = FeedbackDriftCodec::bytes_hash(&bytes);
+        let artifact_id = artifact.artifact_id;
+        let (artifact, bytes, content_hash) = self
+            .run_compute(cancel, move || {
+                let bytes = FeedbackDriftCodec::encode(&artifact)?;
+                let content_hash = FeedbackDriftCodec::bytes_hash(&bytes);
+                Ok((artifact, bytes, content_hash))
+            })
+            .await?;
         let key = ArtifactKey::new(
             ArtifactNamespace::FeedbackDrift,
-            artifact.artifact_id.to_string(),
+            artifact_id.to_string(),
             "json",
         )?;
+        require_running(cancel, "drift artifact commit")?;
         let uri = self.artifact_store.put(key, &bytes).await?;
         let persisted = self.artifact_store.get(&uri).await?;
-        if FeedbackDriftCodec::bytes_hash(&persisted) != content_hash
-            || FeedbackDriftCodec::decode(&persisted)? != *artifact
-        {
-            return Err(ResearchError::ArtifactHashMismatch {
-                expected: content_hash.to_string(),
-                actual: FeedbackDriftCodec::bytes_hash(&persisted).to_string(),
-            }
-            .into());
-        }
+        self.run_finalize(move || {
+            verify_readback(
+                &persisted,
+                content_hash,
+                &artifact,
+                FeedbackDriftCodec::bytes_hash,
+                FeedbackDriftCodec::decode,
+            )
+        })
+        .await?;
         Ok(ResearchJobArtifactRef { uri, content_hash })
     }
+
+    async fn run_compute<T, F>(&self, cancel: &CancellationToken, work: F) -> QuantResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QuantResult<T> + Send + 'static,
+    {
+        self.compute
+            .run_offline_cancellable(self.compute_memory, cancel, work)
+            .await
+    }
+
+    async fn run_finalize<T, F>(&self, work: F) -> QuantResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QuantResult<T> + Send + 'static,
+    {
+        self.compute.run_offline(self.compute_memory, work).await
+    }
+}
+
+const fn coverage_gate_input(
+    policy: &ResearchFeedbackPolicy,
+    frozen: &FeedbackCoverageMaterialization,
+) -> CoverageGateInput {
+    CoverageGateInput {
+        model_learning_candidate_count: frozen.cohorts.model_learning.candidate_count(),
+        mature_label_count: frozen.cohorts.model_learning.eligible_count(),
+        new_mature_label_count: frozen.new_mature_label_count,
+        minimum_mature_labels: policy.minimum_mature_labels,
+        minimum_new_mature_labels: policy.minimum_new_mature_labels,
+        minimum_coverage: policy.minimum_coverage,
+    }
+}
+
+fn dispatch_drift<T>(
+    overlaps: bool,
+    overlap: impl FnOnce() -> QuantResult<T>,
+    non_overlap: impl FnOnce() -> QuantResult<T>,
+) -> QuantResult<T> {
+    if overlaps { overlap() } else { non_overlap() }
+}
+
+fn verify_readback<T>(
+    persisted: &[u8],
+    expected_hash: ContentHash,
+    expected: &T,
+    hash: impl FnOnce(&[u8]) -> ContentHash,
+    decode: impl FnOnce(&[u8]) -> QuantResult<T>,
+) -> QuantResult<()>
+where
+    T: PartialEq,
+{
+    let actual_hash = hash(persisted);
+    if actual_hash != expected_hash || decode(persisted)? != *expected {
+        return Err(ResearchError::ArtifactHashMismatch {
+            expected: expected_hash.to_string(),
+            actual: actual_hash.to_string(),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -371,40 +458,56 @@ impl FeedbackCoverageExecutionPort for FeedbackSignalService {
                 "coverage artifact id differs from the exact cycle",
             ));
         }
-        let preimage = self.load_champion(&cycle).await?;
-        let evaluation_window = Self::evaluation_window(&cycle, &preimage)?;
-        let champion_baseline = Self::baseline_ref(&preimage)?;
+        let context = ModelPreimageReadContext::new(&cancel, None);
+        let preimage = self.load_champion(&cycle, &context).await?;
+        drop(context);
+        let profile = preimage.profile().clone();
+        let dataset = preimage.training_dataset().clone();
+        let planning_cycle = cycle.clone();
+        let planning_profile = profile.clone();
+        let planning_dataset = dataset.clone();
+        let (evaluation_window, champion_baseline) =
+            Box::pin(self.run_compute(&cancel, move || {
+                Ok((
+                    Self::evaluation_window(&planning_cycle, &planning_profile)?,
+                    Self::baseline_ref(&planning_dataset)?,
+                ))
+            }))
+            .await?;
         progress.report(ResearchJobProgress::indeterminate(
             "feedback-coverage-freeze",
             0,
         ));
-        let frozen = self
-            .materializer
-            .freeze_coverage(
-                &evaluation_window,
-                cycle.champion_model_version_id,
-                cycle.label_cutoff,
-                champion_baseline.pit_cutoff,
-                &progress,
-                &cancel,
-            )
-            .await?;
+        let frozen = Box::pin(self.materializer.freeze_coverage(
+            &evaluation_window,
+            cycle.champion_model_version_id,
+            cycle.label_cutoff,
+            champion_baseline.pit_cutoff,
+            &progress,
+            &cancel,
+        ))
+        .await?;
         require_running(&cancel, "coverage artifact seal")?;
-        let artifact = Self::coverage_artifact(
-            cycle,
-            &preimage,
-            evaluation_window,
-            champion_baseline,
-            frozen,
-        )?;
-        let result = self.persist_coverage(&artifact).await?;
+        let artifact = Box::pin(self.run_compute(&cancel, move || {
+            Self::coverage_artifact(
+                cycle,
+                &profile,
+                &dataset,
+                evaluation_window,
+                champion_baseline,
+                frozen,
+            )
+        }))
+        .await?;
+        let artifact_id = artifact.artifact_id;
+        let result = self.persist_coverage(artifact, &cancel).await?;
         progress.report(ResearchJobProgress::with_total(
             "feedback-coverage-complete",
             1,
             1,
         ));
         Ok(FeedbackCoverageExecutionResult {
-            artifact_id: artifact.artifact_id,
+            artifact_id,
             artifact: result,
         })
     }
@@ -425,7 +528,7 @@ impl FeedbackDriftExecutionPort for FeedbackSignalService {
         let cycle = self
             .load_cycle(params.feedback_cycle_id, params.cycle_idempotency_hash)
             .await?;
-        let coverage = self.load_coverage(&params).await?;
+        let coverage = self.load_coverage(&params, &cancel).await?;
         if !matches!(coverage.gate_outcome, CoverageGateOutcome::Advance { .. }) {
             return Err(ResearchError::NotEligible {
                 code: "feedback_coverage_no_action",
@@ -434,7 +537,9 @@ impl FeedbackDriftExecutionPort for FeedbackSignalService {
             }
             .into());
         }
-        let preimage = self.load_champion(&cycle).await?;
+        let context = ModelPreimageReadContext::new(&cancel, None);
+        let preimage = self.load_champion(&cycle, &context).await?;
+        drop(context);
         validate_coverage(&coverage, &cycle, &preimage)?;
         progress.report(ResearchJobProgress::indeterminate(
             "feedback-drift-baseline",
@@ -443,29 +548,46 @@ impl FeedbackDriftExecutionPort for FeedbackSignalService {
         let dataset = preimage.training_dataset();
         let materialization = require_dataset_materialization(dataset)?;
         let bytes = self.artifact_store.get(materialization.parquet_uri).await?;
-        let baseline_examples = verify_frozen_dataset_artifact(dataset, &bytes)?;
+        let dataset = dataset.clone();
+        let baseline_examples = self
+            .run_compute(&cancel, move || {
+                verify_frozen_dataset_artifact(&dataset, &bytes)
+            })
+            .await?;
         require_running(&cancel, "drift computation")?;
-        let artifact =
-            if coverage.champion_baseline.window_end > coverage.evaluation_window.window_start() {
-                overlapping_drift(&params, &coverage)
-            } else {
-                compute_drift(
-                    &params,
-                    &coverage,
-                    preimage.buy_runtime()?,
-                    &baseline_examples,
+        let runtime = preimage.buy_runtime()?;
+        let compute_runtime = Handle::current();
+        let compute_cancel = cancel.clone();
+        let artifact = self
+            .run_compute(&cancel, move || {
+                require_running(&compute_cancel, "drift computation")?;
+                let overlaps = coverage.champion_baseline.window_end
+                    > coverage.evaluation_window.window_start();
+                dispatch_drift(
+                    overlaps,
+                    || overlapping_drift(&params, &coverage),
+                    || {
+                        compute_runtime.block_on(Box::pin(compute_drift(
+                            &params,
+                            &coverage,
+                            runtime,
+                            &baseline_examples,
+                            &compute_cancel,
+                        )))
+                    },
                 )
-                .await
-            }?;
+            })
+            .await?;
         require_running(&cancel, "drift artifact seal")?;
-        let result = self.persist_drift(&artifact).await?;
+        let artifact_id = artifact.artifact_id;
+        let result = self.persist_drift(artifact, &cancel).await?;
         progress.report(ResearchJobProgress::with_total(
             "feedback-drift-complete",
             1,
             1,
         ));
         Ok(FeedbackDriftExecutionResult {
-            artifact_id: artifact.artifact_id,
+            artifact_id,
             artifact: result,
         })
     }
@@ -504,13 +626,16 @@ async fn compute_drift(
     coverage: &FeedbackCoverageArtifact,
     runtime: Arc<dyn QuantModelRuntime>,
     baseline_examples: &[TrainingExample],
+    cancel: &CancellationToken,
 ) -> QuantResult<FeedbackDriftArtifact> {
-    let data_details = feature_details(baseline_examples, &coverage.champion_examples)?;
+    require_running(cancel, "drift feature scan")?;
+    let data_details = feature_details(baseline_examples, &coverage.champion_examples, cancel)?;
     let (baseline_scores, baseline_labels) = score_examples(
         runtime.as_ref(),
         coverage.feedback_cycle_id,
         "baseline",
         baseline_examples,
+        cancel,
     )
     .await?;
     let (evaluation_scores, evaluation_labels) = score_examples(
@@ -518,6 +643,7 @@ async fn compute_drift(
         coverage.feedback_cycle_id,
         "evaluation",
         &coverage.champion_examples,
+        cancel,
     )
     .await?;
     let target_rank_summary = target_rank_ic_drift(
@@ -534,8 +660,9 @@ async fn compute_drift(
         )?,
         summary: target_rank_summary,
     };
-    let baseline_counts = payout_histogram(baseline_examples)?;
-    let evaluation_counts = payout_histogram(&coverage.champion_examples)?;
+    require_running(cancel, "drift metrics")?;
+    let baseline_counts = payout_histogram(baseline_examples, cancel)?;
+    let evaluation_counts = payout_histogram(&coverage.champion_examples, cancel)?;
     let label_detail = LabelDriftDetail {
         divergence: jensen_shannon(&baseline_counts, &evaluation_counts)?,
         baseline_counts,
@@ -647,9 +774,11 @@ fn drift_artifact(
 fn feature_details(
     baseline: &[TrainingExample],
     evaluation: &[TrainingExample],
+    cancel: &CancellationToken,
 ) -> QuantResult<Vec<FeatureDriftDetail>> {
     let mut names = BTreeSet::new();
     for example in baseline.iter().chain(evaluation) {
+        require_running(cancel, "drift feature scan")?;
         names.extend(
             example
                 .feature_vector
@@ -660,6 +789,7 @@ fn feature_details(
     names
         .into_iter()
         .map(|name| {
+            require_running(cancel, "drift feature distribution")?;
             let baseline = baseline
                 .iter()
                 .map(|example| example.feature_vector.value(&name).cloned())
@@ -678,9 +808,11 @@ async fn score_examples(
     feedback_cycle_id: FeedbackCycleId,
     population: &'static str,
     examples: &[TrainingExample],
+    cancel: &CancellationToken,
 ) -> QuantResult<(Vec<Decimal>, Vec<Decimal>)> {
     let mut groups = BTreeMap::<DateTime<Utc>, Vec<&TrainingExample>>::new();
     for example in examples {
+        require_running(cancel, "drift score grouping")?;
         groups
             .entry(example.decision_at())
             .or_default()
@@ -689,6 +821,7 @@ async fn score_examples(
     let mut scores = Vec::new();
     let mut labels = Vec::new();
     for (decision_at, group) in groups {
+        require_running(cancel, "drift inference")?;
         let run_id = drift_run_id(feedback_cycle_id, population, decision_at)?;
         let input = build_frozen_runtime_input(runtime, &run_id, &group)?;
         let output = runtime.infer_batch(input).await?;
@@ -705,6 +838,7 @@ async fn score_examples(
             }
         }
         for example in group {
+            require_running(cancel, "drift score validation")?;
             let Some(candidate) = candidates.remove(&example.market_id) else {
                 continue;
             };
@@ -752,9 +886,13 @@ fn payout_label(example: &TrainingExample) -> QuantResult<Decimal> {
     Ok(label.value)
 }
 
-fn payout_histogram(examples: &[TrainingExample]) -> QuantResult<Vec<u64>> {
+fn payout_histogram(
+    examples: &[TrainingExample],
+    cancel: &CancellationToken,
+) -> QuantResult<Vec<u64>> {
     let mut counts = vec![0_u64; PAYOUT_HISTOGRAM_BIN_COUNT];
     for example in examples {
+        require_running(cancel, "drift payout histogram")?;
         let value = payout_label(example)?;
         let mut index = 0_usize;
         while index < PAYOUT_HISTOGRAM_BIN_COUNT - 1
@@ -805,4 +943,252 @@ fn contract(detail: impl Into<String>) -> QuantError {
         detail: detail.into(),
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Mutex},
+        thread,
+        time::Duration,
+    };
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
+    use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+    use quant_pivot_models::{
+        enums::model::ModelFamily,
+        hashing::CanonicalDigest,
+        types::{
+            ContentHash, DatasetCohortCounts, ModelRunId, ModelVersionId,
+            builtin_research_profiles, stable_name::FeatureName,
+        },
+    };
+    use quant_pivot_research::{
+        feedback::FeedbackCoverageCohorts,
+        model::{
+            FactorInferenceTable, ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput,
+            QuantModelRuntime,
+        },
+    };
+    use tokio::{
+        runtime::Handle,
+        task,
+        time::{sleep, timeout},
+    };
+    use tokio_util::sync::CancellationToken;
+
+    use super::{
+        FeedbackCoverageMaterialization, coverage_gate_input, dispatch_drift, require_running,
+        verify_readback,
+    };
+
+    #[test]
+    fn corrupt_readback_fails_closed() {
+        let expected = b"canonical".to_vec();
+        let expected_hash = CanonicalDigest::content_hash_bytes(&expected);
+        let error = verify_readback(
+            b"corrupt",
+            expected_hash,
+            &expected,
+            CanonicalDigest::content_hash_bytes,
+            |bytes| Ok(bytes.to_vec()),
+        )
+        .expect_err("corrupt artifact readback must fail");
+        assert!(matches!(
+            error,
+            QuantError::Research(ResearchError::ArtifactHashMismatch { .. })
+        ));
+    }
+
+    struct ThreadProbe {
+        observed: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl QuantModelRuntime for ThreadProbe {
+        fn model_version_id(&self) -> ModelVersionId {
+            ModelVersionId::from_v7()
+        }
+        fn model_family(&self) -> ModelFamily {
+            ModelFamily::WeightedFactor
+        }
+        fn feature_schema_hash(&self) -> ContentHash {
+            ContentHash::from_bytes([1; 32])
+        }
+        fn required_features(&self) -> Vec<FeatureName> {
+            Vec::new()
+        }
+
+        async fn infer_batch(&self, _input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
+            *self.observed.lock().expect("thread probe lock") =
+                thread::current().name().map(str::to_owned);
+            Ok(ModelRuntimeOutput {
+                calibration_scores: Vec::new(),
+                rank_scores: Vec::new(),
+                candidates: Vec::new(),
+                runtime_metrics: ModelRuntimeMetrics {
+                    markets_scored: 0,
+                    candidates_emitted: 0,
+                    inference_duration_ms: 0,
+                },
+                input_audit: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn drift_dispatch_isolates_inference() {
+        let compute = Arc::new(ComputeExecutor::new().expect("compute executor"));
+        let observed = Arc::new(Mutex::new(None));
+        let runtime = Arc::new(ThreadProbe {
+            observed: Arc::clone(&observed),
+        });
+        let handle = Handle::current();
+        let work = task::spawn({
+            let compute = Arc::clone(&compute);
+            async move {
+                compute
+                    .run_offline(
+                        OfflineMemory::try_gib(1).expect("memory budget"),
+                        move || {
+                            dispatch_drift(
+                                false,
+                                || panic!("non-overlap must not use overlap path"),
+                                || {
+                                    handle.block_on(runtime.infer_batch(
+                                        ModelRuntimeInput::FactorTable(FactorInferenceTable {
+                                            model_run_id: ModelRunId::from_v7(),
+                                            decision_at: Utc::now(),
+                                            rows: Vec::new(),
+                                        }),
+                                    ))?;
+                                    Ok(())
+                                },
+                            )
+                        },
+                    )
+                    .await
+            }
+        });
+        timeout(Duration::from_millis(50), sleep(Duration::from_millis(10)))
+            .await
+            .expect("heartbeat advances");
+        work.await
+            .expect("drift probe joins")
+            .expect("drift probe succeeds");
+        assert!(
+            observed
+                .lock()
+                .expect("thread probe lock")
+                .as_deref()
+                .is_some_and(|name| name.starts_with("quant-offline-"))
+        );
+    }
+
+    #[test]
+    fn overlap_skips_inference() {
+        let inferred = Arc::new(Mutex::new(false));
+        let probe = Arc::clone(&inferred);
+        dispatch_drift(
+            true,
+            || Ok(()),
+            || {
+                *probe.lock().expect("overlap probe lock") = true;
+                Ok(())
+            },
+        )
+        .expect("overlap succeeds");
+        assert!(!*inferred.lock().expect("overlap probe lock"));
+    }
+
+    #[test]
+    fn coverage_uses_learning_denominator() {
+        let profile = builtin_research_profiles()
+            .expect("builtin research profiles")
+            .into_iter()
+            .next()
+            .expect("builtin research profile");
+        let counts = |count| {
+            DatasetCohortCounts::try_new(count, count, count, Vec::new(), Vec::new())
+                .expect("valid cohort counts")
+        };
+        let frozen = FeedbackCoverageMaterialization {
+            cohorts: FeedbackCoverageCohorts {
+                model_learning: counts(40),
+                execution_learning: counts(20),
+                policy_evaluation: counts(10),
+            },
+            mature_labels: Vec::new(),
+            new_mature_label_count: 5,
+            champion_rows: Vec::new(),
+            champion_examples: Vec::new(),
+        };
+        let input = coverage_gate_input(&profile.spec.feedback_policy, &frozen);
+        assert_eq!(input.model_learning_candidate_count, 40);
+        assert_eq!(input.mature_label_count, 40);
+        assert_ne!(
+            input.model_learning_candidate_count,
+            frozen.cohorts.policy_evaluation.eligible_count()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn offline_compute_preserves_heartbeat() {
+        let compute = Arc::new(ComputeExecutor::new().expect("compute executor"));
+        let worker = Arc::clone(&compute);
+        let cancel = CancellationToken::new();
+        let work_cancel = cancel.clone();
+        let work = task::spawn(async move {
+            worker
+                .run_offline_cancellable(
+                    OfflineMemory::try_gib(1).expect("memory budget"),
+                    &work_cancel,
+                    move || {
+                        thread::sleep(Duration::from_millis(100));
+                        Ok(())
+                    },
+                )
+                .await
+        });
+
+        timeout(Duration::from_millis(50), sleep(Duration::from_millis(10)))
+            .await
+            .expect("Tokio heartbeat must not wait for offline CPU");
+        work.await
+            .expect("offline task joins")
+            .expect("offline work succeeds");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn offline_compute_observes_cancel() {
+        let compute = Arc::new(ComputeExecutor::new().expect("compute executor"));
+        let cancel = CancellationToken::new();
+        let work_cancel = cancel.clone();
+        let closure_cancel = cancel.clone();
+        let worker = task::spawn(async move {
+            compute
+                .run_offline_cancellable(
+                    OfflineMemory::try_gib(1).expect("memory budget"),
+                    &work_cancel,
+                    move || -> QuantResult<()> {
+                        loop {
+                            require_running(&closure_cancel, "drift test kernel")?;
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                    },
+                )
+                .await
+        });
+        task::yield_now().await;
+        cancel.cancel();
+
+        let error = timeout(Duration::from_secs(1), worker)
+            .await
+            .expect("cooperative kernel stops")
+            .expect("offline task joins")
+            .expect_err("cancelled kernel fails closed");
+        assert!(error.to_string().contains("cancelled"));
+    }
 }

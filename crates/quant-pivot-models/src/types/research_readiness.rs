@@ -174,9 +174,15 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
         ),
         pg_binding(
             Source::GammaMarketIdentity,
-            Storage::PostgresVersionedProjection,
-            "market",
-            "updated_at",
+            Storage::PostgresLedger,
+            "catalog_event_change",
+            "source_effective_at",
+        ),
+        pg_binding(
+            Source::GammaMarketIdentity,
+            Storage::PostgresLedger,
+            "catalog_market_change",
+            "source_effective_at",
         ),
         pg_binding(
             Source::ClobMarketInfo,
@@ -492,7 +498,7 @@ mod tests {
         ContentHash, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION, ResearchReadinessSource,
         ResearchSourceBinding, ResearchSourceRegistry, ResearchSourceStorageKind,
         ResearchSourceTimeEncoding, RetentionRunwayEvidenceV1, RetentionSourceObservationV1,
-        SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1,
+        SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1, source_bindings,
     };
 
     fn observed_at() -> DateTime<Utc> {
@@ -532,6 +538,42 @@ mod tests {
 
     fn hash(index: u8) -> ContentHash {
         ContentHash::parse(&format!("blake3:{index:064x}")).expect("hash")
+    }
+
+    #[test]
+    fn gamma_uses_catalog_ledger() {
+        let bindings = source_bindings();
+        let gamma = bindings
+            .iter()
+            .filter(|binding| binding.source == ResearchReadinessSource::GammaMarketIdentity)
+            .map(|binding| {
+                (
+                    binding.storage,
+                    binding.object.as_str(),
+                    binding.time_column.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            gamma,
+            vec![
+                (
+                    ResearchSourceStorageKind::PostgresLedger,
+                    "catalog_event_change",
+                    "source_effective_at",
+                ),
+                (
+                    ResearchSourceStorageKind::PostgresLedger,
+                    "catalog_market_change",
+                    "source_effective_at",
+                ),
+            ]
+        );
+        assert!(bindings.iter().all(|binding| {
+            binding.storage != ResearchSourceStorageKind::PostgresVersionedProjection
+                || (binding.source == ResearchReadinessSource::ClobMarketInfo
+                    && binding.object == "clob_market_info_version")
+        }));
     }
 
     #[test]

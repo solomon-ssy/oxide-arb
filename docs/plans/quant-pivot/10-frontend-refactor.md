@@ -7,9 +7,10 @@
 ## 1. 产品定位
 
 Operator Console 围绕 `RecommendationReport` 建立研究、决策、执行与治理闭环。默认
-`report_only` 仍读取真实 venue account 做 sizing；它不是 paper trading，也不是 dry-run。执行入口
-只能由 `OrderIntent` 进入，并由 runtime mode、approval、admission、kill-switch 与 settlement policy
-逐层 fail closed。
+报告始终读取真实 venue account 做 sizing；不存在 paper trading 或 dry-run。执行入口
+只能由 `OrderIntent` 进入，recommendation 冻结的 `ExecutionAuthorityCeiling`/blockers、当前
+`EntryAuthorizationPolicy`、不可变 `AuthorizationEvidence`、kill switch、account recovery 与 admission
+逐层 fail closed；`SettlementWritePolicy` 保持独立。
 
 ## 2. 信息架构
 
@@ -48,17 +49,27 @@ Operator Console 围绕 `RecommendationReport` 建立研究、决策、执行与
 - Pinia 只保存跨页连接状态、revision、短生命周期选择和 market book 热点缓存，不保存分页列表事实。
 - 所有 money/price/shares/bps wire value 在 TypeScript 中保持 decimal string。
 - mutation 必须经过统一 governed action，携带 reason、确认词、request id 与审计上下文；403/409/422 不得吞掉。
-- 运行模式、审批、执行、结算和策略激活均 fail closed。页面不得通过隐藏按钮替代服务端 AuthZ。
+- entry authorization、kill switch、intent 授权、执行、结算和策略激活各自 fail closed。页面不得通过隐藏按钮替代服务端 AuthZ。
 
 ## 5. 发布闭环
 
 `pnpm test:e2e:ui-release-closure` 在两个全新 production-stack 环境中重复运行：
 
-- 10 个真实后端、真实 PostgreSQL/Redis 的功能 spec；禁止 `page.route()` 伪造业务响应。
-- 50 张视觉证据：12 页桌面 dark/light、12 页移动 dark、14 个桌面 dark 关键态。
+- 18 个 functional Chromium 场景分为两类：14 个场景走真实 production-composed backend
+  与 disposable PostgreSQL/Redis/ClickHouse；4 个显式 `page.route()` / `page.routeWebSocket()`
+  场景只验证 MTM/执行对比/Route health 展示、aggressive/passive intent 确认、incentive
+  ledger 响应式展示和 break-glass request-body/acting-role/state-transition 的 UI wire contract。
+  后一类不得作为对应 backend mutation、持久化或恢复闭环的 E2E 证据。
+- 51 张视觉证据：12 页桌面 dark/light、12 页移动 dark、1 页 tablet dark Dashboard、
+  14 个桌面 dark 关键态。
 - 每张图要求 `data-ui-ready=true`、HTTP drain、ECharts finished、无 skeleton/toast、字体就绪、Axe serious/critical 为 0、横向 overflow 为 0。
 - 像素阈值 `threshold=0.2`、`maxDiffPixelRatio=0.002`。
 - manifest 记录前后端 build id、seed/data revision、viewport、theme、locale、timezone、scenario 与截图 SHA-256；两次 fresh boot 的场景和数据 revision 必须一致。
+
+该 Browser gate 使用 `governed-feedback` fixture，不证明 S4 的生产 15-stage feedback DAG、
+CandidateReady permit、disposable Route commit 或 N→N+1 forward feedback closure。该闭环仅由
+`cargo xtask production-stack feedback-closure --runs 1 --retain-artifacts` 在 drain 后生成、
+readback 并验证的 typed `feedback-closure-manifest.json` 证明；两类证据不得互相替代。
 
 ## 6. 当前实施索引
 

@@ -30,10 +30,11 @@ use quant_pivot_storage::{
         },
     },
 };
+use quant_pivot_system_tests::cargo_env::CargoCommandExt;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use serde::Deserialize;
 use testcontainers::{
-    ContainerAsync, GenericImage, ImageExt,
+    ContainerAsync, CopyDataSource, GenericImage, ImageExt,
     core::{CmdWaitFor, ExecCommand, WaitFor, wait::HttpWaitStrategy},
     runners::AsyncRunner,
 };
@@ -52,6 +53,8 @@ const BOOTSTRAP_ADMIN_PASSWORD: &str = "w9-bootstrap-admin-test-secret";
 const BOOTSTRAP_ADMIN_PASSWORD_ENV: &str = "QUANT_PIVOT_BOOTSTRAP__ADMIN_PASSWORD_FILE";
 const JOURNAL_FILE_NAME: &str = "active-operation.json";
 const CLEAN_BOOTSTRAP_CONFIRMATION: &str = "DELETE_ALL_PREPRODUCTION_DATA_AND_REBOOTSTRAP";
+const CLICKHOUSE_GOVERNANCE_CONFIG: &[u8] =
+    include_bytes!("../../../docker/clickhouse/config.d/quant-pivot-governance.xml");
 
 #[derive(Debug, Deserialize)]
 struct ResetFailure {
@@ -111,12 +114,17 @@ async fn clean_recovers_restores_backups() {
     configure_disposable_postgres_user(&postgres).await;
     let clickhouse = GenericImage::new("clickhouse/clickhouse-server", "26.5")
         .with_exposed_port(8123.into())
+        .with_exposed_port(9363.into())
         .with_wait_for(WaitFor::http(
             HttpWaitStrategy::new("/ping")
                 .with_port(8123.into())
                 .with_expected_status_code(200u16),
         ))
         .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
+        .with_copy_to(
+            "/etc/clickhouse-server/config.d/quant-pivot-governance.xml",
+            CopyDataSource::Data(CLICKHOUSE_GOVERNANCE_CONFIG.to_vec()),
+        )
         .with_startup_timeout(Duration::from_mins(2))
         .start()
         .await
@@ -193,7 +201,7 @@ async fn clean_recovers_restores_backups() {
     set_postgres_create_allowed(&postgres, true).await;
     assert_failed_apply(&postgres_failed_output, "PostgreSQL");
     assert_failed_journal(&journal_file, postgres_failed_operation, "applying");
-    assert_postgres_failure_state(&deploy).await;
+    assert_postgres_failure_state(&deploy, &postgres_failed_output).await;
 
     let postgres_recovered_operation =
         full_reset_cycle(&config_file, &journal_file, &bootstrap_password_file).await;
@@ -202,11 +210,11 @@ async fn clean_recovers_restores_backups() {
     assert_clean_recovery_state(&deploy).await;
 
     seed_partial_reset_markers(&deploy).await;
-    set_clickhouse_drop_limit(&deploy, 1).await;
+    set_clickhouse_drop_allowed(&deploy, false).await;
     let clickhouse_failed_operation = plan_reset(&config_file, &journal_file).await;
     let clickhouse_failed_output =
         apply_planned_reset(&config_file, &journal_file, &bootstrap_password_file).await;
-    set_clickhouse_drop_limit(&deploy, 0).await;
+    set_clickhouse_drop_allowed(&deploy, true).await;
     assert_failed_apply(&clickhouse_failed_output, "ClickHouse");
     assert_failed_journal(&journal_file, clickhouse_failed_operation, "postgres_reset");
     assert_clickhouse_failure_state(&deploy).await;
@@ -295,7 +303,7 @@ async fn assert_standard_fresh_deployment(
             .expect("decode default settlement write policy"),
         "disabled"
     );
-    postgres.close().await;
+    postgres.close().await.expect("close PostgreSQL pool");
 }
 
 async fn full_reset_cycle(
@@ -374,7 +382,12 @@ async fn apply_planned_reset(
 }
 
 fn assert_failed_apply(output: &Output, expected_system: &str) {
-    assert!(!output.status.success(), "injected apply must fail");
+    assert!(
+        !output.status.success(),
+        "injected {expected_system} apply must fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_output_redacted(output);
     assert!(
         String::from_utf8_lossy(&output.stderr).contains(expected_system),
@@ -442,6 +455,7 @@ async fn run_xtask(args: Vec<String>, bootstrap_password_file: Option<&Path>) ->
         .and_then(Path::parent)
         .expect("system-test crate must live under workspace crates/");
     let mut command = Command::new("cargo");
+    command.as_std_mut().clear_caller_metadata();
     command
         .current_dir(workspace_root)
         .args(["run", "--quiet", "-p", "quant-pivot-xtask", "--"])
@@ -493,7 +507,7 @@ async fn seed_partial_reset_markers(deploy: &DeployConfig) {
         .execute_unprepared("CREATE TABLE w9_reset_marker (value bigint PRIMARY KEY)")
         .await
         .expect("create PostgreSQL reset marker");
-    postgres.close().await;
+    postgres.close().await.expect("close PostgreSQL pool");
 
     let clickhouse = ClickHousePool::connect(&deploy.db.clickhouse)
         .await
@@ -525,15 +539,21 @@ async fn seed_partial_reset_markers(deploy: &DeployConfig) {
         .expect("seed foreign Redis marker");
 }
 
-async fn set_clickhouse_drop_limit(deploy: &DeployConfig, bytes: u64) {
-    ClickHousePool::from_config(&deploy.db.clickhouse)
+async fn set_clickhouse_drop_allowed(deploy: &DeployConfig, allowed: bool) {
+    let mut admin = deploy.db.clickhouse.clone();
+    "default".clone_into(&mut admin.database);
+    "default".clone_into(&mut admin.user);
+    let statement = if allowed {
+        "GRANT DROP DATABASE ON quant_pivot.* TO quant_pivot"
+    } else {
+        "REVOKE DROP DATABASE ON quant_pivot.* FROM quant_pivot"
+    };
+    ClickHousePool::from_config(&admin)
         .client()
-        .query(&format!(
-            "ALTER USER quant_pivot SETTINGS max_table_size_to_drop = {bytes}"
-        ))
+        .query(statement)
         .execute()
         .await
-        .expect("set disposable ClickHouse drop-size limit");
+        .expect("set disposable ClickHouse DROP DATABASE permission");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let active_queries = active_preproduction_query_count(&deploy.db.clickhouse)
@@ -544,7 +564,7 @@ async fn set_clickhouse_drop_limit(deploy: &DeployConfig, bytes: u64) {
         }
         assert!(
             Instant::now() < deadline,
-            "ClickHouse drop-size limit update did not reach a quiescent inventory: \
+            "ClickHouse DROP DATABASE permission update did not reach a quiescent inventory: \
              active_queries={active_queries}"
         );
         sleep(Duration::from_millis(25)).await;
@@ -661,11 +681,16 @@ async fn set_redis_unlink_allowed(container: &ContainerAsync<GenericImage>, allo
         .expect("set disposable Redis UNLINK permission");
 }
 
-async fn assert_postgres_failure_state(deploy: &DeployConfig) {
+async fn assert_postgres_failure_state(deploy: &DeployConfig, output: &Output) {
     let inventory = inspect_preproduction_postgres(&deploy.db.postgres)
         .await
         .expect("inspect PostgreSQL failure state");
-    assert!(!inventory.database_exists);
+    assert!(
+        !inventory.database_exists,
+        "PostgreSQL fault must occur after the owned database is dropped: {inventory:?}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(clickhouse_marker_exists(deploy).await);
     assert_redis_markers_preserved(deploy).await;
 }
@@ -756,7 +781,7 @@ async fn assert_clean_recovery_state(deploy: &DeployConfig) {
             .expect("decode research evidence count"),
         0
     );
-    postgres.close().await;
+    postgres.close().await.expect("close PostgreSQL pool");
 }
 
 async fn assert_reset_rejects_owners(
@@ -779,7 +804,7 @@ async fn assert_reset_rejects_owners(
         String::from_utf8_lossy(&postgres_denial.stderr)
             .contains("PostgreSQL target connections remain")
     );
-    postgres.close().await;
+    postgres.close().await.expect("close PostgreSQL pool");
 
     let clickhouse = ClickHousePool::from_config(&deploy.db.clickhouse);
     let query_client = clickhouse.client().clone();
@@ -862,7 +887,7 @@ async fn postgres_marker_exists(config: &PostgresConfig) -> bool {
     let exists = row
         .try_get::<bool>("", "exists")
         .expect("decode marker result");
-    pool.close().await;
+    pool.close().await.expect("close PostgreSQL marker pool");
     exists
 }
 
@@ -971,8 +996,14 @@ async fn verify_postgres_backup_restore(
         .expect("restored policy bundle");
     assert_eq!(source_bundle.generation, restored_bundle.generation);
     assert_eq!(source_bundle.snapshot_hash, restored_bundle.snapshot_hash);
-    source.close().await;
-    restored.close().await;
+    source
+        .close()
+        .await
+        .expect("close PostgreSQL backup source");
+    restored
+        .close()
+        .await
+        .expect("close PostgreSQL restored target");
 }
 
 async fn verify_clickhouse_backup_restore(deploy: &DeployConfig) {

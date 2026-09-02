@@ -121,6 +121,11 @@ async fn report_pipeline_recommendations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn report_diagnostics_full_boundary() {
+    Box::pin(report_pipeline::diagnostics_full_boundary()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn report_route_stays_pinned() {
     Box::pin(postgres::with_postgres_suite(
         report_pipeline::pinned_route_uses_generation(),

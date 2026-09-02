@@ -12,7 +12,7 @@ use rust_decimal_macros::dec;
 #[test]
 fn coverage_requires_new_labels() {
     let outcome = CoverageGateInput {
-        policy_evaluation_count: 100,
+        model_learning_candidate_count: 100,
         mature_label_count: 80,
         new_mature_label_count: 4,
         minimum_mature_labels: 50,

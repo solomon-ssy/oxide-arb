@@ -1,14 +1,22 @@
 //! Canonical research fixtures shared by integration tests.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+    time::{Duration as StdDuration, Instant as StdInstant},
+};
 
 use chrono::{DateTime, Duration, Utc};
+use quant_pivot_api::exchange::history_client::canonical_digest;
+use quant_pivot_core::app::exchange_history_worker::ExchangeHistoryWorker;
 use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChDigest, ChPrice,
-        ChSchemaVersion, ChShares, ChUsd, MarketResolutionFactInput, MarketResolutionRow,
+        ChSchemaVersion, ChShares, ChUsd, ExchangeHistoryAcceptanceRow, MarketResolutionFactInput,
+        MarketResolutionRow,
     },
+    config::FinalizedExchangeHistoryConfig,
     domain::{
         data_plane::{
             CreateHistoryFitSeal, DecisionSource, ExchangeHistoryChunkStatus,
@@ -35,10 +43,11 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     types::{
-        ArtifactUri, BookSnapshotRef, BookSnapshotSource, Bps, CapabilityRegistryHashes,
-        CatalogDecisionRef, CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId,
-        CatalogMarketObjectId, CatalogSyncBatchId, ClobFeeDetails, ClobMarketInfoVersion,
-        ClobMarketInfoVersionId, ClobTokenDescriptor, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
+        ArtifactUri, BookSnapshotRef, BookSnapshotSource, Bps,
+        CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID, CapabilityRegistryHashes, CatalogDecisionRef,
+        CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId, CatalogMarketObjectId,
+        CatalogSyncBatchId, ClobFeeDetails, ClobMarketInfoVersion, ClobMarketInfoVersionId,
+        ClobTokenDescriptor, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
         DATASET_COHORT_MANIFEST_FORMAT_VERSION, DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
         DatasetCohortArtifactRef, DatasetCohortCounts, DatasetCohortManifest, DatasetCoverage,
         DatasetManifest, DatasetSourceLineage, DecisionCaptureEvidence, DecisionPolicySnapshotId,
@@ -49,11 +58,12 @@ use quant_pivot_models::{
         SchemaContractVersion, SchemaVersion, Shares, SourceSliceCatalogProof, SourceSliceId,
         SourceSliceManifest, SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef,
         SourceSlicePitCutoff, TokenId, TrainingDatasetId, TrainingHorizonsSecs,
-        TrainingSampleSources, Usd,
+        TrainingSampleSources, Usd, WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID,
         backtest::{
             BacktestPortfolioFunnel, CscvSelectionEvidence, CscvTrialDescriptor,
             CscvTrialGridBinding,
         },
+        builtin_research_profiles,
         factor::{
             FactorAlphaOrientation, FactorComputationContract, FactorDefinitionDocument,
             FactorDefinitionRef, FactorOutputSemantics, FactorServingPlane,
@@ -83,29 +93,260 @@ use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 
-use super::seeded_uuid;
+use super::{
+    production_history::{
+        DeterministicPolygonChain, MODEL_CONFIRMATION_BLOCKS, polygon_block_hash,
+    },
+    seeded_uuid,
+};
 
-const SOURCE_FIXTURE_BLOCK: i64 = 1;
-const SOURCE_FIXTURE_CHAIN_ID: i64 = 137;
+const POLYGON_CHAIN_ID: i64 = 137;
 
-fn source_fit_plan(created_at: DateTime<Utc>) -> NewExchangeHistoryPlan {
-    NewExchangeHistoryPlan {
-        plan_id: seeded_uuid("source-slice-history-plan"),
-        chain_id: SOURCE_FIXTURE_CHAIN_ID,
-        policy_hash: ContentHash::from_bytes([0x41; 32]),
-        bootstrap_profile_set_hash: ContentHash::from_bytes([0x42; 32]),
-        finalized_anchor_block: 3,
-        finalized_anchor_hash: EvmBlockHash::parse(format!("0x{}", "43".repeat(32)))
-            .expect("fixture finalized anchor hash"),
-        finalized_anchor_timestamp: 1,
-        activation_from_block: 2,
-        activation_through_block: 2,
-        crypto_required_from_block: 2,
-        weather_required_from_block: 1,
-        retention_from_block: SOURCE_FIXTURE_BLOCK,
-        retention_through_block: SOURCE_FIXTURE_BLOCK,
-        created_at,
+#[derive(Clone)]
+struct SourceFitHistory {
+    plan: NewExchangeHistoryPlan,
+    chunk: NewExchangeHistoryChunk,
+}
+
+impl SourceFitHistory {
+    fn build() -> QuantResult<Self> {
+        let now =
+            DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).ok_or_else(|| {
+                ResearchError::DatasetBuild {
+                    detail: "source-fit history clock is outside millisecond precision".to_owned(),
+                }
+            })?;
+        let chain = DeterministicPolygonChain::at(now.timestamp(), StdInstant::now());
+        let head = chain.head_after(StdDuration::ZERO);
+        let model_head = head
+            .block_number
+            .checked_sub(MODEL_CONFIRMATION_BLOCKS)
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "source-fit history head is below N+12".to_owned(),
+            })?;
+        let profiles =
+            builtin_research_profiles().map_err(|detail| ResearchError::DatasetBuild {
+                detail: format!("source-fit bootstrap profiles are invalid: {detail}"),
+            })?;
+        let crypto_days = Self::profile_days(&profiles, CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID)?;
+        let weather_days =
+            Self::profile_days(&profiles, WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID)?;
+        let policy = FinalizedExchangeHistoryConfig::default();
+        let activation_from =
+            Self::frontier_start(&chain, head.timestamp, policy.activation_frontier_days)?;
+        let crypto_from = Self::frontier_start(&chain, head.timestamp, crypto_days)?;
+        let weather_from = Self::frontier_start(&chain, head.timestamp, weather_days)?;
+        let retention_from =
+            Self::frontier_start(&chain, head.timestamp, policy.retention_frontier_days)?;
+        let retention_top =
+            activation_from
+                .checked_sub(1)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "source-fit retention boundary underflowed".to_owned(),
+                })?;
+        let boundary = DeterministicPolygonChain::block(retention_top, head).ok_or_else(|| {
+            ResearchError::DatasetBuild {
+                detail: "source-fit retention boundary is unavailable".to_owned(),
+            }
+        })?;
+        let policy_hash = ExchangeHistoryWorker::availability_policy_hash(&policy)?;
+        let bootstrap_profile_set_hash = ExchangeHistoryWorker::bootstrap_profile_set_hash()?;
+        let finalized_anchor_hash =
+            Self::block_hash(polygon_block_hash(head.block_number), "finalized anchor")?;
+        let plan_id = ExchangeHistoryWorker::plan_id(
+            head.block_number,
+            &finalized_anchor_hash,
+            policy_hash,
+            bootstrap_profile_set_hash,
+        );
+        let plan = NewExchangeHistoryPlan {
+            plan_id,
+            chain_id: POLYGON_CHAIN_ID,
+            policy_hash,
+            bootstrap_profile_set_hash,
+            finalized_anchor_block: Self::block_i64(head.block_number, "finalized anchor")?,
+            finalized_anchor_hash,
+            finalized_anchor_timestamp: head.timestamp,
+            activation_from_block: Self::block_i64(activation_from, "activation start")?,
+            activation_through_block: Self::block_i64(model_head, "activation target")?,
+            crypto_required_from_block: Self::block_i64(crypto_from, "Crypto start")?,
+            weather_required_from_block: Self::block_i64(weather_from, "Weather start")?,
+            retention_from_block: Self::block_i64(retention_from, "retention start")?,
+            retention_through_block: Self::block_i64(retention_top, "retention target")?,
+            created_at: now,
+        };
+        let digest = ContentHash::from_bytes(canonical_digest(&[]).0);
+        let state_revision = now.timestamp_micros();
+        let chunk = NewExchangeHistoryChunk {
+            chunk_id: ExchangeHistoryWorker::chunk_id(
+                ExchangeHistoryFrontier::Retention,
+                retention_top,
+                retention_top,
+                digest,
+            ),
+            frontier: ExchangeHistoryFrontier::Retention,
+            from_block: Self::block_i64(retention_top, "fit chunk start")?,
+            to_block: Self::block_i64(retention_top, "fit chunk end")?,
+            status: ExchangeHistoryChunkStatus::Accepted,
+            attempt_count: 1,
+            hypersync_count: Some(0),
+            attestor_count: Some(0),
+            hypersync_digest: Some(digest),
+            attestor_digest: Some(digest),
+            first_block_hash: Some(Self::block_hash(boundary.hash.clone(), "fit chunk first")?),
+            last_block_hash: Some(Self::block_hash(boundary.hash, "fit chunk last")?),
+            archive_height: Some(Self::block_i64(head.block_number, "archive height")?),
+            continuity_basis: Some(ExchangeHistoryContinuityBasis::HyperSyncBoundaryHeaders),
+            continuity_block: Some(Self::block_i64(
+                retention_top.saturating_sub(1),
+                "fit chunk continuity",
+            )?),
+            continuity_hash: Some(Self::block_hash(
+                boundary.parent_hash,
+                "fit chunk continuity",
+            )?),
+            effective_through_at: DateTime::from_timestamp(boundary.timestamp, 0),
+            state_revision: Some(state_revision),
+            accepted_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        };
+        Ok(Self { plan, chunk })
     }
+
+    fn frontier_start(
+        chain: &DeterministicPolygonChain,
+        head_timestamp: i64,
+        days: u32,
+    ) -> QuantResult<u64> {
+        let target = head_timestamp
+            .checked_sub(i64::from(days).saturating_mul(86_400))
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "source-fit history frontier underflowed".to_owned(),
+            })?;
+        let before =
+            chain
+                .block_at_or_before(target)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "source-fit history frontier is unavailable".to_owned(),
+                })?;
+        Ok(if before.timestamp < target {
+            before.number.saturating_add(1)
+        } else {
+            before.number
+        })
+    }
+
+    fn block_i64(value: u64, field: &'static str) -> QuantResult<i64> {
+        i64::try_from(value).map_err(|error| {
+            ResearchError::DatasetBuild {
+                detail: format!("source-fit {field} block exceeds i64: {error}"),
+            }
+            .into()
+        })
+    }
+
+    fn block_hash(value: String, field: &'static str) -> QuantResult<EvmBlockHash> {
+        EvmBlockHash::parse(value).map_err(|error| {
+            ResearchError::DatasetBuild {
+                detail: format!("source-fit {field} hash is invalid: {error}"),
+            }
+            .into()
+        })
+    }
+
+    fn profile_days(profiles: &[ResearchProfileArtifact], profile_id: &str) -> QuantResult<u32> {
+        profiles
+            .iter()
+            .find(|profile| profile.profile_ref.id.as_str() == profile_id)
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: format!("source-fit bootstrap profile {profile_id} is missing"),
+            })?
+            .spec
+            .required_days()
+            .map_err(|detail| ResearchError::DatasetBuild { detail }.into())
+    }
+
+    fn acceptance_row(&self) -> QuantResult<ExchangeHistoryAcceptanceRow> {
+        let chunk = &self.chunk;
+        let digest = chunk
+            .hypersync_digest
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "accepted source-fit chunk has no provider digest".to_owned(),
+            })?;
+        let first_block_hash =
+            chunk
+                .first_block_hash
+                .as_ref()
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "accepted source-fit chunk has no first block hash".to_owned(),
+                })?;
+        let last_block_hash =
+            chunk
+                .last_block_hash
+                .as_ref()
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "accepted source-fit chunk has no last block hash".to_owned(),
+                })?;
+        let effective_through_at =
+            chunk
+                .effective_through_at
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "accepted source-fit chunk has no effective-through time".to_owned(),
+                })?;
+        let accepted_at = chunk
+            .accepted_at
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "accepted source-fit chunk has no acceptance time".to_owned(),
+            })?;
+        let state_revision = chunk
+            .state_revision
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "accepted source-fit chunk has no state revision".to_owned(),
+            })?;
+        Ok(ExchangeHistoryAcceptanceRow {
+            chunk_id: chunk.chunk_id,
+            frontier: chunk.frontier.as_str().to_owned(),
+            from_block: u64::try_from(chunk.from_block).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!("source-fit acceptance start is invalid: {error}"),
+                }
+            })?,
+            to_block: u64::try_from(chunk.to_block).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!("source-fit acceptance end is invalid: {error}"),
+                }
+            })?,
+            log_count: u64::try_from(chunk.hypersync_count.unwrap_or_default()).map_err(
+                |error| ResearchError::DatasetBuild {
+                    detail: format!("source-fit acceptance count is invalid: {error}"),
+                },
+            )?,
+            provider_digest: ChDigest::from(digest),
+            first_block_hash: first_block_hash.as_str().to_owned(),
+            last_block_hash: last_block_hash.as_str().to_owned(),
+            effective_through_at: effective_through_at.timestamp_millis(),
+            accepted_at: accepted_at.timestamp_millis(),
+            active: 1,
+            state_revision: u64::try_from(state_revision).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!("source-fit acceptance revision is invalid: {error}"),
+                }
+            })?,
+            schema_version: ExchangeHistoryAcceptanceRow::SCHEMA_VERSION,
+        })
+    }
+
+    fn shared() -> &'static Self {
+        static HISTORY: OnceLock<SourceFitHistory> = OnceLock::new();
+        HISTORY.get_or_init(|| Self::build().expect("build canonical source-fit history"))
+    }
+}
+
+/// Canonical CH commit marker installed before a production-stack binary can
+/// observe the matching PG source-fit cursor.
+pub fn source_fit_acceptance_row() -> QuantResult<ExchangeHistoryAcceptanceRow> {
+    SourceFitHistory::shared().acceptance_row()
 }
 
 fn source_fit_command(
@@ -113,7 +354,6 @@ fn source_fit_command(
     research_program_hash: ContentHash,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
-    created_at: DateTime<Utc>,
 ) -> QuantResult<CreateHistoryFitSeal> {
     let fit_seal_id = seeded_uuid(&format!(
         "source-slice-fit-seal:{}:{}:{}:{}",
@@ -123,26 +363,29 @@ fn source_fit_command(
         window_end.timestamp_micros(),
     ))
     .into();
-    let chunk_id = seeded_uuid(&format!("source-slice-fit-chunk:{fit_seal_id}"));
+    let history = SourceFitHistory::shared();
+    let state_revision = history
+        .chunk
+        .state_revision
+        .expect("accepted source-fit chunk state revision");
     let chunks = vec![HistorySealChunkRef {
-        chunk_id,
-        frontier: ExchangeHistoryFrontier::Retention,
-        state_revision: 1,
-        from_block: SOURCE_FIXTURE_BLOCK,
-        to_block: SOURCE_FIXTURE_BLOCK,
+        chunk_id: history.chunk.chunk_id,
+        frontier: history.chunk.frontier,
+        state_revision,
+        from_block: history.chunk.from_block,
+        to_block: history.chunk.to_block,
     }];
-    let plan = source_fit_plan(created_at);
     let mut command = CreateHistoryFitSeal {
         seal: NewHistoryFitSeal {
             fit_seal_id,
             seal_hash: ContentHash::from_bytes([0; 32]),
-            plan_id: plan.plan_id,
-            window_from_block: SOURCE_FIXTURE_BLOCK,
-            window_to_block: SOURCE_FIXTURE_BLOCK,
-            policy_hash: plan.policy_hash,
+            plan_id: history.plan.plan_id,
+            window_from_block: history.chunk.from_block,
+            window_to_block: history.chunk.to_block,
+            policy_hash: history.plan.policy_hash,
             profile_hash: profile_ref.content_hash,
             cohort_hash: research_program_hash,
-            created_at,
+            created_at: history.plan.created_at,
         },
         chunks,
     };
@@ -159,7 +402,6 @@ async fn seed_source_fit_seal(
         manifest.research_program_hash,
         manifest.window_start,
         manifest.window_end,
-        manifest.materialized_at,
     )?;
     if command.seal.fit_seal_id != manifest.fit_seal_id
         || command.seal.seal_hash != manifest.fit_seal_hash
@@ -170,38 +412,9 @@ async fn seed_source_fit_seal(
         .into());
     }
     let repository = PgExchangeHistoryRepository::new(db.clone());
-    repository
-        .create_or_load_plan(source_fit_plan(manifest.materialized_at))
-        .await?;
-    let chunk = &command.chunks[0];
-    let digest = ContentHash::from_bytes([0x44; 32]);
-    let block_hash =
-        EvmBlockHash::parse(format!("0x{}", "45".repeat(32))).expect("fixture accepted block hash");
-    repository
-        .save_chunk(NewExchangeHistoryChunk {
-            chunk_id: chunk.chunk_id,
-            frontier: chunk.frontier,
-            from_block: chunk.from_block,
-            to_block: chunk.to_block,
-            status: ExchangeHistoryChunkStatus::Accepted,
-            attempt_count: 1,
-            hypersync_count: Some(0),
-            attestor_count: Some(0),
-            hypersync_digest: Some(digest),
-            attestor_digest: Some(digest),
-            first_block_hash: Some(block_hash.clone()),
-            last_block_hash: Some(block_hash.clone()),
-            archive_height: Some(3),
-            continuity_basis: Some(ExchangeHistoryContinuityBasis::HyperSyncBoundaryHeaders),
-            continuity_block: Some(0),
-            continuity_hash: Some(block_hash),
-            effective_through_at: Some(manifest.window_end),
-            state_revision: Some(chunk.state_revision),
-            accepted_at: Some(manifest.materialized_at),
-            created_at: manifest.materialized_at,
-            updated_at: manifest.materialized_at,
-        })
-        .await?;
+    let history = SourceFitHistory::shared();
+    repository.create_or_load_plan(history.plan.clone()).await?;
+    repository.save_chunk(history.chunk.clone()).await?;
     repository.create_fit_seal(command).await?;
     Ok(())
 }
@@ -1351,7 +1564,7 @@ impl ReplayableSourceRecords {
                 },
             ],
             tick_size: TickSize::Hundredth,
-            minimum_order_size: dec!(1),
+            minimum_order_size: Shares::new(dec!(1)),
             neg_risk: false,
             taker_order_delay_enabled: false,
             minimum_order_age_secs: None,
@@ -1612,7 +1825,6 @@ fn replayable_manifest(
         fixture.research_program_hash,
         fixture.window_start,
         fixture.window_end,
-        pit_cutoff,
     )?;
     Ok(SourceSliceManifest {
         format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
@@ -1850,7 +2062,6 @@ pub async fn seed_dataset_source(
         research_program_hash,
         input.window_start,
         input.window_end,
-        input.pit_cutoff,
     )?;
     let manifest = SourceSliceManifest {
         format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
@@ -1959,7 +2170,6 @@ async fn seed_evaluation_source(
         manifest.research_program_hash,
         input.window_start,
         input.window_end,
-        input.pit_cutoff,
     )?;
     manifest.fit_seal_id = fit_seal.seal.fit_seal_id;
     manifest.fit_seal_hash = fit_seal.seal.seal_hash;
@@ -2072,4 +2282,113 @@ pub async fn seed_evaluation_dataset(
         )
         .await?;
     Ok(dataset_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_models::{
+        config::FinalizedExchangeHistoryConfig,
+        domain::data_plane::{ExchangeHistoryChunkStatus, ExchangeHistoryFrontier},
+    };
+
+    use super::{
+        ExchangeHistoryWorker, POLYGON_CHAIN_ID, SourceFitHistory, polygon_block_hash,
+        source_fit_acceptance_row,
+    };
+
+    #[test]
+    fn source_fit_contract() {
+        let history = SourceFitHistory::shared();
+        let expected_policy = ExchangeHistoryWorker::availability_policy_hash(
+            &FinalizedExchangeHistoryConfig::default(),
+        )
+        .expect("hash default history policy");
+        let expected_profiles = ExchangeHistoryWorker::bootstrap_profile_set_hash()
+            .expect("hash bootstrap profile set");
+
+        assert_eq!(history.plan.chain_id, POLYGON_CHAIN_ID);
+        assert_eq!(history.plan.policy_hash, expected_policy);
+        assert_eq!(history.plan.bootstrap_profile_set_hash, expected_profiles);
+        assert_eq!(
+            history.plan.plan_id,
+            ExchangeHistoryWorker::plan_id(
+                u64::try_from(history.plan.finalized_anchor_block)
+                    .expect("fixture anchor block fits u64"),
+                &history.plan.finalized_anchor_hash,
+                expected_policy,
+                expected_profiles,
+            )
+        );
+        assert_eq!(
+            history.plan.retention_through_block + 1,
+            history.plan.activation_from_block
+        );
+        assert_eq!(history.chunk.frontier, ExchangeHistoryFrontier::Retention);
+        assert_eq!(history.chunk.status, ExchangeHistoryChunkStatus::Accepted);
+        assert_eq!(
+            history.chunk.from_block,
+            history.plan.retention_through_block
+        );
+        assert_eq!(history.chunk.to_block, history.plan.retention_through_block);
+        let chunk_block =
+            u64::try_from(history.chunk.from_block).expect("fixture history chunk block fits u64");
+        let digest = history
+            .chunk
+            .hypersync_digest
+            .expect("fixture history chunk digest");
+        assert_eq!(
+            history.chunk.chunk_id,
+            ExchangeHistoryWorker::chunk_id(
+                ExchangeHistoryFrontier::Retention,
+                chunk_block,
+                chunk_block,
+                digest,
+            )
+        );
+        assert_eq!(
+            history
+                .chunk
+                .first_block_hash
+                .as_ref()
+                .expect("fixture first block hash")
+                .as_str(),
+            polygon_block_hash(chunk_block)
+        );
+        assert_eq!(
+            history
+                .chunk
+                .continuity_hash
+                .as_ref()
+                .expect("fixture continuity hash")
+                .as_str(),
+            polygon_block_hash(chunk_block - 1)
+        );
+        assert!(
+            history
+                .chunk
+                .state_revision
+                .is_some_and(|revision| revision > 0)
+        );
+        assert!(history.chunk.first_block_hash.is_some());
+        assert!(history.chunk.last_block_hash.is_some());
+        assert!(history.chunk.continuity_hash.is_some());
+
+        let acceptance = source_fit_acceptance_row().expect("build source-fit CH acceptance");
+        assert_eq!(acceptance.chunk_id, history.chunk.chunk_id);
+        assert_eq!(acceptance.frontier, history.chunk.frontier.as_str());
+        assert_eq!(acceptance.from_block, chunk_block);
+        assert_eq!(acceptance.to_block, chunk_block);
+        assert_eq!(
+            acceptance.state_revision,
+            u64::try_from(
+                history
+                    .chunk
+                    .state_revision
+                    .expect("fixture state revision")
+            )
+            .expect("fixture state revision fits u64")
+        );
+        assert_eq!(acceptance.active, 1);
+        assert_eq!(acceptance.log_count, 0);
+    }
 }

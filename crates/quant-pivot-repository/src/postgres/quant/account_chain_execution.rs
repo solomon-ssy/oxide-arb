@@ -1,4 +1,4 @@
-//! PostgreSQL account-chain execution ledger.
+//! `PostgreSQL` account-chain execution ledger.
 
 use quant_pivot_error::storage::{StorageError, entity::QUANT_ACCOUNT_CHAIN_EXECUTION};
 use quant_pivot_models::{

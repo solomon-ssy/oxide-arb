@@ -19,6 +19,7 @@ use quant_pivot_models::{
             fee::{MarketFeeSchedule, MarketMakerRebateEvidence},
             registry::MarketRegistryInfo,
         },
+        order::PolymarketOrderRules,
     },
     enums::market::MarketStatus,
     types::{Bps, FinalizedExecutionEvidence, MarketId, MicroUsd, Price, TokenId, Usd},
@@ -334,6 +335,8 @@ pub struct ResolvedMarketContext {
     pub created_at: Option<DateTime<Utc>>,
     /// Point-in-time fee schedule from the independently versioned CLOB market-info source.
     pub fee_schedule: Option<MarketFeeSchedule>,
+    /// Point-in-time order-grid and minimum-size rules from the same CLOB source.
+    pub order_rules: Option<PolymarketOrderRules>,
     /// Point-in-time maker incentive truth from the Gamma catalog source.
     pub maker_rebate_evidence: MarketMakerRebateEvidence,
 }
@@ -352,6 +355,7 @@ impl ResolvedMarketContext {
             end_date: info.end_date,
             created_at: info.created_at,
             fee_schedule: None,
+            order_rules: None,
             maker_rebate_evidence: info.maker_rebate_evidence.clone(),
         }
     }
@@ -369,6 +373,7 @@ impl From<MarketContextAt> for ResolvedMarketContext {
             end_date: context.end_date,
             created_at: context.created_at,
             fee_schedule: context.fee_schedule,
+            order_rules: context.order_rules,
             maker_rebate_evidence: context.maker_rebate_evidence,
         }
     }

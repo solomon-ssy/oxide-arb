@@ -26,8 +26,6 @@ redis = { workspace = true }
 clickhouse = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-blake3 = { workspace = true }
-url = { workspace = true }
 flume = { workspace = true }
 parking_lot = { workspace = true }
 

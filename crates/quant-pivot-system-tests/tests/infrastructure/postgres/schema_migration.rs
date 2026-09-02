@@ -183,24 +183,34 @@ pub async fn boot_rejects_unknown_schema() {
     );
 }
 
-pub async fn immutable_migrations_empty_database() {
+pub async fn bootstrap_down_rejected() {
     let (db, _container, config) = setup_empty_pg().await;
     apply_postgres_migrations(&config, &db)
         .await
         .expect("apply migrations");
-
-    PostgresMigrator::down(&db, None)
-        .await
-        .expect("roll back all migrations");
-    assert!(!relation_exists(&db, "quant_report_schedule_state").await);
-
-    PostgresMigrator::up(&db, None)
-        .await
-        .expect("reapply all migrations");
     finalize_schema_deployment(&db)
         .await
-        .expect("finalize reapplied schema");
+        .expect("finalize bootstrap");
+    let before = verify_schema(&db)
+        .await
+        .expect("verify bootstrap before down");
+
+    let error = PostgresMigrator::down(&db, Some(1))
+        .await
+        .expect_err("fresh bootstrap must reject schema rollback");
+    assert!(
+        error
+            .to_string()
+            .contains("fresh-bootstrap schema has no down path")
+    );
+    let after = verify_schema(&db)
+        .await
+        .expect("verify bootstrap after down");
+    assert_eq!(after, before);
+    assert_eq!(after.migration_count, 1);
     assert!(relation_exists(&db, "quant_report_schedule_state").await);
+    assert!(relation_exists(&db, "seaql_migrations").await);
+    assert!(relation_exists(&db, "schema_migration_audit").await);
 }
 
 pub async fn legacy_sqlx_ledger_forbidden() {

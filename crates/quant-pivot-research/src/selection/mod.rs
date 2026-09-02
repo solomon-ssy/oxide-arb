@@ -75,7 +75,7 @@ pub struct MarketSelectionBuildRequest {
     pub model_requirements: ModelFeatureRequirements,
     /// Source visibility delay, in seconds.
     pub knowledge_lag_secs: u64,
-    /// Report-only route availability pinned from one immutable serving generation.
+    /// Analysis-only route availability pinned from one immutable serving generation.
     /// Offline PIT selection leaves this absent and relies on its cohort contract.
     pub route_availability: Option<RouteAvailabilityContract>,
 }

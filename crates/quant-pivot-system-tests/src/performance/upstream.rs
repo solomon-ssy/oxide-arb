@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     net::SocketAddr,
     sync::{
         Arc,
@@ -8,7 +8,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
+use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use quant_pivot_api::gamma::GammaClient;
 use quant_pivot_models::{
@@ -25,7 +26,7 @@ use tokio::{
         mpsc::{self, Sender},
     },
     task::{JoinHandle, JoinSet},
-    time::{Instant, sleep, timeout},
+    time::{Instant, sleep, timeout, timeout_at},
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
@@ -37,8 +38,7 @@ use wiremock::{
 const FIXTURE_TIMESTAMP: &str = "2026-01-01T00:00:00Z";
 const WS_MARKET: &str = "0x5f65177b394277fd294cd75650044e32ba009a95022d88a0c1d565897d72f8f1";
 const CONNECTION_OUTBOX_CAPACITY: usize = 8_192;
-const SNAPSHOT_SUBSCRIPTION_WAIT: Duration = Duration::from_secs(10);
-const SNAPSHOT_SUBSCRIPTION_POLL: Duration = Duration::from_millis(25);
+const OWNER_READINESS_POLL: Duration = Duration::from_millis(25);
 
 pub struct DeterministicCatalog {
     pub events: Vec<EventRegistryInfo>,
@@ -331,6 +331,11 @@ impl DeterministicClobServer {
     }
 
     #[must_use]
+    pub fn accepted_connection_count(&self) -> u64 {
+        self.state.next_connection_id.load(Ordering::Acquire)
+    }
+
+    #[must_use]
     pub fn refresh_handle(&self) -> DeterministicClobRefreshHandle {
         DeterministicClobRefreshHandle {
             state: Arc::clone(&self.state),
@@ -431,61 +436,162 @@ impl DeterministicClobServer {
 }
 
 impl DeterministicClobRefreshHandle {
-    /// Stop generic keepalive books before publishing exact report fixtures.
+    /// Await the exact token cohort and live, writable owners before starting an event budget.
+    ///
+    /// This control-plane deadline includes catalog discovery and subscription
+    /// convergence. A count match is insufficient, and readiness is not a lease:
+    /// every subsequent send rechecks ownership and fails closed on disconnect.
+    pub async fn wait_for_token_owners(&self, tokens: &[TokenId], wait: Duration) -> Result<()> {
+        let expected = tokens
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        ensure!(
+            !expected.is_empty() && expected.len() == tokens.len() && !wait.is_zero(),
+            "exact CLOB phase=discovery requires a nonempty unique cohort and bounded wait"
+        );
+        let mut last_state = String::from("not observed");
+        timeout(wait, async {
+            loop {
+                let changed = self.state.subscription_changed.notified();
+                // Never acquire connection.tokens while holding token_owner: a
+                // subscription writer takes those locks in the opposite order.
+                let owners = self.state.token_owner.read().await;
+                let connections = self.state.connections.read().await;
+                let missing = expected
+                    .iter()
+                    .filter(|token| !owners.contains_key(token.as_str()))
+                    .collect::<Vec<_>>();
+                let unavailable = expected
+                    .iter()
+                    .filter(|token| {
+                        owners.get(token.as_str()).is_some_and(|owner| {
+                            connections.get(owner).is_none_or(|connection| {
+                                connection.tx.is_closed() || connection.tx.capacity() == 0
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let unexpected = owners
+                    .keys()
+                    .filter(|token| !expected.contains(token.as_str()))
+                    .collect::<BTreeSet<_>>();
+                if missing.is_empty() && unavailable.is_empty() && unexpected.is_empty() {
+                    return;
+                }
+                last_state = format!(
+                    "expected={} owners={} missing_count={} missing={:?} unavailable_count={} unavailable={:?} unexpected_count={} unexpected={:?}",
+                    expected.len(),
+                    owners.len(),
+                    missing.len(),
+                    missing.iter().take(8).collect::<Vec<_>>(),
+                    unavailable.len(),
+                    unavailable.iter().take(8).collect::<Vec<_>>(),
+                    unexpected.len(),
+                    unexpected.iter().take(8).collect::<Vec<_>>(),
+                );
+                drop((missing, unavailable, unexpected));
+                drop(connections);
+                drop(owners);
+                tokio::select! {
+                    () = changed => {},
+                    // Queue capacity can recover without a subscription change.
+                    () = sleep(OWNER_READINESS_POLL) => {},
+                }
+            }
+        })
+        .await
+        .with_context(|| format!("exact CLOB phase=discovery exceeded {wait:?}: {last_state}"))?;
+        Ok(())
+    }
+
+    /// Pause periodic refreshes while installing exact report books.
     pub fn pause_keepalive(&self) {
         self.state.keepalive_enabled.store(false, Ordering::Release);
     }
 
-    /// Send one exact current-time book snapshot through the real WS ingress.
+    /// Resume current-time refreshes without replacing installed exact book levels.
+    pub fn resume_keepalive(&self) {
+        self.state.keepalive_enabled.store(true, Ordering::Release);
+    }
+
+    /// Enqueue one exact book within the caller's event deadline and return its wire timestamp.
+    ///
+    /// Subscription discovery belongs to `wait_for_token_owners`, not this
+    /// event budget. The caller must still prove durable readback before the
+    /// same deadline; queue admission is not a delivery acknowledgment.
     pub async fn send_snapshot(
         &self,
         token: &TokenId,
         bids: &[BookLevel],
         asks: &[BookLevel],
         generation: u64,
-    ) -> Result<()> {
-        self.state.exact_books.write().await.insert(
-            token.as_str().to_owned(),
-            ExactBookSnapshot {
-                bids: bids.to_vec(),
-                asks: asks.to_vec(),
-                generation,
-            },
-        );
-        timeout(SNAPSHOT_SUBSCRIPTION_WAIT, async {
-            loop {
-                let connection_id = self
-                    .state
-                    .token_owner
-                    .read()
-                    .await
-                    .get(token.as_str())
-                    .copied();
-                let connection = match connection_id {
-                    Some(connection_id) => self
-                        .state
-                        .connections
-                        .read()
-                        .await
-                        .get(&connection_id)
-                        .cloned(),
-                    None => None,
-                };
-                if let Some(connection) = connection
-                    && connection
-                        .tx
-                        .send(exact_snapshot_payload(token, bids, asks, generation).to_string())
-                        .await
-                        .is_ok()
-                {
-                    return;
-                }
-                sleep(SNAPSHOT_SUBSCRIPTION_POLL).await;
-            }
+        deadline: Instant,
+    ) -> Result<DateTime<Utc>> {
+        timeout_at(deadline, async {
+            ensure!(
+                Instant::now() < deadline,
+                "exact CLOB token {token} phase=send deadline already exhausted"
+            );
+            let connection_id = self
+                .state
+                .token_owner
+                .read()
+                .await
+                .get(token.as_str())
+                .copied()
+                .with_context(|| format!("exact CLOB token {token} phase=send has no owner"))?;
+            let connection = self
+                .state
+                .connections
+                .read()
+                .await
+                .get(&connection_id)
+                .map(Arc::clone)
+                .with_context(|| {
+                    format!("exact CLOB token {token} phase=send owner disconnected")
+                })?;
+            let permit = connection.tx.reserve().await.with_context(|| {
+                format!("exact CLOB token {token} phase=send owner outbox closed")
+            })?;
+            let owners = self.state.token_owner.read().await;
+            ensure!(
+                owners.get(token.as_str()) == Some(&connection_id) && !connection.tx.is_closed(),
+                "exact CLOB token {token} phase=send owner changed before enqueue"
+            );
+            let mut exact_books = self.state.exact_books.write().await;
+            let generation = match exact_books.get(token.as_str()) {
+                Some(previous) => generation.max(
+                    previous
+                        .generation
+                        .checked_add(1)
+                        .context("deterministic exact book generation exhausted")?,
+                ),
+                None => generation,
+            };
+            ensure!(
+                Instant::now() < deadline,
+                "exact CLOB token {token} phase=send deadline exhausted before enqueue"
+            );
+            exact_books.insert(
+                token.as_str().to_owned(),
+                ExactBookSnapshot {
+                    bids: bids.to_vec(),
+                    asks: asks.to_vec(),
+                    generation,
+                },
+            );
+            let sent_at = Utc::now();
+            permit.send(exact_snapshot_payload(token, bids, asks, generation, sent_at).to_string());
+            // Keep ownership and exact-state guards through enqueue so a
+            // superseding subscription or periodic pulse cannot overtake it.
+            drop(exact_books);
+            drop(owners);
+            Ok(sent_at)
         })
         .await
-        .with_context(|| format!("wait to refresh deterministic CLOB token {token}"))?;
-        Ok(())
+        .with_context(|| format!("exact CLOB token {token} phase=send exceeded delivery deadline"))?
+        .with_context(|| format!("exact CLOB token {token} phase=send failed"))
     }
 }
 
@@ -522,17 +628,45 @@ async fn pulse_connections(state: &WsState, generation: u64) -> Result<()> {
         if tokens.is_empty() {
             continue;
         }
-        let Some(token) = usize::try_from(generation)
-            .ok()
-            .and_then(|generation| tokens.get(generation % tokens.len()))
-        else {
-            continue;
-        };
-        let payload = live_snapshot_payload(token, generation).to_string();
-        // A normal reconnect can retire the copied connection between the
-        // state read and this send. Its handler owns cleanup; the next pulse
-        // observes only the replacement connection.
-        let _ = connection.tx.send(payload).await;
+        // Refresh every subscribed token on every pulse. Rotating one token
+        // per pulse makes freshness proportional to shard cardinality (for
+        // example, 20 tokens at a 10-second pulse become 200 seconds old),
+        // which violates the production book-age contract while the transport
+        // itself still appears healthy.
+        for token in tokens {
+            // A normal reconnect can retire the copied connection between the
+            // state read and this send. Its handler owns cleanup; the next
+            // pulse observes only the replacement connection.
+            let Ok(permit) = connection.tx.reserve().await else {
+                break;
+            };
+            // Reserve bounded queue capacity before locking book state. Selecting
+            // and enqueuing under the same short lock orders a pulse against exact
+            // installs; an already-started generic pulse cannot overtake an install.
+            let mut exact_books = state.exact_books.write().await;
+            if !state.keepalive_enabled.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let payload = if let Some(snapshot) = exact_books.get_mut(&token) {
+                snapshot.generation = snapshot
+                    .generation
+                    .checked_add(1)
+                    .context("deterministic exact book generation exhausted")?
+                    .max(generation);
+                exact_snapshot_payload(
+                    &TokenId::new(&token),
+                    &snapshot.bids,
+                    &snapshot.asks,
+                    snapshot.generation,
+                    Utc::now(),
+                )
+            } else {
+                live_snapshot_payload(&token, generation)
+            };
+            permit.send(payload.to_string());
+            // Retain the lock through enqueue so an older snapshot cannot overtake an install.
+            drop(exact_books);
+        }
     }
     Ok(())
 }
@@ -644,8 +778,13 @@ async fn apply_subscription(
     state.subscription_changed.notify_waiters();
     if !unsubscribe {
         for token in tokens {
-            let exact = state.exact_books.read().await.get(&token).cloned();
-            let payload = exact.map_or_else(
+            let permit = connection
+                .tx
+                .reserve()
+                .await
+                .context("reserve deterministic CLOB initial snapshot")?;
+            let exact_books = state.exact_books.read().await;
+            let payload = exact_books.get(&token).map_or_else(
                 || snapshot_payload(&token, connection_id),
                 |snapshot| {
                     exact_snapshot_payload(
@@ -653,14 +792,13 @@ async fn apply_subscription(
                         &snapshot.bids,
                         &snapshot.asks,
                         snapshot.generation,
+                        Utc::now(),
                     )
                 },
             );
-            connection
-                .tx
-                .send(payload.to_string())
-                .await
-                .context("enqueue deterministic CLOB initial snapshot")?;
+            permit.send(payload.to_string());
+            // Retain the lock through enqueue so a newer pulse cannot precede this snapshot.
+            drop(exact_books);
         }
     }
     Ok(())
@@ -711,10 +849,9 @@ fn exact_snapshot_payload(
     bids: &[BookLevel],
     asks: &[BookLevel],
     generation: u64,
+    sent_at: DateTime<Utc>,
 ) -> Value {
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0_u128, |duration| duration.as_millis());
+    let timestamp_ms = sent_at.timestamp_millis();
     let levels = |levels: &[BookLevel]| {
         levels
             .iter()
@@ -760,9 +897,15 @@ pub async fn measure_http_rtt(base_url: &str, samples: usize) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, time::Duration};
+    use std::{
+        collections::BTreeMap,
+        slice,
+        sync::Arc,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     use anyhow::{Context, Result, ensure};
+    use chrono::Utc;
     use futures_util::{SinkExt, StreamExt};
     use quant_pivot_models::{
         domain::market::BookLevel,
@@ -770,10 +913,282 @@ mod tests {
     };
     use rust_decimal_macros::dec;
     use serde_json::{Value, json};
-    use tokio::time::{Instant, sleep, timeout_at};
-    use tokio_tungstenite::{connect_async, tungstenite::Message};
+    use tokio::{
+        net::TcpStream,
+        time::{Instant, sleep, timeout_at},
+    };
+    use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
-    use super::DeterministicClobServer;
+    use super::{CONNECTION_OUTBOX_CAPACITY, DeterministicClobServer, ExactBookSnapshot};
+    use crate::support::trade_policy_fixtures::FixtureBookTiming;
+
+    impl ExactBookSnapshot {
+        fn readiness_fixture() -> Self {
+            Self {
+                bids: vec![BookLevel::from_decimal_unchecked(
+                    Price::new(dec!(0.42)),
+                    Shares::new(dec!(12)),
+                )],
+                asks: vec![BookLevel::from_decimal_unchecked(
+                    Price::new(dec!(0.44)),
+                    Shares::new(dec!(14)),
+                )],
+                generation: 7,
+            }
+        }
+
+        async fn receive_exact(
+            &self,
+            socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+            token: &TokenId,
+            deadline: Instant,
+        ) -> Result<u128> {
+            loop {
+                let frame = timeout_at(deadline, socket.next())
+                    .await
+                    .context("exact frame exceeded its event delivery deadline")?
+                    .context("exact frame socket closed")??;
+                let Message::Text(text) = frame else {
+                    continue;
+                };
+                let payload: Value = serde_json::from_str(text.as_ref())?;
+                if payload["asset_id"] == token.as_str()
+                    && payload["hash"]
+                        .as_str()
+                        .is_some_and(|hash| hash.starts_with("exact-"))
+                {
+                    let (_, timestamp) = self.verify_frame(token.as_str(), &payload)?;
+                    ensure!(
+                        Instant::now() < deadline,
+                        "exact frame arrived after its deadline"
+                    );
+                    return Ok(timestamp);
+                }
+            }
+        }
+
+        fn verify_frame(&self, token: &str, payload: &Value) -> Result<(u64, u128)> {
+            ensure!(payload["event_type"] == "book" && payload["asset_id"] == token);
+            for (side, expected) in [("bids", &self.bids), ("asks", &self.asks)] {
+                let actual = payload[side].as_array().context("exact book levels")?;
+                ensure!(actual.len() == expected.len(), "exact book depth changed");
+                for (actual, expected) in actual.iter().zip(expected) {
+                    ensure!(actual["price"] == expected.price_decimal().to_string());
+                    ensure!(actual["size"] == expected.size_decimal().to_string());
+                }
+            }
+            let generation = payload["hash"]
+                .as_str()
+                .and_then(|hash| hash.strip_prefix(&format!("exact-{token}-")))
+                .context("exact book hash prefix")?
+                .parse::<u64>()?;
+            ensure!(generation >= self.generation, "manual generation regressed");
+            let timestamp = payload["timestamp"]
+                .as_str()
+                .context("exact book timestamp")?
+                .parse::<u128>()?;
+            Ok((generation, timestamp))
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_precedes_delivery() -> Result<()> {
+        let server = DeterministicClobServer::start().await?;
+        let refresh = server.refresh_handle();
+        let (mut socket, _) = connect_async(server.base_url()).await?;
+        let expected = (1..=20)
+            .map(|index| TokenId::new(format!("exact-cohort-{index}")))
+            .collect::<Vec<_>>();
+        let wrong = (1..=20)
+            .map(|index| format!("old-cohort-{index}"))
+            .collect::<Vec<_>>();
+        socket
+            .send(Message::Text(
+                json!({"assets_ids": wrong}).to_string().into(),
+            ))
+            .await?;
+        server
+            .wait_for_subscriptions(20, Duration::from_secs(1))
+            .await?;
+
+        let readiness = refresh.wait_for_token_owners(&expected, Duration::from_secs(6));
+        tokio::pin!(readiness);
+        let delivery_budget = Duration::from_millis(FixtureBookTiming::DELIVERY_BUDGET_MS);
+        let delayed_subscription = delivery_budget + Duration::from_millis(100);
+        ensure!(
+            timeout_at(Instant::now() + delayed_subscription, &mut readiness)
+                .await
+                .is_err(),
+            "a same-sized cohort of wrong token identities must not become ready"
+        );
+        socket
+            .send(Message::Text(
+                json!({"assets_ids": wrong, "operation": "unsubscribe"})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        let tokens = expected.iter().map(TokenId::as_str).collect::<Vec<_>>();
+        socket
+            .send(Message::Text(
+                json!({"assets_ids": tokens}).to_string().into(),
+            ))
+            .await?;
+        readiness.await?;
+        let ready_at = Utc::now();
+
+        let book = ExactBookSnapshot::readiness_fixture();
+        let deadline = Instant::now() + delivery_budget;
+        let sent_at = refresh
+            .send_snapshot(
+                &expected[0],
+                &book.bids,
+                &book.asks,
+                book.generation,
+                deadline,
+            )
+            .await?;
+        let wire_timestamp = book
+            .receive_exact(&mut socket, &expected[0], deadline)
+            .await?;
+        ensure!(
+            sent_at >= ready_at,
+            "wire time included subscription discovery"
+        );
+        ensure!(wire_timestamp == u128::try_from(sent_at.timestamp_millis())?);
+        socket.close(None).await?;
+        server.shutdown().await
+    }
+
+    #[tokio::test]
+    async fn disconnected_owner_fails_closed() -> Result<()> {
+        let server = DeterministicClobServer::start().await?;
+        let refresh = server.refresh_handle();
+        let token = TokenId::new("disconnected-exact-token");
+        for invalid in [Vec::new(), vec![token.clone(), token.clone()]] {
+            ensure!(
+                refresh
+                    .wait_for_token_owners(&invalid, Duration::from_secs(1))
+                    .await
+                    .is_err(),
+                "empty or duplicate token cohorts must not be accepted"
+            );
+        }
+        let (mut socket, _) = connect_async(server.base_url()).await?;
+        socket
+            .send(Message::Text(
+                json!({"assets_ids": [token.as_str()]}).to_string().into(),
+            ))
+            .await?;
+        refresh
+            .wait_for_token_owners(slice::from_ref(&token), Duration::from_secs(1))
+            .await?;
+        socket.close(None).await?;
+        server
+            .wait_for_active_connections(0, Duration::from_secs(1))
+            .await?;
+
+        let readiness_error = refresh
+            .wait_for_token_owners(slice::from_ref(&token), Duration::from_millis(100))
+            .await
+            .expect_err("disconnected owners cannot prove readiness");
+        ensure!(format!("{readiness_error:#}").contains("phase=discovery"));
+        let book = ExactBookSnapshot::readiness_fixture();
+        let deadline =
+            Instant::now() + Duration::from_millis(FixtureBookTiming::DELIVERY_BUDGET_MS);
+        let error = timeout_at(
+            Instant::now() + Duration::from_millis(100),
+            refresh.send_snapshot(&token, &book.bids, &book.asks, book.generation, deadline),
+        )
+        .await
+        .context("send must not wait for subscription discovery")?
+        .expect_err("a disconnected owner must reject an exact send");
+        let error = format!("{error:#}");
+        ensure!(error.contains(token.as_str()) && error.contains("phase=send"));
+        ensure!(
+            !refresh
+                .state
+                .exact_books
+                .read()
+                .await
+                .contains_key(token.as_str())
+        );
+        server.shutdown().await
+    }
+
+    #[tokio::test]
+    async fn outbox_respects_delivery_deadline() -> Result<()> {
+        let server = DeterministicClobServer::start().await?;
+        let refresh = server.refresh_handle();
+        let token = TokenId::new("blocked-exact-token");
+        let (mut socket, _) = connect_async(server.base_url()).await?;
+        socket
+            .send(Message::Text(
+                json!({"assets_ids": [token.as_str()]}).to_string().into(),
+            ))
+            .await?;
+        refresh
+            .wait_for_token_owners(slice::from_ref(&token), Duration::from_secs(1))
+            .await?;
+        timeout_at(Instant::now() + Duration::from_secs(1), socket.next())
+            .await?
+            .context("initial subscription snapshot")??;
+        let owner = *server
+            .state
+            .token_owner
+            .read()
+            .await
+            .get(token.as_str())
+            .context("live token owner")?;
+        let connection = server
+            .state
+            .connections
+            .read()
+            .await
+            .get(&owner)
+            .map(Arc::clone)
+            .context("live connection")?;
+        let reserved = timeout_at(
+            Instant::now() + Duration::from_secs(1),
+            connection.tx.reserve_many(CONNECTION_OUTBOX_CAPACITY),
+        )
+        .await??;
+        let readiness_error = refresh
+            .wait_for_token_owners(slice::from_ref(&token), Duration::from_millis(100))
+            .await
+            .expect_err("a full owner outbox cannot prove send readiness");
+        ensure!(format!("{readiness_error:#}").contains("unavailable_count=1"));
+        let book = ExactBookSnapshot::readiness_fixture();
+        let budget = Duration::from_millis(FixtureBookTiming::DELIVERY_BUDGET_MS);
+        let deadline = Instant::now() + budget;
+        let error = refresh
+            .send_snapshot(&token, &book.bids, &book.asks, book.generation, deadline)
+            .await
+            .expect_err("a blocked outbox must respect the event deadline");
+        ensure!(Instant::now() >= deadline);
+        ensure!(format!("{error:#}").contains("phase=send exceeded delivery deadline"));
+        ensure!(
+            !refresh
+                .state
+                .exact_books
+                .read()
+                .await
+                .contains_key(token.as_str())
+        );
+        drop(reserved);
+
+        refresh
+            .wait_for_token_owners(slice::from_ref(&token), Duration::from_secs(1))
+            .await?;
+        let deadline = Instant::now() + budget;
+        let sent_at = refresh
+            .send_snapshot(&token, &book.bids, &book.asks, book.generation, deadline)
+            .await?;
+        let wire_timestamp = book.receive_exact(&mut socket, &token, deadline).await?;
+        ensure!(wire_timestamp == u128::try_from(sent_at.timestamp_millis())?);
+        socket.close(None).await?;
+        server.shutdown().await
+    }
 
     #[tokio::test]
     async fn keepalive_refreshes_books() -> Result<()> {
@@ -791,7 +1206,7 @@ mod tests {
             .context("subscribe deterministic CLOB test client")?;
 
         let deadline = Instant::now() + Duration::from_secs(1);
-        let mut refreshed = BTreeSet::new();
+        let mut refreshed = BTreeMap::new();
         while refreshed.len() < 2 {
             let frame = timeout_at(deadline, socket.next())
                 .await
@@ -809,19 +1224,29 @@ mod tests {
                 let token = payload["asset_id"]
                     .as_str()
                     .context("keepalive frame omitted asset_id")?;
-                refreshed.insert(token.to_owned());
+                let generation = payload["hash"]
+                    .as_str()
+                    .and_then(|hash| hash.rsplit_once('-'))
+                    .map(|(_, generation)| generation.to_owned())
+                    .context("keepalive frame omitted its generation")?;
+                refreshed.insert(token.to_owned(), generation);
             }
         }
         ensure!(
-            refreshed
-                == BTreeSet::from([
+            refreshed.keys().cloned().collect::<Vec<_>>()
+                == [
                     "production-stack-token-a".to_owned(),
                     "production-stack-token-b".to_owned(),
-                ]),
+                ]
+                && refreshed.values().all(|generation| {
+                    generation == refreshed.values().next().expect("generation")
+                }),
             "keepalive did not refresh every subscribed book: {refreshed:?}"
         );
         ensure!(
-            server.active_connection_count() == 1 && server.connection_high_water() == 1,
+            server.active_connection_count() == 1
+                && server.connection_high_water() == 1
+                && server.accepted_connection_count() == 1,
             "single fixture client must own exactly one bounded connection"
         );
 
@@ -829,6 +1254,133 @@ mod tests {
         server
             .wait_for_active_connections(0, Duration::from_secs(1))
             .await?;
+        server.shutdown().await
+    }
+
+    #[tokio::test]
+    async fn resumed_keepalive_preserves_exact() -> Result<()> {
+        let server = DeterministicClobServer::start_keepalive(Duration::from_millis(20)).await?;
+        let refresh = server.refresh_handle();
+        refresh.pause_keepalive();
+        let books = BTreeMap::from([
+            (
+                "exact-keepalive-a",
+                ExactBookSnapshot {
+                    bids: vec![BookLevel::from_decimal_unchecked(
+                        Price::new(dec!(0.42)),
+                        Shares::new(dec!(12)),
+                    )],
+                    asks: vec![BookLevel::from_decimal_unchecked(
+                        Price::new(dec!(0.44)),
+                        Shares::new(dec!(14)),
+                    )],
+                    generation: 90_000,
+                },
+            ),
+            (
+                "exact-keepalive-b",
+                ExactBookSnapshot {
+                    bids: vec![BookLevel::from_decimal_unchecked(
+                        Price::new(dec!(0.61)),
+                        Shares::new(dec!(23)),
+                    )],
+                    asks: vec![BookLevel::from_decimal_unchecked(
+                        Price::new(dec!(0.65)),
+                        Shares::new(dec!(27)),
+                    )],
+                    generation: 120_000,
+                },
+            ),
+        ]);
+        let tokens = books.keys().copied().collect::<Vec<_>>();
+        let mut previous = BTreeMap::<String, (u64, u128)>::new();
+        for connection_index in 0..2 {
+            let not_before = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+            let (mut socket, _) = connect_async(server.base_url()).await?;
+            socket
+                .send(Message::Text(
+                    json!({"assets_ids": tokens}).to_string().into(),
+                ))
+                .await?;
+            server
+                .wait_for_subscriptions(2, Duration::from_secs(1))
+                .await?;
+            let deadline = Instant::now() + Duration::from_secs(1);
+            if connection_index == 0 {
+                for _ in 0..2 {
+                    let frame = timeout_at(deadline, socket.next())
+                        .await?
+                        .context("initial generic book")??;
+                    let Message::Text(text) = frame else {
+                        continue;
+                    };
+                    let payload: Value = serde_json::from_str(text.as_ref())?;
+                    ensure!(
+                        payload["hash"]
+                            .as_str()
+                            .is_some_and(|hash| hash.starts_with("snapshot-"))
+                    );
+                }
+                for (token, book) in &books {
+                    refresh
+                        .send_snapshot(
+                            &TokenId::new(*token),
+                            &book.bids,
+                            &book.asks,
+                            book.generation,
+                            deadline,
+                        )
+                        .await?;
+                }
+                refresh.resume_keepalive();
+            }
+            let mut counts = BTreeMap::from([(tokens[0], 0_u64), (tokens[1], 0_u64)]);
+            let mut first_timestamps = BTreeMap::new();
+            while counts.values().any(|count| *count < 4) {
+                let frame = timeout_at(deadline, socket.next())
+                    .await?
+                    .context("exact keepalive frame")??;
+                let Message::Text(text) = frame else {
+                    continue;
+                };
+                let payload: Value = serde_json::from_str(text.as_ref())?;
+                let token = payload["asset_id"].as_str().context("exact token")?;
+                let book = books.get(token).context("unexpected exact token")?;
+                let (generation, timestamp) = book.verify_frame(token, &payload)?;
+                let received_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+                ensure!(
+                    timestamp >= not_before && timestamp <= received_at,
+                    "exact pulse is not current-time"
+                );
+                let advanced = if let Some((last_generation, last_timestamp)) = previous.get(token)
+                {
+                    ensure!(generation >= *last_generation && timestamp >= *last_timestamp);
+                    generation > *last_generation
+                } else {
+                    true
+                };
+                first_timestamps
+                    .entry(token.to_owned())
+                    .or_insert(timestamp);
+                previous.insert(token.to_owned(), (generation, timestamp));
+                *counts.get_mut(token).context("exact token counter")? += u64::from(advanced);
+            }
+            for (token, first_timestamp) in first_timestamps {
+                let (generation, timestamp) =
+                    previous.get(&token).context("observed exact pulse")?;
+                ensure!(
+                    *timestamp > first_timestamp,
+                    "periodic exact timestamp did not advance"
+                );
+                ensure!(*generation >= books[token.as_str()].generation + 3);
+            }
+            ensure!(server.active_connection_count() == 1 && server.connection_high_water() == 1);
+            ensure!(server.accepted_connection_count() == connection_index + 1);
+            socket.close(None).await?;
+            server
+                .wait_for_active_connections(0, Duration::from_secs(1))
+                .await?;
+        }
         server.shutdown().await
     }
 
@@ -845,31 +1397,37 @@ mod tests {
         server
             .wait_for_subscriptions(1, Duration::from_secs(1))
             .await?;
+        let refresh = server.refresh_handle();
+        refresh
+            .send_snapshot(
+                &token,
+                &[BookLevel::from_decimal_unchecked(
+                    Price::new(dec!(0.42)),
+                    Shares::new(dec!(12)),
+                )],
+                &[BookLevel::from_decimal_unchecked(
+                    Price::new(dec!(0.44)),
+                    Shares::new(dec!(14)),
+                )],
+                7,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await?;
         first_socket.close(None).await?;
         server
             .wait_for_active_connections(0, Duration::from_secs(1))
             .await?;
-
-        let refresh = server.refresh_handle();
         let refresh_token = token.clone();
-        let send = tokio::spawn(async move {
+        let readiness = tokio::spawn(async move {
             refresh
-                .send_snapshot(
-                    &refresh_token,
-                    &[BookLevel::from_decimal_unchecked(
-                        Price::new(dec!(0.42)),
-                        Shares::new(dec!(12)),
-                    )],
-                    &[BookLevel::from_decimal_unchecked(
-                        Price::new(dec!(0.44)),
-                        Shares::new(dec!(14)),
-                    )],
-                    7,
-                )
+                .wait_for_token_owners(&[refresh_token], Duration::from_secs(1))
                 .await
         });
         sleep(Duration::from_millis(50)).await;
-        ensure!(!send.is_finished(), "exact refresh did not await reconnect");
+        ensure!(
+            !readiness.is_finished(),
+            "owner readiness did not await reconnect"
+        );
 
         let (mut second_socket, _) = connect_async(server.base_url()).await?;
         second_socket
@@ -893,7 +1451,9 @@ mod tests {
                 break;
             }
         }
-        send.await.context("join exact reconnect refresh")??;
+        readiness
+            .await
+            .context("join exact reconnect readiness")??;
         second_socket.close(None).await?;
         server
             .wait_for_active_connections(0, Duration::from_secs(1))

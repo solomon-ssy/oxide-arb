@@ -10,7 +10,8 @@ use quant_pivot_models::{
         },
         quant_feedback_cycle::{Column as CycleColumn, Entity as CycleEntity},
     },
-    types::{AttributionArtifactId, FeedbackCycleId},
+    enums::quant::AttributionArtifactKind,
+    types::{AttributionArtifactId, FeedbackCycleId, RecommendationId},
 };
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
@@ -97,6 +98,23 @@ impl AttributionArtifactRepository for PgAttributionArtifactRepository {
         artifact_id: &AttributionArtifactId,
     ) -> Result<Option<AttributionArtifactInfo>, StorageError> {
         AttributionEntity::find_by_id(*artifact_id)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .map(Self::info)
+            .transpose()
+    }
+
+    async fn latest_for_recommendation(
+        &self,
+        recommendation_id: &RecommendationId,
+        kind: AttributionArtifactKind,
+    ) -> Result<Option<AttributionArtifactInfo>, StorageError> {
+        AttributionEntity::find()
+            .filter(AttributionColumn::RecommendationId.eq(*recommendation_id))
+            .filter(AttributionColumn::ArtifactKind.eq(kind))
+            .order_by_desc(AttributionColumn::AvailableAt)
+            .order_by_desc(AttributionColumn::AttributionArtifactId)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?

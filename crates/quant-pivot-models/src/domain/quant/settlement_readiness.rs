@@ -175,11 +175,22 @@ pub enum SettlementReadinessReason {
         wallet_kind: ExecutionWalletKind,
         required: SettlementCredentialKind,
     },
-    ChainObservationNotFresh {
+    SettlementInspectionWindowInvalid {
+        request_admitted_at: DateTime<Utc>,
+        inspection_completed_at: DateTime<Utc>,
+        max_duration_seconds: i64,
+    },
+    ChainObservationStale {
         block_number: u64,
         block_timestamp: DateTime<Utc>,
         checked_at: DateTime<Utc>,
         max_age_seconds: i64,
+    },
+    ChainObservationFutureSkewExceeded {
+        block_number: u64,
+        block_timestamp: DateTime<Utc>,
+        checked_at: DateTime<Utc>,
+        max_future_skew_seconds: i64,
     },
     CanonicalBlockChanged {
         block_number: u64,
@@ -243,5 +254,89 @@ impl SettlementReadiness {
             deployment_digest: Some(deployment_digest),
             checked_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Utc};
+    use serde_json::{from_value, json, to_value};
+
+    use super::SettlementReadinessReason;
+
+    #[test]
+    fn reason_wire_contract() {
+        let admitted_at = DateTime::<Utc>::from_timestamp(1_725_000_000, 0)
+            .expect("valid request admission timestamp");
+        let completed_at = DateTime::<Utc>::from_timestamp(1_725_000_121, 0)
+            .expect("valid inspection completion timestamp");
+        let block_timestamp = DateTime::<Utc>::from_timestamp(1_725_000_151, 0)
+            .expect("valid canonical block timestamp");
+        let reasons = [
+            (
+                SettlementReadinessReason::SettlementInspectionWindowInvalid {
+                    request_admitted_at: admitted_at,
+                    inspection_completed_at: completed_at,
+                    max_duration_seconds: 120,
+                },
+                json!({
+                    "code": "settlement_inspection_window_invalid",
+                    "request_admitted_at": "2024-08-30T06:40:00Z",
+                    "inspection_completed_at": "2024-08-30T06:42:01Z",
+                    "max_duration_seconds": 120,
+                }),
+            ),
+            (
+                SettlementReadinessReason::ChainObservationStale {
+                    block_number: 61_234_567,
+                    block_timestamp: admitted_at,
+                    checked_at: completed_at,
+                    max_age_seconds: 120,
+                },
+                json!({
+                    "code": "chain_observation_stale",
+                    "block_number": 61_234_567,
+                    "block_timestamp": "2024-08-30T06:40:00Z",
+                    "checked_at": "2024-08-30T06:42:01Z",
+                    "max_age_seconds": 120,
+                }),
+            ),
+            (
+                SettlementReadinessReason::ChainObservationFutureSkewExceeded {
+                    block_number: 61_234_568,
+                    block_timestamp,
+                    checked_at: completed_at,
+                    max_future_skew_seconds: 30,
+                },
+                json!({
+                    "code": "chain_observation_future_skew_exceeded",
+                    "block_number": 61_234_568,
+                    "block_timestamp": "2024-08-30T06:42:31Z",
+                    "checked_at": "2024-08-30T06:42:01Z",
+                    "max_future_skew_seconds": 30,
+                }),
+            ),
+        ];
+
+        for (reason, expected) in reasons {
+            assert_eq!(to_value(&reason).expect("serialize reason"), expected);
+            assert_eq!(
+                from_value::<SettlementReadinessReason>(expected).expect("deserialize reason"),
+                reason
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_reason_rejected() {
+        let legacy = json!({
+            "code": "chain_observation_not_fresh",
+            "block_number": 61_234_567,
+            "block_timestamp": "2024-08-30T06:40:00Z",
+            "checked_at": "2024-08-30T06:42:01Z",
+            "max_age_seconds": 120,
+        });
+
+        assert!(from_value::<SettlementReadinessReason>(legacy).is_err());
     }
 }

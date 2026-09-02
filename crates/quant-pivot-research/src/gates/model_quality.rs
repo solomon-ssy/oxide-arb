@@ -956,8 +956,8 @@ fn evaluate_alpha_significance_gates(
     );
 }
 
-/// Intent-specific hard gates: liquidity feasibility (auto) + shadow stability
-/// (publish / auto).
+/// Intent-specific hard gates: liquidity feasibility (`PolicyAutomatic`) + shadow stability
+/// (`RouteActivation` / `PolicyAutomatic`).
 fn evaluate_intent_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
     let t = &input.thresholds;
     if input.intent.requires_liquidity_feasibility() {
@@ -977,7 +977,7 @@ fn evaluate_intent_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
                 false,
                 "none",
                 t.min_liquidity_exit_feasibility.to_string(),
-                "auto-execution gate requires a backtest report",
+                "policy-automatic gate requires a backtest report",
             ),
         }
     } else {
@@ -985,7 +985,7 @@ fn evaluate_intent_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
             GateId::LiquidityExitFeasible,
             GateClass::Hard,
             t.min_liquidity_exit_feasibility.to_string(),
-            "only evaluated for auto-execution",
+            "only evaluated for policy-automatic authority",
         );
     }
 
@@ -1028,7 +1028,7 @@ fn evaluate_explanation_gate(input: &QualityGateInput, ledger: &mut GateLedger) 
 /// Hard gate: `RouteActivation` / `PolicyAutomatic` intents on a Buy
 /// model require a `Calibrated` return model. `uncalibrated` (`Heuristic`)
 /// artifacts are bootstrap-only and must never reach publish or
-/// auto-execution — fail-closed, never a silent downgrade to the heuristic
+/// policy-automatic execution — fail-closed, never a silent downgrade to the heuristic
 /// default. `is_exit` (Sell/Hold-vs-Exit scorers) never carries a return
 /// model, so it is always `NotApplicable` regardless of intent.
 fn evaluate_calibration_gate(input: &QualityGateInput, is_exit: bool, ledger: &mut GateLedger) {
@@ -1041,7 +1041,7 @@ fn evaluate_calibration_gate(input: &QualityGateInput, is_exit: bool, ledger: &m
         let detail = if is_exit {
             "sell / hold-vs-exit scorers never carry a return model"
         } else {
-            "only evaluated for publish / auto-execution"
+            "only evaluated for route activation / policy-automatic execution"
         };
         ledger.not_applicable(
             GateId::CalibrationRequired,
@@ -1060,11 +1060,11 @@ fn evaluate_calibration_gate(input: &QualityGateInput, is_exit: bool, ledger: &m
             "heuristic"
         },
         "calibrated",
-        "return model must be calibrated on an independent held-out split before publish / auto-execution",
+        "return model must be calibrated on an independent held-out split before route activation / policy-automatic execution",
     );
 }
 
-/// Hard gate: publish / auto intents require established signed `TopN` shadow
+/// Hard gate: route-activation / policy-automatic intents require established signed `TopN` shadow
 /// decision stability. Family-agnostic, so both Buy and Sell publishes use it.
 fn evaluate_shadow_stability_gate(input: &QualityGateInput, ledger: &mut GateLedger) {
     let t = &input.thresholds;
@@ -1073,7 +1073,7 @@ fn evaluate_shadow_stability_gate(input: &QualityGateInput, ledger: &mut GateLed
             GateId::ShadowDecisionOverlap,
             GateClass::Hard,
             t.min_shadow_decision_overlap.to_string(),
-            "only evaluated for publish / auto-execution",
+            "only evaluated for route activation / policy-automatic execution",
         );
         return;
     }

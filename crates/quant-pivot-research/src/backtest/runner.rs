@@ -2535,7 +2535,7 @@ mod tests {
         execution_semantics::PitFeeSchedule,
         factors::{FactorValue, NormalizedFactor, names::MOMENTUM_ROC},
         model::{
-            CrossFittedRuntime, QuantModelRuntime, ResolvedCalibration,
+            CancellationProbe, CrossFittedRuntime, QuantModelRuntime, ResolvedCalibration,
             artifact::ModelArtifact,
             runtime::{
                 FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelRankTarget,
@@ -2563,9 +2563,9 @@ mod tests {
         fn backtest_fixture() -> Self {
             Self::new(
                 Box::new(WeightedFactorRuntime::backtest_fixture()),
-                ResolvedCalibration {
-                    artifact_id: CalibrationArtifactId::from_v7(),
-                    mapping: MonotoneMapping::Isotonic {
+                ResolvedCalibration::try_new(
+                    CalibrationArtifactId::from_v7(),
+                    MonotoneMapping::Isotonic {
                         knots: vec![
                             IsotonicKnot {
                                 score: dec!(0),
@@ -2577,7 +2577,7 @@ mod tests {
                             },
                         ],
                     },
-                    reliability: ReliabilityReport {
+                    ReliabilityReport {
                         n_samples: 100,
                         bins: vec![ReliabilityBin {
                             predicted_lo: dec!(0),
@@ -2592,7 +2592,7 @@ mod tests {
                         brier_score: dec!(0.25),
                         log_loss: dec!(0.693147),
                     },
-                    split_payout_rate: SplitPayoutRateEvidence {
+                    SplitPayoutRateEvidence {
                         total_sample_count: 100,
                         split_sample_count: 0,
                         empirical_probability: Probability::ZERO,
@@ -2600,7 +2600,9 @@ mod tests {
                         split_payout_ratio: PayoutRatio::try_new(dec!(0.5))
                             .expect("split payout ratio"),
                     },
-                },
+                    &CancellationProbe::default(),
+                )
+                .expect("resolved calibration fixture"),
             )
         }
     }

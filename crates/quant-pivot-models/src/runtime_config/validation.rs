@@ -1292,6 +1292,18 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
             ),
         });
     }
+    if outcome_reconciliation.economic_source_lateness_secs == 0
+        || outcome_reconciliation.economic_source_lateness_secs
+            > OutcomeReconciliationPolicy::MAX_ECONOMIC_SOURCE_LATENESS_SECS
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "operations_policy.outcome_reconciliation.economic_source_lateness_secs",
+            detail: format!(
+                "must be in 1..={}",
+                OutcomeReconciliationPolicy::MAX_ECONOMIC_SOURCE_LATENESS_SECS
+            ),
+        });
+    }
     if config
         .execution_authorization_policy
         .operator_approval_ttl_secs
@@ -2033,11 +2045,15 @@ mod tests {
         zero.operations_policy
             .outcome_reconciliation
             .source_block_span = 0;
+        zero.operations_policy
+            .outcome_reconciliation
+            .economic_source_lateness_secs = 0;
         let zero_report = zero.validate_runtime_config();
         for field in [
             "operations_policy.outcome_reconciliation.sweep_secs",
             "operations_policy.outcome_reconciliation.candidate_batch_size",
             "operations_policy.outcome_reconciliation.source_block_span",
+            "operations_policy.outcome_reconciliation.economic_source_lateness_secs",
         ] {
             assert!(zero_report.errors.iter().any(|error| matches!(
                 error,
@@ -2057,6 +2073,11 @@ mod tests {
             .operations_policy
             .outcome_reconciliation
             .source_block_span = OutcomeReconciliationPolicy::MAX_SOURCE_BLOCK_SPAN + 1;
+        oversized
+            .operations_policy
+            .outcome_reconciliation
+            .economic_source_lateness_secs =
+            OutcomeReconciliationPolicy::MAX_ECONOMIC_SOURCE_LATENESS_SECS + 1;
         let oversized_report = oversized.validate_runtime_config();
         assert_eq!(
             oversized_report
@@ -2066,12 +2087,13 @@ mod tests {
                     error,
                     ConfigValidationError::InvalidValue {
                         field: "operations_policy.outcome_reconciliation.candidate_batch_size"
-                            | "operations_policy.outcome_reconciliation.source_block_span",
+                            | "operations_policy.outcome_reconciliation.source_block_span"
+                            | "operations_policy.outcome_reconciliation.economic_source_lateness_secs",
                         ..
                     }
                 ))
                 .count(),
-            2
+            3
         );
     }
 

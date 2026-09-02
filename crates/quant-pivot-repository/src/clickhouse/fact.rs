@@ -13,16 +13,50 @@ use clickhouse::{RowOwned, RowWrite};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
-        QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow,
-        QuantModelInputEventRow, QuantPositionEventRow, QuantReportRecommendationFactRow,
-        QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow, ReportMarketFunnelRow,
+        BookL2LedgerRow, QuantCapitalAllocationEventRow, QuantExecutionEventRow,
+        QuantExitSignalEvaluationEventRow, QuantFactorEventRow, QuantFeatureEventRow,
+        QuantFeatureParityEventRow, QuantModelInputEventRow, QuantPositionEventRow,
+        QuantReportRecommendationFactRow, QuantServingEvidenceCompletionRow,
+        QuantSignalCandidateEventRow, ReportMarketFunnelRow,
     },
     types::ContentHash,
 };
 use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 
 use crate::traits::{FactWriter, QuantFactRepository};
+
+/// The only `ClickHouse` adapter allowed to consume the reserved synchronous
+/// critical-write lane.
+///
+/// Its table and row type are closed so bulk fact streams cannot acquire
+/// canonical capacity by configuration.
+pub struct ChCanonicalLedgerWriter {
+    pool: Arc<ClickHousePool>,
+    write_manager: Arc<ChWriteManager>,
+}
+
+impl ChCanonicalLedgerWriter {
+    #[must_use]
+    pub const fn new(pool: Arc<ClickHousePool>, write_manager: Arc<ChWriteManager>) -> Self {
+        Self {
+            pool,
+            write_manager,
+        }
+    }
+}
+
+#[async_trait]
+impl FactWriter<BookL2LedgerRow> for ChCanonicalLedgerWriter {
+    async fn write_batch(&self, rows: Vec<BookL2LedgerRow>) -> Result<(), StorageError> {
+        self.write_batch_borrowed(&rows).await
+    }
+
+    async fn write_batch_borrowed(&self, rows: &[BookL2LedgerRow]) -> Result<(), StorageError> {
+        self.write_manager
+            .write_canonical_ledger(self.pool.client(), rows)
+            .await
+    }
+}
 
 /// Generic single-table `ClickHouse` fact sink.
 ///
@@ -33,7 +67,6 @@ pub struct ChFactWriter<T> {
     pool: Arc<ClickHousePool>,
     write_manager: Arc<ChWriteManager>,
     table: &'static str,
-    async_insert: bool,
     _row: PhantomData<fn(T)>,
 }
 
@@ -48,23 +81,6 @@ impl<T> ChFactWriter<T> {
             pool,
             write_manager,
             table,
-            async_insert: false,
-            _row: PhantomData,
-        }
-    }
-
-    /// Build a writer using server-side async insert with durable acknowledgement.
-    #[must_use]
-    pub const fn new_async_insert(
-        pool: Arc<ClickHousePool>,
-        write_manager: Arc<ChWriteManager>,
-        table: &'static str,
-    ) -> Self {
-        Self {
-            pool,
-            write_manager,
-            table,
-            async_insert: true,
             _row: PhantomData,
         }
     }
@@ -76,30 +92,18 @@ where
     T: RowOwned + RowWrite + Send + Sync + 'static,
 {
     async fn write_batch(&self, rows: Vec<T>) -> Result<(), StorageError> {
-        if self.async_insert {
-            self.write_manager
-                .write_borrowed_batch(self.pool.client(), self.table, &rows)
-                .await
-        } else {
-            self.write_manager
-                .write_batch_borrowed(self.pool.client(), self.table, &rows)
-                .await
-        }
+        self.write_manager
+            .write_batch_borrowed(self.pool.client(), self.table, &rows)
+            .await
     }
 
     async fn write_batch_borrowed(&self, rows: &[T]) -> Result<(), StorageError>
     where
         T: Clone,
     {
-        if self.async_insert {
-            self.write_manager
-                .write_borrowed_batch(self.pool.client(), self.table, rows)
-                .await
-        } else {
-            self.write_manager
-                .write_batch_borrowed(self.pool.client(), self.table, rows)
-                .await
-        }
+        self.write_manager
+            .write_batch_borrowed(self.pool.client(), self.table, rows)
+            .await
     }
 
     async fn write_batch_idempotent(

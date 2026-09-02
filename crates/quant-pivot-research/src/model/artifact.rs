@@ -457,7 +457,7 @@ impl SubstitutionConfidenceRules {
 /// Uncalibrated, monotone heuristic return mapping — cold-start bootstrap only.
 ///
 /// Auditable and explicitly flagged as a heuristic so candidates never present a
-/// silently fabricated return; fail-closed at publish / auto-execution / semi-auto
+/// silently fabricated return; fail-closed at publish or any executable entry authority.
 /// This is enforced by `GateId::CalibrationRequired`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeuristicReturnModel {
@@ -1959,7 +1959,7 @@ mod tests {
     use crate::{
         artifact::{ArtifactStore, LocalArtifactStore},
         features::FeatureName,
-        model::calibrator::ResolvedCalibration,
+        model::{CancellationProbe, calibrator::ResolvedCalibration},
         test_support::{
             content_hash as hash, seal_model_payload, sell_payload, weighted_factor_plane,
             weighted_payload,
@@ -2375,9 +2375,9 @@ mod tests {
             calibrator_ref: CalibrationArtifactId::from_v7(),
             downside_source: DownsideSource::MfeMae,
         });
-        let resolved = ResolvedCalibration {
-            artifact_id: CalibrationArtifactId::from_v7(),
-            mapping: MonotoneMapping::Isotonic {
+        let resolved = ResolvedCalibration::try_new(
+            CalibrationArtifactId::from_v7(),
+            MonotoneMapping::Isotonic {
                 knots: vec![
                     IsotonicKnot {
                         score: dec!(0),
@@ -2389,7 +2389,7 @@ mod tests {
                     },
                 ],
             },
-            reliability: ReliabilityReport {
+            ReliabilityReport {
                 bins: vec![ReliabilityBin {
                     predicted_lo: dec!(0),
                     predicted_hi: dec!(1),
@@ -2404,7 +2404,7 @@ mod tests {
                 ece: dec!(0.05),
                 n_samples: 100,
             },
-            split_payout_rate: SplitPayoutRateEvidence {
+            SplitPayoutRateEvidence {
                 total_sample_count: 100,
                 split_sample_count: 0,
                 empirical_probability: Probability::ZERO,
@@ -2415,7 +2415,9 @@ mod tests {
                 split_payout_ratio: PayoutRatio::try_new(dec!(0.5))
                     .expect("canonical split payout"),
             },
-        };
+            &CancellationProbe::default(),
+        )
+        .expect("resolved calibration fixture");
         // score=0.5 sits exactly halfway between the score=0 (p=0.2) and
         // score=1 (p=0.8) knots -> linear interpolation yields p_win=0.5.
         // E[r] = 0.5*(1-0.4)/0.4 - 0.5 = 0.75 - 0.5 = 0.25 -> 2500 bps.

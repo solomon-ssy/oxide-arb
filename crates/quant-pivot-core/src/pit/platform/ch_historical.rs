@@ -200,7 +200,7 @@ impl PointInTimeSnapshotSource for DurablePitSource {
             return Ok(None);
         };
         let mut resolved = resolve_catalog_snapshot(&snapshot, boundary)?;
-        resolved.context.fee_schedule = self
+        let market_info = self
             .clob_market_info_repo
             .at(
                 market_id,
@@ -208,8 +208,10 @@ impl PointInTimeSnapshotSource for DurablePitSource {
                 boundary.decision_at(),
             )
             .await
-            .map_err(PitResolutionStorageError::from)?
-            .map(|version| version.fee_schedule());
+            .map_err(PitResolutionStorageError::from)?;
+        if let Some(version) = market_info {
+            resolved.apply_market_info(&version)?;
+        }
         Ok(Some(resolved))
     }
 
@@ -226,7 +228,7 @@ impl PointInTimeSnapshotSource for DurablePitSource {
             .iter()
             .map(|snapshot| snapshot.market.market_id.clone())
             .collect::<Vec<_>>();
-        let fee_schedules = self
+        let market_info = self
             .clob_market_info_repo
             .at_many(
                 &market_ids,
@@ -236,11 +238,13 @@ impl PointInTimeSnapshotSource for DurablePitSource {
             .await
             .map_err(PitResolutionStorageError::from)?
             .into_iter()
-            .map(|version| (version.market_id.clone(), version.fee_schedule()))
+            .map(|version| (version.market_id.clone(), version))
             .collect::<HashMap<_, _>>();
         let mut resolved = resolve_catalog_snapshots(&snapshots, boundary)?;
         for snapshot in &mut resolved {
-            snapshot.context.fee_schedule = fee_schedules.get(&snapshot.context.market_id).cloned();
+            if let Some(version) = market_info.get(&snapshot.context.market_id) {
+                snapshot.apply_market_info(version)?;
+            }
         }
         Ok(resolved)
     }

@@ -199,8 +199,26 @@ impl ReportFactDeliveryWorker {
             return Ok(false);
         };
         let result = async {
+            let report = self.load_announcement_report(&delivery).await?;
+            if report.status.is_terminal() {
+                tracing::info!(
+                    report_id = %delivery.recommendation_report_id,
+                    status = report.status.as_str(),
+                    "verified report announcement skipped after terminal lifecycle transition"
+                );
+                return QuantResult::Ok(());
+            }
+            if report.status != RecommendationReportStatus::Published {
+                return Err(ReportError::InvariantViolation {
+                    stage: "report_fact_delivery",
+                    detail: format!(
+                        "announcement claim resolved to non-publishable report status: {}",
+                        report.status
+                    ),
+                }
+                .into());
+            }
             let bundle = self.load_bundle(&delivery).await?;
-            let report = self.load_publishable_report(&delivery).await?;
             self.deps
                 .publisher
                 .publish_verified(
@@ -210,10 +228,26 @@ impl ReportFactDeliveryWorker {
                     bundle.notify_operators,
                 )
                 .await;
-            self.deps
+            let settlement = self
+                .deps
                 .reports
                 .acknowledge_fact_announcement(&delivery.recommendation_report_id, self.worker_id)
                 .await?;
+            match settlement {
+                FactDeliverySettlement::Applied(_) => {}
+                FactDeliverySettlement::ClaimLost(current) => {
+                    let current_report = self.load_announcement_report(&delivery).await?;
+                    if current_report.status.is_terminal() {
+                        tracing::info!(
+                            report_id = %delivery.recommendation_report_id,
+                            status = current_report.status.as_str(),
+                            "verified report announcement completed while lifecycle became terminal"
+                        );
+                    } else {
+                        self.observe_claim_lost("announce", &current);
+                    }
+                }
+            }
             QuantResult::Ok(())
         }
         .await;
@@ -291,7 +325,7 @@ impl ReportFactDeliveryWorker {
         Ok(report)
     }
 
-    async fn load_publishable_report(
+    async fn load_announcement_report(
         &self,
         delivery: &ReportFactDeliveryInfo,
     ) -> QuantResult<RecommendationReportInfo> {
@@ -306,13 +340,6 @@ impl ReportFactDeliveryWorker {
                     delivery.recommendation_report_id,
                 )
             })?;
-        if report.status != RecommendationReportStatus::Published {
-            return Err(ReportError::InvariantViolation {
-                stage: "report_fact_delivery",
-                detail: format!("report is not published: {}", report.status),
-            }
-            .into());
-        }
         Ok(report)
     }
 

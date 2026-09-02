@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Duration as StdDuration,
 };
 
 use chrono::{DateTime, Duration, Utc};
@@ -10,7 +11,7 @@ use quant_pivot_api::settlement::resolution::{
     FinalizedResolutionBlock, FinalizedResolutionObservation, FinalizedResolutionScan,
     ResolutionSourceReader,
 };
-use quant_pivot_error::{QuantError, QuantResult, execution::ExecutionError};
+use quant_pivot_error::{QuantError, QuantResult, execution::ExecutionError, infra::InfraError};
 use quant_pivot_models::{
     clickhouse::{MarketResolutionFactInput, MarketResolutionRow},
     domain::{
@@ -20,6 +21,8 @@ use quant_pivot_models::{
         },
         market::MarketInfo,
         quant::{
+            EconomicOutcomeDeferredReason, EconomicOutcomeReconciliationResult,
+            EconomicOutcomeTaskClaim, EconomicOutcomeTaskSettlement,
             ExecutionAttemptReconciliationResult, ExecutionRollupReconciliationResult,
             InsertResolutionOutcomeResult, NewResolutionObservationInbox, OutcomeTaskSettlement,
             RecommendationResolutionReconciliationCandidate, ResolutionObservationInboxInfo,
@@ -27,7 +30,7 @@ use quant_pivot_models::{
             ResolutionProjectionClaim, ResolutionProjectionSettlement, ResolutionScanCommitOutcome,
         },
     },
-    enums::quant::ResolutionProjectionErrorCode,
+    enums::quant::{RecommendationEconomicOutcomeState, ResolutionProjectionErrorCode},
     hashing::CanonicalDigest,
     runtime_config::OutcomeReconciliationPolicy,
     types::{
@@ -36,15 +39,36 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     DomainSourceCursorRepository, ExecutionAttemptOutcomeRepository, FactWriter, MarketRepository,
-    QuantFactReadRepository, RecommendationExecutionRollupRepository,
-    RecommendationResolutionOutcomeRepository, ResolutionObservationRepository,
+    QuantFactReadRepository, RecommendationEconomicOutcomeRepository,
+    RecommendationExecutionRollupRepository, RecommendationResolutionOutcomeRepository,
+    ResolutionObservationRepository,
 };
+use tokio::time::{self, Instant};
+
+use crate::service::recommendation_economic_outcome::{
+    RecommendationEconomicReplayAdapter, RecommendationEconomicReplayAttempt,
+    RecommendationEconomicReplayBinding, RecommendationEconomicReplaySource,
+};
+
+const ECONOMIC_LEASE_SECS: u64 = 60;
+// One claim is acquired immediately before work. The remaining half-lease is
+// reserved for fenced publication/retry; cancellation leaves a recoverable lease.
+const ECONOMIC_REPLAY_BUDGET: StdDuration = StdDuration::from_secs(ECONOMIC_LEASE_SECS / 2);
+
+enum EconomicPassProgress {
+    Continue,
+    CapacityDeferred,
+}
+
 /// Immutable inputs for one bounded reconciliation pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutcomeReconciliationPassConfig {
     pub pass_started_at: DateTime<Utc>,
+    /// The configured worker cadence, also used to recheck busy compute capacity.
+    pub sweep_secs: u64,
     pub candidate_batch_size: u64,
     pub source_block_span: u64,
+    pub economic_source_lateness_secs: u64,
 }
 
 impl OutcomeReconciliationPassConfig {
@@ -53,6 +77,9 @@ impl OutcomeReconciliationPassConfig {
             return Err(invariant_error(
                 "pass_started_at must be a positive UTC timestamp",
             ));
+        }
+        if self.sweep_secs == 0 {
+            return Err(invariant_error("sweep_secs must be positive"));
         }
         if self.candidate_batch_size == 0
             || self.candidate_batch_size > OutcomeReconciliationPolicy::MAX_CANDIDATE_BATCH_SIZE
@@ -68,6 +95,15 @@ impl OutcomeReconciliationPassConfig {
             return Err(invariant_error(format!(
                 "source_block_span must be in 1..={}",
                 OutcomeReconciliationPolicy::MAX_SOURCE_BLOCK_SPAN
+            )));
+        }
+        if self.economic_source_lateness_secs == 0
+            || self.economic_source_lateness_secs
+                > OutcomeReconciliationPolicy::MAX_ECONOMIC_SOURCE_LATENESS_SECS
+        {
+            return Err(invariant_error(format!(
+                "economic_source_lateness_secs must be in 1..={}",
+                OutcomeReconciliationPolicy::MAX_ECONOMIC_SOURCE_LATENESS_SECS
             )));
         }
         Ok(self)
@@ -100,6 +136,34 @@ pub struct OutcomeReconciliationPassSummary {
     pub rollup_inserted: u64,
     pub rollup_existing: u64,
     pub rollup_deferred: u64,
+    pub economic_candidates: u64,
+    pub economic_inserted: u64,
+    pub economic_existing: u64,
+    pub economic_deferred: u64,
+    pub economic_capacity_deferred: u64,
+    pub economic_censored: u64,
+    pub economic_claim_lost: u64,
+}
+
+impl OutcomeReconciliationPassSummary {
+    fn record_economic(&mut self, result: EconomicOutcomeReconciliationResult) -> QuantResult<()> {
+        match result {
+            EconomicOutcomeReconciliationResult::Inserted(outcome) => {
+                self.economic_inserted += 1;
+                if outcome.state == RecommendationEconomicOutcomeState::Censored {
+                    self.economic_censored += 1;
+                }
+            }
+            EconomicOutcomeReconciliationResult::AlreadyPresent(_) => self.economic_existing += 1,
+            EconomicOutcomeReconciliationResult::ClaimLost => self.economic_claim_lost += 1,
+            EconomicOutcomeReconciliationResult::Deferred(_) => {
+                return Err(
+                    invariant_error("economic commit returned a nonterminal result").into(),
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Frozen frontier and aggregate proof for a complete resolution backfill.
@@ -135,6 +199,8 @@ pub struct OutcomeReconciliationServiceDeps {
     pub resolution_outcomes: Arc<dyn RecommendationResolutionOutcomeRepository>,
     pub execution_outcomes: Arc<dyn ExecutionAttemptOutcomeRepository>,
     pub execution_rollups: Arc<dyn RecommendationExecutionRollupRepository>,
+    pub economic_outcomes: Arc<dyn RecommendationEconomicOutcomeRepository>,
+    pub economic_replay: Arc<dyn RecommendationEconomicReplaySource>,
 }
 
 /// Single owner for durable source frontier and both orthogonal outcome backlogs.
@@ -148,6 +214,8 @@ pub struct OutcomeReconciliationService {
     resolution_outcomes: Arc<dyn RecommendationResolutionOutcomeRepository>,
     execution_outcomes: Arc<dyn ExecutionAttemptOutcomeRepository>,
     execution_rollups: Arc<dyn RecommendationExecutionRollupRepository>,
+    economic_outcomes: Arc<dyn RecommendationEconomicOutcomeRepository>,
+    economic_replay: Arc<dyn RecommendationEconomicReplaySource>,
     projection_worker_id: WorkerId,
 }
 
@@ -164,6 +232,8 @@ impl OutcomeReconciliationService {
             resolution_outcomes: deps.resolution_outcomes,
             execution_outcomes: deps.execution_outcomes,
             execution_rollups: deps.execution_rollups,
+            economic_outcomes: deps.economic_outcomes,
+            economic_replay: deps.economic_replay,
             projection_worker_id: WorkerId::from_v7(),
         }
     }
@@ -200,6 +270,17 @@ impl OutcomeReconciliationService {
         let mut summary = OutcomeReconciliationPassSummary::default();
         self.reconcile_execution_page(config, &mut summary).await?;
         self.reconcile_rollup_page(config, &mut summary).await?;
+        Ok(summary)
+    }
+
+    /// Reconcile one bounded recommendation economic-horizon page.
+    pub async fn run_economic_pass(
+        &self,
+        config: OutcomeReconciliationPassConfig,
+    ) -> QuantResult<OutcomeReconciliationPassSummary> {
+        let config = config.validate()?;
+        let mut summary = OutcomeReconciliationPassSummary::default();
+        self.reconcile_economic_page(config, &mut summary).await?;
         Ok(summary)
     }
 
@@ -715,6 +796,197 @@ impl OutcomeReconciliationService {
                 ResolutionOutcomeReconciliationResult::AlreadyPresent(outcome)
             }
         })
+    }
+
+    async fn reconcile_economic_page(
+        &self,
+        config: OutcomeReconciliationPassConfig,
+        summary: &mut OutcomeReconciliationPassSummary,
+    ) -> QuantResult<bool> {
+        let mut had_claims = false;
+        for _ in 0..config.candidate_batch_size {
+            let claims = self
+                .economic_outcomes
+                .claim_due(
+                    config.pass_started_at,
+                    self.projection_worker_id,
+                    ECONOMIC_LEASE_SECS,
+                    config.economic_source_lateness_secs,
+                    1,
+                )
+                .await?;
+            if claims.len() > 1 {
+                return Err(invariant_error("economic claim exceeded its one-task budget").into());
+            }
+            let Some(claim) = claims.into_iter().next() else {
+                break;
+            };
+            had_claims = true;
+            summary.economic_candidates += 1;
+            let work_deadline = Instant::now() + ECONOMIC_REPLAY_BUDGET;
+            if let Some(stored) = time::timeout_at(
+                work_deadline,
+                self.economic_outcomes.find_by_id(&claim.recommendation_id),
+            )
+            .await
+            .map_err(|_| InfraError::ComputeDeadline {
+                subsystem: "recommendation economic replay",
+                deadline_ms: ECONOMIC_REPLAY_BUDGET.as_secs() * 1_000,
+            })?? {
+                let result = self
+                    .economic_outcomes
+                    .complete_task(claim, self.projection_worker_id, stored.into())
+                    .await?;
+                summary.record_economic(result)?;
+                continue;
+            }
+            if matches!(
+                self.reconcile_economic_claim(
+                    claim,
+                    work_deadline,
+                    config.sweep_secs.min(ECONOMIC_LEASE_SECS),
+                    summary,
+                )
+                .await?,
+                EconomicPassProgress::CapacityDeferred
+            ) {
+                break;
+            }
+        }
+        Ok(had_claims)
+    }
+
+    async fn reconcile_economic_claim(
+        &self,
+        claim: EconomicOutcomeTaskClaim,
+        work_deadline: Instant,
+        capacity_retry_secs: u64,
+        summary: &mut OutcomeReconciliationPassSummary,
+    ) -> QuantResult<EconomicPassProgress> {
+        let available_through = claim.source_available_until;
+        let attempt = time::timeout_at(
+            work_deadline,
+            self.economic_replay.replay(claim, available_through),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(InfraError::ComputeDeadline {
+                subsystem: "recommendation economic replay",
+                deadline_ms: ECONOMIC_REPLAY_BUDGET.as_secs() * 1_000,
+            }
+            .into())
+        });
+        let outcome = match attempt {
+            Ok(RecommendationEconomicReplayAttempt::CapacityDeferred) => {
+                // Admission pressure is not a failed replay. Recheck on the
+                // configured sweep, bounded by one claim lease, while retaining
+                // the monotonic attempt generation required for stale-worker fencing.
+                match self
+                    .economic_outcomes
+                    .retry_task(
+                        claim,
+                        self.projection_worker_id,
+                        capacity_retry_secs,
+                        format!(
+                            "{:?}",
+                            EconomicOutcomeDeferredReason::ComputeCapacityUnavailable
+                        ),
+                    )
+                    .await?
+                {
+                    EconomicOutcomeTaskSettlement::Retried => {
+                        summary.economic_capacity_deferred += 1;
+                    }
+                    EconomicOutcomeTaskSettlement::ClaimLost => summary.economic_claim_lost += 1,
+                }
+                return Ok(EconomicPassProgress::CapacityDeferred);
+            }
+            Ok(RecommendationEconomicReplayAttempt::Ready { binding, replay }) => {
+                Self::validate_economic_binding(&claim, available_through, &binding)?;
+                RecommendationEconomicReplayAdapter::adapt(binding, &replay)
+            }
+            Ok(RecommendationEconomicReplayAttempt::Deferred {
+                binding,
+                token_id,
+                cause,
+            }) if available_through < claim.source_cutoff_at => {
+                Self::validate_economic_binding(&claim, available_through, &binding)?;
+                match self
+                    .economic_outcomes
+                    .retry_task(
+                        claim,
+                        self.projection_worker_id,
+                        retry_delay_secs(claim.attempt_count),
+                        cause.task_detail(&binding, &token_id, claim.attempt_count),
+                    )
+                    .await?
+                {
+                    EconomicOutcomeTaskSettlement::Retried => summary.economic_deferred += 1,
+                    EconomicOutcomeTaskSettlement::ClaimLost => summary.economic_claim_lost += 1,
+                }
+                return Ok(EconomicPassProgress::Continue);
+            }
+            Ok(RecommendationEconomicReplayAttempt::Deferred { binding, .. }) => {
+                Self::validate_economic_binding(&claim, available_through, &binding)?;
+                RecommendationEconomicReplayAdapter::censor_unavailable(binding)
+            }
+            Err(error) => {
+                let settlement = self
+                    .economic_outcomes
+                    .retry_task(
+                        claim,
+                        self.projection_worker_id,
+                        retry_delay_secs(claim.attempt_count),
+                        error.to_string(),
+                    )
+                    .await;
+                match settlement {
+                    Ok(EconomicOutcomeTaskSettlement::ClaimLost) => {
+                        summary.economic_claim_lost += 1;
+                        return Ok(EconomicPassProgress::Continue);
+                    }
+                    Ok(EconomicOutcomeTaskSettlement::Retried) => {}
+                    Err(settlement_error) => {
+                        tracing::error!(
+                            recommendation_id = %claim.recommendation_id,
+                            %settlement_error,
+                            "failed to release economic outcome reconciliation lease",
+                        );
+                    }
+                }
+                return Err(error);
+            }
+        }?;
+        let result = self
+            .economic_outcomes
+            .complete_task(claim, self.projection_worker_id, outcome)
+            .await?;
+        summary.record_economic(result)?;
+        Ok(EconomicPassProgress::Continue)
+    }
+
+    fn validate_economic_binding(
+        claim: &EconomicOutcomeTaskClaim,
+        available_through: DateTime<Utc>,
+        binding: &RecommendationEconomicReplayBinding,
+    ) -> QuantResult<()> {
+        if binding.recommendation_id != claim.recommendation_id
+            || binding.horizon_at != claim.horizon_at
+            || binding.replay_until != claim.replay_until
+            || binding.resolution_outcome_hash != claim.resolution_outcome_hash
+            || binding.source_cutoff_at != claim.source_cutoff_at
+            || binding.source_available_until != available_through
+            || binding.source_available_until != claim.source_available_until
+            || binding.replay_until > available_through
+            || available_through > claim.source_cutoff_at
+            || binding.available_at < available_through
+        {
+            return Err(invariant_error(
+                "economic replay binding differs from its durable task cutoff",
+            )
+            .into());
+        }
+        Ok(())
     }
 
     async fn reconcile_execution_page(

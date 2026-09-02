@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use chrono::{DateTime, Utc};
-use flume::{Receiver, Sender};
+use flume::{Receiver, Sender, TrySendError};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -243,8 +243,8 @@ impl IntentEventKind {
     /// The post-submission lifecycle event for a committed status, if the status
     /// maps to an observable venue-settled transition.
     ///
-    /// Pre-submission states (`Draft` / `PendingApproval` / `Approved` /
-    /// `ApprovedByPolicy`) and the transient `AdmissionPending` claim have no
+    /// Pre-submission states (`PendingAuthorization` / `Authorized`) and the
+    /// transient `AdmissionPending` claim have no
     /// post-submission event; the intent service publishes their transitions
     /// explicitly. Used by the dispatcher and reconciliation service to fan out
     /// the venue-settled outcome via [`IntentLifecyclePublisher`].
@@ -700,14 +700,34 @@ impl CoreEvent {
     }
 }
 
-pub type DropObserver = Arc<dyn Fn(&'static str) + Send + Sync>;
+/// Bounded reason set for runtime-event loss telemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreEventDropReason {
+    /// The sole consumer is alive but its bounded mailbox has no free slot.
+    Full,
+    /// The sole consumer has exited and the mailbox can no longer be drained.
+    Disconnected,
+}
+
+impl CoreEventDropReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Disconnected => "disconnected",
+        }
+    }
+}
+
+pub type DropObserver = Arc<dyn Fn(&'static str, CoreEventDropReason) + Send + Sync>;
 
 /// Non-blocking publisher for [`CoreEvent`] with drop counting.
 #[derive(Clone)]
 pub struct CoreEventPublisher {
     tx: Sender<CoreEvent>,
     on_drop: Option<DropObserver>,
-    dropped: Arc<AtomicU64>,
+    full: Arc<AtomicU64>,
+    disconnected: Arc<AtomicU64>,
 }
 
 impl CoreEventPublisher {
@@ -718,7 +738,8 @@ impl CoreEventPublisher {
             Self {
                 tx,
                 on_drop: None,
-                dropped: Arc::new(AtomicU64::new(0)),
+                full: Arc::new(AtomicU64::new(0)),
+                disconnected: Arc::new(AtomicU64::new(0)),
             },
             rx,
         )
@@ -730,21 +751,88 @@ impl CoreEventPublisher {
         self
     }
 
-    /// Publish an event without ever blocking. Drops and counts on a full or
-    /// disconnected channel, invoking the per-kind drop observer.
+    /// Publish an event without ever blocking. Full and disconnected losses
+    /// remain separately observable because only the former is backpressure.
     pub fn publish(&self, event: CoreEvent) {
         let kind = event.kind();
-        if self.tx.try_send(event).is_err() {
-            let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-            if let Some(observer) = &self.on_drop {
-                observer(kind);
+        match self.tx.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                let dropped = self.full.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(observer) = &self.on_drop {
+                    observer(kind, CoreEventDropReason::Full);
+                }
+                tracing::warn!(dropped, kind, "core event channel full; dropping event");
             }
-            tracing::warn!(dropped, kind, "core event channel full; dropping event");
+            Err(TrySendError::Disconnected(_)) => {
+                let dropped = self.disconnected.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(observer) = &self.on_drop {
+                    observer(kind, CoreEventDropReason::Disconnected);
+                }
+                tracing::warn!(
+                    dropped,
+                    kind,
+                    "core event channel disconnected; dropping event"
+                );
+            }
         }
     }
 
     #[must_use]
     pub fn dropped_count(&self) -> u64 {
-        self.dropped.load(Ordering::Relaxed)
+        self.full_count().saturating_add(self.disconnected_count())
+    }
+
+    #[must_use]
+    pub fn full_count(&self) -> u64 {
+        self.full.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn disconnected_count(&self) -> u64 {
+        self.disconnected.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{CoreEvent, CoreEventDropReason, CoreEventPublisher};
+
+    #[test]
+    fn publisher_classifies_loss() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let hook_observed = Arc::clone(&observed);
+        let (publisher, receiver) = CoreEventPublisher::bounded(1);
+        let publisher = publisher.with_drop_hook(Arc::new(move |kind, reason| {
+            hook_observed
+                .lock()
+                .expect("drop telemetry lock")
+                .push((kind, reason));
+        }));
+        publisher.publish(CoreEvent::ConfigActivated {
+            version_id: "first".to_owned(),
+        });
+        publisher.publish(CoreEvent::ConfigActivated {
+            version_id: "full".to_owned(),
+        });
+        assert_eq!(publisher.full_count(), 1);
+        assert_eq!(publisher.disconnected_count(), 0);
+
+        drop(receiver);
+        publisher.publish(CoreEvent::ConfigActivated {
+            version_id: "disconnected".to_owned(),
+        });
+        assert_eq!(publisher.full_count(), 1);
+        assert_eq!(publisher.disconnected_count(), 1);
+        assert_eq!(publisher.dropped_count(), 2);
+        assert_eq!(
+            *observed.lock().expect("drop telemetry lock"),
+            vec![
+                ("config.activated", CoreEventDropReason::Full),
+                ("config.activated", CoreEventDropReason::Disconnected),
+            ]
+        );
     }
 }

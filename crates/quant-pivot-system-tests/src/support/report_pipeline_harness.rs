@@ -28,9 +28,9 @@ use quant_pivot_core::{
     },
     prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
     report::{
-        AdHocReportRequest, DefaultRecommendationComposer, DefaultReportBuilder, ReportBuilderDeps,
-        ReportLifecycleDeps, ReportLifecycleService, ReportPublisher, ReportPublisherDeps,
-        ReportReadinessGate,
+        AdHocReportRequest, DefaultRecommendationComposer, DefaultReportBuilder,
+        RecommendationComposer, ReportBuilderDeps, ReportLifecycleDeps, ReportLifecycleService,
+        ReportPublisher, ReportPublisherDeps, ReportReadinessGate,
     },
     service::{
         account::{
@@ -74,9 +74,9 @@ use quant_pivot_models::{
             PortfolioScenarioArtifact, PortfolioScenarioEvidenceRegime, PortfolioScenarioKind,
             PortfolioScenarioVisibility, RecommendationInfo, RecommendationReportInfo,
             ReportRunClaimConfig, RepresentedRouteSet, ResolvedBinding, ResolvedSourceBinding,
-            RouteCandidateFunnel, RouteModelLineage, RouteRunOutcome, ScenarioCashflow,
-            ScenarioDistribution, ScenarioWeight, SolverEvidence, WeatherDecisionGroupKey,
-            WeatherSubject,
+            RouteCandidateFunnel, RouteHistoryLineage, RouteModelLineage, RouteRunOutcome,
+            ScenarioCashflow, ScenarioDistribution, ScenarioWeight, SolverEvidence,
+            WeatherDecisionGroupKey, WeatherSubject,
         },
         runtime::CoreEventPublisher,
     },
@@ -124,6 +124,7 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::{
+    clickhouse::ChFactWriter,
     postgres::{
         PgCalibrationArtifactRepository, PgEquitySnapshotRepository, PgEventRepository,
         PgExecutionAccountRepository, PgFactorRepository, PgFeatureParityRepository,
@@ -135,12 +136,12 @@ use quant_pivot_repository::{
     },
     traits::{
         BasisAlertRepository, CalibrationArtifactRepository, EquitySnapshotRepository,
-        EventRepository, ExecutionAccountRepository, FactorRepository, FeatureParityRepository,
-        MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
-        ModelRegistryRepository, ModelRunRepository, PolicyRepository, QuantFactReadRepository,
-        RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
-        ReservedCapitalRepository, StrategyPositionLotRepository, TradePolicyRepository,
-        VenueIncentiveRepository,
+        EventRepository, ExchangeHistoryRepository, ExecutionAccountRepository, FactorRepository,
+        FeatureParityRepository, MarketLinkageRepository, MarketRepository,
+        MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository, PolicyRepository,
+        QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
+        ReportRunRepository, ReservedCapitalRepository, StrategyPositionLotRepository,
+        TradePolicyRepository, VenueIncentiveRepository,
     },
 };
 use quant_pivot_research::{
@@ -153,7 +154,10 @@ use quant_pivot_research::{
     portfolio::CapitalTimeBucketContract,
     selection::ConfiguredMarketSelector,
 };
-use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
+use quant_pivot_storage::{
+    clickhouse::{ChWriteManager, ClickHousePool},
+    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability},
+};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
@@ -163,10 +167,10 @@ use super::{
     artifact_store::VersionedArtifactStoreFixture,
     catalog_fixtures::{make_event, make_market},
     execution_history_fixtures::{
-        WHALE_FIXTURE_EXECUTION_COUNT, live_activation_head, live_history_config,
-        live_history_repo, whale_execution_rows,
+        LiveExchangeHistoryRepo, WHALE_FIXTURE_EXECUTION_COUNT, live_activation_head,
+        live_history_config, live_history_repo, whale_execution_rows,
     },
-    execution_pg_seed::{fixture_profile_ref, seed_score_calibration},
+    execution_pg_seed::{CalibrationEvidencePreset, fixture_profile_ref, seed_score_calibration},
     fact_sink::DiscardFactWriter,
     factor_definitions::register_all_factor_definitions,
     model_serving_fixtures::{
@@ -182,7 +186,9 @@ use super::{
     portfolio_scenario_fixtures::activate_report_portfolio,
     report_fixtures,
     report_lifecycle_seed::{persist_and_publish_report, persist_prepared_report},
-    trade_policy_fixtures::{PublishedTradePolicyFixture, PublishedTradePolicyFixtureInput},
+    trade_policy_fixtures::{
+        FixtureBookTiming, PublishedTradePolicyFixture, PublishedTradePolicyFixtureInput,
+    },
 };
 
 /// Seeded catalog ids shared across report pipeline E2E tests.
@@ -210,7 +216,10 @@ fn harness_execution_account() -> NewExecutionAccount {
     .expect("harness execution account identity")
 }
 
-async fn ensure_harness_execution_account(db: &DatabaseConnection) -> ExecutionAccountId {
+/// Persist the isolated report harness's canonical execution account.
+pub(crate) async fn ensure_harness_execution_account(
+    db: &DatabaseConnection,
+) -> ExecutionAccountId {
     PgExecutionAccountRepository::new(db.clone())
         .ensure(harness_execution_account())
         .await
@@ -237,12 +246,14 @@ pub enum AccountFixture {
 }
 
 /// Bootstrap knobs for [`ReportPipelineHarness::bootstrap`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HarnessOptions {
     pub selection: SelectionPreset,
     pub account: AccountFixture,
     pub collateral: Usd,
     pub bind_trade_policy: bool,
+    pub evidence: ReportEvidenceWriters,
+    pub finalized_history_watermark: Option<DateTime<Utc>>,
 }
 
 impl Default for HarnessOptions {
@@ -252,6 +263,53 @@ impl Default for HarnessOptions {
             account: AccountFixture::Stub,
             collateral: Usd::new(dec!(10_000)),
             bind_trade_policy: true,
+            evidence: ReportEvidenceWriters::default(),
+            finalized_history_watermark: None,
+        }
+    }
+}
+
+/// Acknowledged feature, model-input, and completion sinks for report fixtures.
+#[derive(Clone)]
+pub struct ReportEvidenceWriters {
+    pub features: Arc<FeatureEventWriter>,
+    pub model_inputs: Arc<ModelInputEventWriter>,
+}
+
+impl Default for ReportEvidenceWriters {
+    fn default() -> Self {
+        Self {
+            features: Arc::new(FeatureEventWriter::new(Arc::new(DiscardFactWriter::new()))),
+            model_inputs: Arc::new(ModelInputEventWriter::new(
+                Arc::new(DiscardFactWriter::new()),
+                Arc::new(DiscardFactWriter::new()),
+            )),
+        }
+    }
+}
+
+impl ReportEvidenceWriters {
+    /// Persist the complete serving-evidence chain through production CH adapters.
+    #[must_use]
+    pub fn clickhouse(pool: Arc<ClickHousePool>, manager: Arc<ChWriteManager>) -> Self {
+        Self {
+            features: Arc::new(FeatureEventWriter::new(Arc::new(ChFactWriter::new(
+                Arc::clone(&pool),
+                Arc::clone(&manager),
+                "quant_feature_event",
+            )))),
+            model_inputs: Arc::new(ModelInputEventWriter::new(
+                Arc::new(ChFactWriter::new(
+                    Arc::clone(&pool),
+                    Arc::clone(&manager),
+                    "quant_model_input_event",
+                )),
+                Arc::new(ChFactWriter::new(
+                    pool,
+                    manager,
+                    "quant_serving_evidence_completion",
+                )),
+            )),
         }
     }
 }
@@ -288,10 +346,11 @@ impl HarnessOptions {
 /// Wired report lifecycle + repositories for integration tests.
 pub struct ReportPipelineHarness {
     pub db: DatabaseConnection,
-    pub lifecycle: ReportLifecycleService,
+    pub lifecycle: Arc<ReportLifecycleService>,
     pub report_repo: Arc<PgRecommendationReportRepository>,
     pub report_run_repo: Arc<PgReportRunRepository>,
     pub recommendation_repo: Arc<PgRecommendationRepository>,
+    pub exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
     decision_at: DateTime<Utc>,
@@ -899,8 +958,14 @@ impl ReportPipelineHarness {
 
         ensure_harness_execution_account(db).await;
         let account_factory = account_factory(db, Arc::clone(&registry), &options);
-        let model_runner = build_model_runner(db, &store).await;
+        let model_runner =
+            build_model_runner(db, &store, Arc::clone(&options.evidence.model_inputs)).await;
         let feature_parity_state_id = clear_feature_parity(db).await;
+        let exchange_history_repo = options
+            .finalized_history_watermark
+            .map_or_else(live_history_repo, |through| {
+                Arc::new(LiveExchangeHistoryRepo::through(through))
+            });
 
         // Freeze the venue snapshot only after every asynchronous bootstrap
         // step. The report claim owns its decision time through the PostgreSQL
@@ -926,6 +991,10 @@ impl ReportPipelineHarness {
             account_factory,
             artifact_store: Arc::clone(&store),
             calibration_loader,
+            feature_writer: options.evidence.features,
+            exchange_history_repo: Arc::clone(&exchange_history_repo),
+            fact_read: Arc::new(ReportFactRead),
+            composer: Arc::new(DefaultRecommendationComposer::new()),
         });
         let lifecycle = build_lifecycle_service(
             db,
@@ -937,10 +1006,11 @@ impl ReportPipelineHarness {
 
         Self {
             db: db.clone(),
-            lifecycle,
+            lifecycle: Arc::new(lifecycle),
             report_repo: Arc::new(PgRecommendationReportRepository::new(db.clone())),
             report_run_repo: Arc::new(PgReportRunRepository::new(db.clone())),
             recommendation_repo: Arc::new(PgRecommendationRepository::new(db.clone())),
+            exchange_history_repo,
             decision_policy_snapshot_id: version.decision_policy_snapshot_id,
             model_version_id,
             decision_at,
@@ -1470,10 +1540,12 @@ fn fixture_route_runs(
         serving_contract_digest: lineage.serving_contract_digest,
         recommendation_contract_hash: lineage.recommendation_contract_hash,
         report_universe_plan_hash: fixture_content_hash("report-universe-plan"),
-        history_serving_head_seal_id: HistoryServingHeadSealId::new(
-            lineage.report_route_run_id.as_uuid(),
-        ),
-        history_serving_head_seal_hash: fixture_content_hash("history-serving-head"),
+        history: RouteHistoryLineage::Runtime {
+            serving_head_seal_id: HistoryServingHeadSealId::new(
+                lineage.report_route_run_id.as_uuid(),
+            ),
+            serving_head_seal_hash: fixture_content_hash("history-serving-head"),
+        },
         serving_authority: ServingAuthority::ExecutionEligible,
     };
     vec![NewReportRouteRun {
@@ -1782,7 +1854,10 @@ fn recording_alerts() -> Arc<AlertDispatcher> {
     ))))
 }
 
-fn calibration_artifact_loader(db: &DatabaseConnection) -> Arc<dyn CalibrationArtifactLoader> {
+/// Resolve calibration artifacts through their owning database repository.
+pub(crate) fn calibration_artifact_loader(
+    db: &DatabaseConnection,
+) -> Arc<dyn CalibrationArtifactLoader> {
     Arc::new(CoreCalibrationArtifactLoader::new(
         Arc::new(PgCalibrationArtifactRepository::new(db.clone()))
             as Arc<dyn CalibrationArtifactRepository>,
@@ -1792,6 +1867,7 @@ fn calibration_artifact_loader(db: &DatabaseConnection) -> Arc<dyn CalibrationAr
 pub(crate) async fn build_model_runner(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
+    model_input_writer: Arc<ModelInputEventWriter>,
 ) -> Arc<ModelRunner> {
     let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
     let factor_pipeline = Arc::new(FactorPipelineService::new(
@@ -1819,22 +1895,30 @@ pub(crate) async fn build_model_runner(
         serving_generations,
         factor_pipeline,
         signal_writer: noop_signal_writer(),
-        model_input_writer: noop_model_input_writer(),
+        model_input_writer,
         alerts: Arc::new(DispatcherAlertSink::new(recording_alerts())),
     }))
 }
 
-struct ReportBuilderHarnessInput<'a> {
-    db: &'a DatabaseConnection,
-    runtime_config_repo: Arc<dyn PolicyRepository>,
-    candidate_provider: Arc<MarketCandidateProvider>,
-    model_runner: Arc<ModelRunner>,
-    account_factory: Arc<AccountProviderFactory>,
-    artifact_store: Arc<dyn ArtifactStore>,
-    calibration_loader: Arc<dyn CalibrationArtifactLoader>,
+/// Explicit source and observation boundaries for the production report builder.
+pub(crate) struct ReportBuilderHarnessInput<'a> {
+    pub db: &'a DatabaseConnection,
+    pub runtime_config_repo: Arc<dyn PolicyRepository>,
+    pub candidate_provider: Arc<MarketCandidateProvider>,
+    pub model_runner: Arc<ModelRunner>,
+    pub account_factory: Arc<AccountProviderFactory>,
+    pub artifact_store: Arc<dyn ArtifactStore>,
+    pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
+    pub feature_writer: Arc<FeatureEventWriter>,
+    pub exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
+    pub fact_read: Arc<dyn QuantFactReadRepository>,
+    pub composer: Arc<dyn RecommendationComposer>,
 }
 
-fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultReportBuilder> {
+/// Wire the production builder without replacing its economic decision logic.
+pub(crate) fn build_report_builder(
+    input: ReportBuilderHarnessInput<'_>,
+) -> Arc<DefaultReportBuilder> {
     let ReportBuilderHarnessInput {
         db,
         runtime_config_repo,
@@ -1843,6 +1927,10 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
         account_factory,
         artifact_store,
         calibration_loader,
+        feature_writer,
+        exchange_history_repo,
+        fact_read,
+        composer,
     } = input;
     Arc::new(DefaultReportBuilder::new(ReportBuilderDeps {
         runtime_config_repo,
@@ -1855,10 +1943,10 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
         candidate_provider,
         feature_pipeline: Arc::new(FeaturePipelineService::new(FeaturePipelineDeps {
             compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
-            window_provider: FeatureWindowProvider::new(Arc::new(ReportFactRead)),
+            window_provider: FeatureWindowProvider::new(fact_read),
             feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
-            event_writer: noop_feature_writer(),
-            exchange_history_repo: live_history_repo(),
+            event_writer: feature_writer,
+            exchange_history_repo: Arc::clone(&exchange_history_repo),
             linkage_repo: Arc::new(PgMarketLinkageRepository::new(db.clone())),
             basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
             calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
@@ -1875,12 +1963,12 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
                 as Arc<dyn VenueIncentiveRepository>,
             harness_execution_account().execution_account_id,
         )),
-        composer: Arc::new(DefaultRecommendationComposer::new()),
+        composer,
         portfolio_solver: PortfolioSolverDeployConfig::default(),
         runtime_controls: RuntimeControlsHandle::default(),
         readiness_gate: Arc::new(AlwaysOperationalGate),
         microstructure_commit: Arc::new(ImmediateCommitBarrier),
-        exchange_history_repo: live_history_repo(),
+        exchange_history_repo,
         venue_incentive_repo: Arc::new(PgVenueIncentiveRepository::new(db.clone()))
             as Arc<dyn VenueIncentiveRepository>,
         execution_account_id: harness_execution_account().execution_account_id,
@@ -2377,7 +2465,8 @@ fn runtime_config_for_pipeline(
     config
 }
 
-fn account_factory(
+/// Wire the fixture venue client into the production account-provider factory.
+pub(crate) fn account_factory(
     db: &DatabaseConnection,
     registry: Arc<MarketRegistry>,
     options: &HarnessOptions,
@@ -2441,6 +2530,39 @@ async fn publish_pooled_model(input: &PooledModelFixture<'_>) {
     persist_pooled_calibration(input, &prepared, source_model_version_id).await;
 }
 
+pub(crate) async fn publish_pooled_control_model(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    model_version_id: ModelVersionId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+) {
+    let policy = PgPolicyRepository::new(db.clone())
+        .load_snapshot(&decision_policy_snapshot_id)
+        .await
+        .expect("load pooled control policy")
+        .expect("pooled control policy snapshot");
+    let binding = policy
+        .snapshot
+        .model_routing
+        .model
+        .route_binding(BuyModelRoute::Pooled)
+        .expect("pooled control Route binding");
+    assert_eq!(
+        binding.champion.model_version_id, model_version_id,
+        "pooled control model differs from its policy binding"
+    );
+    publish_pooled_model(&PooledModelFixture {
+        db,
+        store,
+        factors: &policy.snapshot.profile_artifacts.scoring.definition,
+        features: &policy.snapshot.profile_artifacts.features.definition,
+        domain: &policy.snapshot.profile_artifacts.domain.definition,
+        model_version_id,
+        decision_policy_snapshot_id,
+    })
+    .await;
+}
+
 async fn prepare_pooled_model(input: &PooledModelFixture<'_>) -> PreparedWeightedModel {
     let profile_ref = pooled_bootstrap_profile_ref();
     let profile = profile_ref
@@ -2468,7 +2590,9 @@ async fn prepare_pooled_model(input: &PooledModelFixture<'_>) -> PreparedWeighte
     let model_spec_id = spec.model_spec_id;
     let model_spec_definition_hash = spec.definition_hash;
     let input_contract = spec.input_contract;
-    let window_end = Utc::now() - ChronoDuration::days(60);
+    // Bootstrap serving lineage must predate any complete feedback program;
+    // a recent fixture window can overlap governed train/calibration splits.
+    let window_end = Utc::now() - ChronoDuration::days(365);
     let window_start = window_end - ChronoDuration::days(1);
     let dataset = ModelDatasetLedgerFixture::persist(
         input.db,
@@ -2583,6 +2707,7 @@ async fn persist_pooled_calibration(
         input.db,
         input.store,
         &source_model_version_id,
+        CalibrationEvidencePreset::Baseline,
     ))
     .await;
     let calibration_repo = PgCalibrationArtifactRepository::new(input.db.clone());
@@ -2681,6 +2806,7 @@ async fn prepare_weighted_model(input: &WeightedModelFixture<'_>) -> PreparedWei
                 input.db,
                 input.store,
                 PublishedTradePolicyFixtureInput {
+                    book_timing: FixtureBookTiming::standard(),
                     decision_policy_snapshot_id: *input.decision_policy_snapshot_id,
                     profile_ref: fixture_profile_ref(),
                     scope: "report-pipeline",
@@ -2836,6 +2962,7 @@ async fn persist_calibrated_model(
         input.db,
         input.store,
         &source_model_version_id,
+        CalibrationEvidencePreset::Baseline,
     ))
     .await;
     let calibration_repo = PgCalibrationArtifactRepository::new(input.db.clone());
@@ -2926,10 +3053,6 @@ fn artifact_store() -> Arc<dyn ArtifactStore> {
     Arc::new(VersionedArtifactStoreFixture::new(inner))
 }
 
-fn noop_feature_writer() -> Arc<FeatureEventWriter> {
-    Arc::new(FeatureEventWriter::new(Arc::new(DiscardFactWriter::new())))
-}
-
 fn noop_factor_writer() -> Arc<FactorEventWriter> {
     let (writer, _worker) = AsyncWriter::new(
         AsyncWriterConfig::new("report-pipeline-factor").capacity(64),
@@ -2948,11 +3071,4 @@ fn noop_signal_writer() -> Arc<SignalCandidateEventWriter> {
         AsyncWriterObservability::default(),
     );
     Arc::new(SignalCandidateEventWriter::new(Arc::new(writer)))
-}
-
-fn noop_model_input_writer() -> Arc<ModelInputEventWriter> {
-    Arc::new(ModelInputEventWriter::new(
-        Arc::new(DiscardFactWriter::new()),
-        Arc::new(DiscardFactWriter::new()),
-    ))
 }

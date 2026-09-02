@@ -5,7 +5,7 @@ use sea_orm::{
     DbBackend, EntityTrait, Schema,
     sea_query::Expr,
 };
-use sea_orm_migration::{prelude::*, sea_query::extension::postgres::Type};
+use sea_orm_migration::prelude::*;
 
 use super::support::{
     column_defaults, column_defaults::SOURCE as COLUMN_DEFAULTS_SQL, query_indexes,
@@ -16,7 +16,7 @@ use super::support::{
 use crate::{
     MigrationSpec, audit, migration_spec,
     snapshots::v1::{
-        ARTIFACTS, ENUMS, MODULE_PREFIX, TABLES,
+        ARTIFACTS, MODULE_PREFIX, SCHEMA_ENUMS, SCHEMA_TABLES,
         policy_activation_guard::{ActiveModel, Entity},
         sea_orm_active_enums::{
             QpCatalogFilterReason, QpEntryAuthorizationPolicy, QpExecutionAuthorityCeiling,
@@ -43,9 +43,16 @@ pub struct Migration;
 
 impl Migration {
     pub fn spec() -> MigrationSpec {
-        let mut artifacts = Vec::with_capacity(ARTIFACTS.len() + 6);
+        let mut artifacts =
+            Vec::with_capacity(ARTIFACTS.len() + SCHEMA_TABLES.len() + SCHEMA_ENUMS.len() + 6);
         artifacts.push(SOURCE.as_bytes());
         artifacts.extend_from_slice(ARTIFACTS);
+        artifacts.extend(SCHEMA_TABLES.iter().map(|table| table.as_bytes()));
+        artifacts.extend(
+            SCHEMA_ENUMS
+                .iter()
+                .map(|native_enum| native_enum.as_bytes()),
+        );
         artifacts.extend([
             RELATIONAL_INVARIANTS_SQL,
             QUERY_INDEXES_SQL,
@@ -114,36 +121,11 @@ impl MigrationTrait for Migration {
             .map_err(|error| DbErr::Custom(format!("migration artifact audit failed: {error}")))
     }
 
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        audit::remove(manager, NAME).await?;
-        for table in TABLES.iter().rev() {
-            manager
-                .drop_table(
-                    Table::drop()
-                        .table((Alias::new("public"), Alias::new(*table)))
-                        .cascade()
-                        .to_owned(),
-                )
-                .await?;
-        }
-        manager
-            .drop_table(
-                Table::drop()
-                    .table((Alias::new("public"), SchemaMigrationAudit::Table))
-                    .to_owned(),
-            )
-            .await?;
-        for enum_name in ENUMS.iter().rev() {
-            manager
-                .drop_type(
-                    Type::drop()
-                        .name((Alias::new("public"), Alias::new(*enum_name)))
-                        .to_owned(),
-                )
-                .await?;
-        }
-        v1::drop_validation_programs(manager).await?;
-        v1::drop_trigger_programs(manager).await
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Err(DbErr::Custom(
+            "the fresh-bootstrap schema has no down path; use the guarded disposable reset command against an explicitly owned empty environment"
+                .to_owned(),
+        ))
     }
 }
 

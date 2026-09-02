@@ -5,8 +5,8 @@
 //! verdict, and applies one idempotent ledger correction. An `Unresolvable`
 //! verdict freezes the capital (`Impaired`), latches the kill-switch via the
 //! execution breaker, and bumps the unresolvable metric — fail-closed until an
-//! operator resolves it. Reconciliation runs in **all** modes: in-flight money
-//! must be reconciled regardless of the current runtime mode.
+//! operator resolves it. Reconciliation is independent of entry authorization:
+//! in-flight money must always be reconciled.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -26,17 +26,19 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     domain::{
         data_plane::DecisionClock,
+        order::PolymarketOrderRules,
         quant::{
             CapitalReconcileSettlement, CumulativePositionExit, CumulativePositionFill,
             ExecutionOrderIdentityRefs, ExecutionOrderInfo, OrderIntentInfo, RecommendationInfo,
-            ReconciliationLedgerWrite, StrategyPositionLot,
+            ReconciliationInfo, ReconciliationLedgerWrite, StrategyPositionLot,
         },
         runtime::{CoreEvent, CoreEventPublisher, ReconciliationLifecycleEvent},
     },
     enums::{
         clickhouse::ChQuantLedgerEventKind,
+        common::{OrderType, Side},
         execution::{
-            ExecutionOrderPhase, ExitReason, ExitState, ReconciliationEvidenceKind,
+            ExecutionOrderPhase, ExitReason, ExitState, OrderTypeKind, ReconciliationEvidenceKind,
             ReconciliationResult, VenueOrderStatus,
         },
         fee::FeeLiquidityRole,
@@ -57,7 +59,7 @@ use quant_pivot_research::execution_semantics::{
     LiquidityRole, PitFeeSchedule, PitMakerRebateEvidence, PitMarketExecutionEconomics,
 };
 
-use super::{CollectedReconciliation, EvidenceCollector, VenuePresence};
+use super::{CollectedReconciliation, EvidenceCollector, ShareSettlementBasis, VenuePresence};
 use crate::{
     execution::{
         ExecutionBreaker, ExecutionOrderLifecyclePublisher, IntentLifecyclePublisher,
@@ -96,12 +98,31 @@ struct TermsDriftRequest<'a> {
     original_order: &'a ExecutionOrderInfo,
     effective_order: &'a ExecutionOrderInfo,
     identity_refs: &'a ExecutionOrderIdentityRefs,
+    share_basis: ShareSettlementBasis,
     recommendation: &'a RecommendationInfo,
     intent_status: OrderIntentStatus,
     collected: CollectedReconciliation,
     context: &'a ReconcileContextMaps,
     now: DateTime<Utc>,
     stale_after: Duration,
+}
+
+struct StaleCancelRequest<'a> {
+    order: &'a ExecutionOrderInfo,
+    identity_refs: &'a ExecutionOrderIdentityRefs,
+    share_basis: ShareSettlementBasis,
+    collected: CollectedReconciliation,
+    now: DateTime<Utc>,
+    stale_after: Duration,
+}
+
+struct DecisionApplyContext<'a> {
+    order: &'a ExecutionOrderInfo,
+    intent: &'a OrderIntentInfo,
+    recommendation: &'a RecommendationInfo,
+    lot: Option<&'a StrategyPositionLot>,
+    collected: CollectedReconciliation,
+    now: DateTime<Utc>,
 }
 
 fn load_reconcile_context(
@@ -389,6 +410,7 @@ impl ReconciliationService {
             original_order,
             effective_order,
             identity_refs,
+            share_basis,
             recommendation,
             intent_status,
             mut collected,
@@ -440,7 +462,13 @@ impl ReconciliationService {
         match self
             .deps
             .collector
-            .collect(effective_order, identity_refs, now, stale_after)
+            .collect(
+                effective_order,
+                identity_refs,
+                share_basis,
+                now,
+                stale_after,
+            )
             .await
         {
             Ok(mut recollected) => {
@@ -486,6 +514,35 @@ impl ReconciliationService {
 
         let (intent, recommendation) = load_reconcile_context(order, context)?;
 
+        let (prior_reconciliation, lot) = tokio::try_join!(
+            self.deps
+                .reconciliation
+                .find_by_execution_order(&order.execution_order_id),
+            self.deps.positions.find_by_intent(&order.order_intent_id),
+        )?;
+        let share_basis = match Self::share_basis(
+            order,
+            intent.execution_account_id,
+            prior_reconciliation.as_ref(),
+            lot.as_ref(),
+        ) {
+            Ok(basis) => basis,
+            Err(error) => {
+                return self
+                    .apply_unresolvable(
+                        order,
+                        intent.status,
+                        vec![system_note(
+                            ReconciliationEvidenceKind::TokenBalanceDelta,
+                            error.to_string(),
+                            now,
+                        )],
+                        &recommendation,
+                    )
+                    .await;
+            }
+        };
+
         let identity_refs = self
             .deps
             .submission
@@ -497,7 +554,7 @@ impl ReconciliationService {
         let collected = match self
             .deps
             .collector
-            .collect(order, &identity_refs, now, stale_after)
+            .collect(order, &identity_refs, share_basis, now, stale_after)
             .await
         {
             Ok(collected) => collected,
@@ -539,6 +596,7 @@ impl ReconciliationService {
                 original_order: order,
                 effective_order: &effective_order,
                 identity_refs: &identity_refs,
+                share_basis,
                 recommendation: &recommendation,
                 intent_status: intent.status,
                 collected,
@@ -553,16 +611,16 @@ impl ReconciliationService {
 
         // Actively cancel a stale (or GTD-expired) resting order, then re-collect
         // the post-cancel truth so unfilled capital is released promptly.
-        let (collected, recollected) = recollect_after_stale_cancel(
-            &self.deps.collector,
-            &self.deps.order_client,
-            &effective_order,
-            &identity_refs,
-            collected,
-            now,
-            stale_after,
-        )
-        .await;
+        let (collected, recollected) = self
+            .recollect_stale(StaleCancelRequest {
+                order: &effective_order,
+                identity_refs: &identity_refs,
+                share_basis,
+                collected,
+                now,
+                stale_after,
+            })
+            .await;
         if recollected {
             self.deps
                 .submission
@@ -573,22 +631,72 @@ impl ReconciliationService {
                 .await?;
         }
 
+        self.apply_decision(DecisionApplyContext {
+            order,
+            intent: &intent,
+            recommendation: &recommendation,
+            lot: lot.as_ref(),
+            collected,
+            now,
+        })
+        .await
+    }
+
+    async fn recollect_stale(
+        &self,
+        request: StaleCancelRequest<'_>,
+    ) -> (CollectedReconciliation, bool) {
+        let StaleCancelRequest {
+            order,
+            identity_refs,
+            share_basis,
+            collected,
+            now,
+            stale_after,
+        } = request;
+        if collected.facts.presence == VenuePresence::Resting
+            && (collected.facts.past_stale_deadline || collected.facts.gtd_expired)
+            && let Some(venue_order_id) = order.venue_order_id.as_ref()
+        {
+            let _ = self.deps.order_client.cancel(venue_order_id).await;
+            return self
+                .deps
+                .collector
+                .collect(order, identity_refs, share_basis, now, stale_after)
+                .await
+                .map_or((collected, false), |recollected| (recollected, true));
+        }
+        (collected, false)
+    }
+
+    async fn apply_decision(&self, context: DecisionApplyContext<'_>) -> QuantResult<()> {
+        let DecisionApplyContext {
+            order,
+            intent,
+            recommendation,
+            lot,
+            collected,
+            now,
+        } = context;
         let decision = collected.facts.decide();
         if decision.result == ReconciliationResult::Pending {
-            // No terminal decision yet — leave for the next sweep.
             return Ok(());
         }
 
-        let evidence = collected.evidence;
+        let mut evidence = collected.evidence;
         if decision.result == ReconciliationResult::Unresolvable {
             return self
-                .apply_unresolvable(order, intent.status, evidence, &recommendation)
+                .apply_unresolvable(order, intent.status, evidence, recommendation)
                 .await;
         }
+        if let Some(projection) = decision.share_projection {
+            evidence.push(system_note(
+                ReconciliationEvidenceKind::TokenBalanceDelta,
+                format!("directional share settlement projection: {projection:?}"),
+                now,
+            ));
+        }
 
-        // An exit order's correction needs the lot's cost basis to price the
-        // realized PnL; load it for exit orders only.
-        let lot = self.exit_lot(order).await?;
         let terminal = TerminalDecision {
             result: decision.result,
             filled_shares: decision.filled_shares,
@@ -600,9 +708,9 @@ impl ReconciliationService {
         };
         let write = Self::build_terminal_write(
             order,
-            &recommendation,
+            recommendation,
             intent.execution_account_id,
-            lot.as_ref(),
+            lot,
             terminal,
             ReconciliationEvidenceChain(evidence),
             now,
@@ -629,6 +737,113 @@ impl ReconciliationService {
         self.publish_reconciliation(order, decision.result, false);
         if let Some(pnl) = exit_realized_pnl {
             self.deps.breaker.observe_realized_pnl(pnl, now).await;
+        }
+        Ok(())
+    }
+
+    fn share_basis(
+        order: &ExecutionOrderInfo,
+        execution_account_id: ExecutionAccountId,
+        prior: Option<&ReconciliationInfo>,
+        lot: Option<&StrategyPositionLot>,
+    ) -> Result<ShareSettlementBasis, ExecutionError> {
+        Self::validate_prepared(order)?;
+        if let Some(lot) = lot
+            && (lot.order_intent_id != Some(order.order_intent_id)
+                || lot.execution_account_id != execution_account_id
+                || lot.token_id != order.token_id
+                || lot.market_id != order.market_id)
+        {
+            return Err(ExecutionError::ReconciliationUnresolvable {
+                reason: "position lot identity differs from the reconciled order".to_owned(),
+            });
+        }
+        let previously_applied = prior
+            .and_then(|reconciliation| reconciliation.venue_filled_shares)
+            .unwrap_or(Shares::ZERO);
+        let lot_remaining = lot.map_or(Shares::ZERO, |position| position.shares);
+        match (order.order_phase, order.side) {
+            (ExecutionOrderPhase::Entry, Side::Buy) => Ok(ShareSettlementBasis::BuyReceipt {
+                lot_remaining,
+                previously_applied,
+            }),
+            (ExecutionOrderPhase::Exit, Side::Sell) if lot.is_some() => {
+                Ok(ShareSettlementBasis::SellDebit {
+                    lot_remaining,
+                    previously_applied,
+                })
+            }
+            (ExecutionOrderPhase::Entry, Side::Sell) | (ExecutionOrderPhase::Exit, Side::Buy) => {
+                Err(ExecutionError::ReconciliationUnresolvable {
+                    reason: format!(
+                        "illegal reconciliation phase/side pair: {:?}/{:?}",
+                        order.order_phase, order.side
+                    ),
+                })
+            }
+            (ExecutionOrderPhase::Exit, Side::Sell) => {
+                Err(ExecutionError::ReconciliationUnresolvable {
+                    reason: "exit reconciliation has no current position lot".to_owned(),
+                })
+            }
+        }
+    }
+
+    fn validate_prepared(order: &ExecutionOrderInfo) -> Result<(), ExecutionError> {
+        let prepared = &order.prepared_order_json;
+        let mismatch = |field: &'static str| ExecutionError::ReconciliationUnresolvable {
+            reason: format!("prepared order and execution WAL differ at {field}"),
+        };
+        if prepared.market_id != order.market_id {
+            return Err(mismatch("market_id"));
+        }
+        if prepared.token_id != order.token_id {
+            return Err(mismatch("token_id"));
+        }
+        if prepared.side != order.side {
+            return Err(mismatch("side"));
+        }
+        if OrderTypeKind::from(prepared.order_type) != order.order_type {
+            return Err(mismatch("order_type"));
+        }
+        let prepared_expiration = match prepared.order_type {
+            OrderType::Gtd { expiration } => {
+                let seconds = i64::try_from(expiration).map_err(|error| {
+                    ExecutionError::ReconciliationUnresolvable {
+                        reason: format!("prepared GTD expiration is not representable: {error}"),
+                    }
+                })?;
+                Some(DateTime::from_timestamp(seconds, 0).ok_or_else(|| {
+                    ExecutionError::ReconciliationUnresolvable {
+                        reason: "prepared GTD expiration is outside chrono range".to_owned(),
+                    }
+                })?)
+            }
+            OrderType::Fok | OrderType::Fak | OrderType::Gtc => None,
+        };
+        if prepared_expiration != order.gtd_expiration_at {
+            return Err(mismatch("gtd_expiration_at"));
+        }
+        if prepared.limit_price != order.price {
+            return Err(mismatch("limit_price"));
+        }
+        if prepared.requested_shares != order.shares {
+            return Err(mismatch("requested_shares"));
+        }
+        let rules = PolymarketOrderRules::new(prepared.tick_size, prepared.minimum_order_size)
+            .map_err(|error| ExecutionError::ReconciliationUnresolvable {
+                reason: format!("prepared venue rules are invalid: {error}"),
+            })?;
+        let canonical = rules
+            .validate_order(prepared.side, prepared.venue_amount, prepared.limit_price)
+            .map_err(|error| ExecutionError::ReconciliationUnresolvable {
+                reason: format!("prepared venue order is not canonical: {error}"),
+            })?;
+        if canonical.requested_shares != prepared.requested_shares {
+            return Err(mismatch("prepared_canonical_shares"));
+        }
+        if canonical.requested_shares != order.shares {
+            return Err(mismatch("wal_canonical_shares"));
         }
         Ok(())
     }
@@ -677,7 +892,14 @@ impl ReconciliationService {
             ),
             now,
         );
-        let lot = self.exit_lot(&order).await?;
+        let lot = if order.order_phase == ExecutionOrderPhase::Exit {
+            self.deps
+                .positions
+                .find_by_intent(&order.order_intent_id)
+                .await?
+        } else {
+            None
+        };
         let terminal = TerminalDecision {
             result: resolution.result,
             filled_shares: resolution.filled_shares.unwrap_or(Shares::ZERO),
@@ -868,23 +1090,6 @@ impl ReconciliationService {
             }));
     }
 
-    /// The open position lot backing an exit order (its cost basis prices the
-    /// realized `PnL`); `None` for entry orders or an absent lot.
-    async fn exit_lot(
-        &self,
-        order: &ExecutionOrderInfo,
-    ) -> QuantResult<Option<StrategyPositionLot>> {
-        if order.order_phase == ExecutionOrderPhase::Exit {
-            Ok(self
-                .deps
-                .positions
-                .find_by_intent(&order.order_intent_id)
-                .await?)
-        } else {
-            Ok(None)
-        }
-    }
-
     /// Build the ledger correction for a terminal verdict (machine or operator).
     ///
     /// Starts from a neutral base (order/intent unchanged, capital held) and
@@ -997,7 +1202,9 @@ fn reconciliation_fee(
             continue;
         };
         let (trade_id, role, observed_at, derived) = match measurement {
-            FeeMeasurement::PreparedExpected { .. } => continue,
+            FeeMeasurement::PreparedExpected { .. } | FeeMeasurement::OnChainSettled { .. } => {
+                continue;
+            }
             FeeMeasurement::AuthenticatedTradeDerived {
                 trade_id,
                 liquidity_role,
@@ -1010,7 +1217,6 @@ fn reconciliation_fee(
                 *matched_at,
                 Some(*derived_fee),
             ),
-            FeeMeasurement::OnChainSettled { .. } => continue,
         };
         let shares = item
             .shares
@@ -1346,28 +1552,6 @@ fn exit_reconcile_write(
     Ok(write)
 }
 
-async fn recollect_after_stale_cancel(
-    collector: &Arc<dyn EvidenceCollector>,
-    order_client: &Arc<dyn PolymarketOrderClient>,
-    order: &ExecutionOrderInfo,
-    identity_refs: &ExecutionOrderIdentityRefs,
-    collected: CollectedReconciliation,
-    now: DateTime<Utc>,
-    stale_after: Duration,
-) -> (CollectedReconciliation, bool) {
-    if collected.facts.presence == VenuePresence::Resting
-        && (collected.facts.past_stale_deadline || collected.facts.gtd_expired)
-        && let Some(venue_order_id) = order.venue_order_id.as_ref()
-    {
-        let _ = order_client.cancel(venue_order_id).await;
-        return collector
-            .collect(order, identity_refs, now, stale_after)
-            .await
-            .map_or((collected, false), |recollected| (recollected, true));
-    }
-    (collected, false)
-}
-
 /// Build the position upsert for a confirmed fill.
 fn cumulative_position_fill(
     order: &ExecutionOrderInfo,
@@ -1411,11 +1595,12 @@ const fn system_note(
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use chrono::{DateTime, Duration, Utc};
+    use quant_pivot_error::execution::ExecutionError;
     use quant_pivot_models::{
         domain::quant::{ExecutionOrderInfo, StrategyPositionLot},
         enums::{
-            common::{MarketCategory, OrderType, Side},
+            common::{MarketCategory, OrderType, Side, TickSize},
             execution::{
                 ExecutionOrderPhase, ExitReason, OrderTypeKind, PositionLedgerState,
                 ReconciliationResult, StrategyPositionOriginKind,
@@ -1432,10 +1617,13 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::{
-        ExitReconcileWriteInput, compute_exit_realized_pnl, exit_reconcile_write,
-        neutral_terminal_write,
+        ExitReconcileWriteInput, ReconciliationService, compute_exit_realized_pnl,
+        exit_reconcile_write, neutral_terminal_write,
     };
-    use crate::test_fixtures::execution_pg_seed::prepared_order;
+    use crate::{
+        execution::reconciliation::ShareSettlementBasis,
+        test_fixtures::execution_pg_seed::PreparedOrderFixture,
+    };
 
     fn lot(avg: Decimal) -> StrategyPositionLot {
         StrategyPositionLot {
@@ -1473,14 +1661,17 @@ mod tests {
             price: Price::new(dec!(0.55)),
             shares: Shares::new(dec!(100)),
             cost_usd: Usd::new(dec!(55)),
-            prepared_order_json: prepared_order(
-                Side::Sell,
-                OrderType::Gtc,
-                VenueOrderAmount::Shares(Shares::new(dec!(100))),
-                Usd::ZERO,
-                Shares::new(dec!(100)),
-                Price::new(dec!(0.55)),
-            ),
+            prepared_order_json: PreparedOrderFixture {
+                market_id: MarketId::new("0xmkt"),
+                token_id: TokenId::new("token-1"),
+                side: Side::Sell,
+                order_type: OrderType::Gtc,
+                venue_amount: VenueOrderAmount::Shares(Shares::new(dec!(100))),
+                expected_fee: Usd::ZERO,
+                expected_filled_shares: Shares::new(dec!(100)),
+                limit_price: Price::new(dec!(0.55)),
+            }
+            .build(),
             venue_order_id: None,
             venue_status: None,
             state: ExecutionOrderState::Ambiguous,
@@ -1579,5 +1770,115 @@ mod tests {
             write.cumulative_exit.as_ref().expect("exit fill").reason,
             ExitReason::StopLoss
         );
+    }
+
+    #[test]
+    fn prepared_wal_mismatches_rejected() {
+        let baseline = exit_order();
+        ReconciliationService::validate_prepared(&baseline).expect("valid prepared/WAL identity");
+
+        let mut market = baseline.clone();
+        market.prepared_order_json.market_id = MarketId::new("other-market");
+        let mut token = baseline.clone();
+        token.prepared_order_json.token_id = TokenId::new("other-token");
+        let mut side = baseline.clone();
+        side.prepared_order_json.side = Side::Buy;
+        let mut order_type = baseline.clone();
+        order_type.order_type = OrderTypeKind::Fok;
+        let mut limit = baseline.clone();
+        limit.prepared_order_json.limit_price = Price::new(dec!(0.56));
+        let mut shares = baseline.clone();
+        shares.prepared_order_json.requested_shares = Shares::new(dec!(99));
+
+        for (field, candidate) in [
+            ("market_id", market),
+            ("token_id", token),
+            ("side", side),
+            ("order_type", order_type),
+            ("limit_price", limit),
+            ("requested_shares", shares),
+        ] {
+            let error = ReconciliationService::validate_prepared(&candidate)
+                .expect_err("prepared/WAL mismatch must fail closed");
+            assert!(error.to_string().contains(field));
+        }
+
+        let expiration = u64::try_from((Utc::now() + Duration::minutes(10)).timestamp())
+            .expect("positive GTD timestamp");
+        let mut gtd = baseline;
+        gtd.prepared_order_json.order_type = OrderType::Gtd { expiration };
+        gtd.order_type = OrderTypeKind::Gtd;
+        gtd.gtd_expiration_at =
+            DateTime::from_timestamp(i64::try_from(expiration).expect("GTD timestamp") + 1, 0);
+        let error = ReconciliationService::validate_prepared(&gtd)
+            .expect_err("GTD expiration mismatch must fail closed");
+        assert!(error.to_string().contains("gtd_expiration_at"));
+    }
+
+    #[test]
+    fn noncanonical_amount_is_rejected() {
+        let mut order = exit_order();
+        order.prepared_order_json.venue_amount =
+            VenueOrderAmount::Shares(Shares::new(dec!(100.001)));
+        let error = ReconciliationService::validate_prepared(&order)
+            .expect_err("noncanonical prepared amount must fail closed");
+        assert!(error.to_string().contains("not canonical"));
+    }
+
+    #[test]
+    fn prepared_rules_are_enforced() {
+        let mut minimum = exit_order();
+        minimum.prepared_order_json.minimum_order_size = Shares::new(dec!(101));
+        assert!(ReconciliationService::validate_prepared(&minimum).is_err());
+
+        let mut tick = exit_order();
+        tick.prepared_order_json.tick_size = TickSize::Tenth;
+        assert!(ReconciliationService::validate_prepared(&tick).is_err());
+    }
+
+    #[test]
+    fn phase_side_basis_typed() {
+        let mut exit = exit_order();
+        let execution_account_id = ExecutionAccountId::from_v7();
+        let mut position = lot(dec!(0.60));
+        position.order_intent_id = Some(exit.order_intent_id);
+        position.execution_account_id = execution_account_id;
+        position.token_id = exit.token_id.clone();
+        position.market_id = exit.market_id.clone();
+        assert_eq!(
+            ReconciliationService::share_basis(&exit, execution_account_id, None, Some(&position),)
+                .expect("SELL exit basis"),
+            ShareSettlementBasis::SellDebit {
+                lot_remaining: Shares::new(dec!(100)),
+                previously_applied: Shares::ZERO,
+            }
+        );
+
+        exit.order_phase = ExecutionOrderPhase::Entry;
+        exit.side = Side::Buy;
+        exit.prepared_order_json.side = Side::Buy;
+        assert!(matches!(
+            ReconciliationService::share_basis(&exit, execution_account_id, None, None)
+                .expect("BUY entry basis"),
+            ShareSettlementBasis::BuyReceipt { .. }
+        ));
+    }
+
+    #[test]
+    fn illegal_phase_side_rejected() {
+        let mut order = exit_order();
+        order.order_phase = ExecutionOrderPhase::Entry;
+        assert!(matches!(
+            ReconciliationService::share_basis(&order, ExecutionAccountId::from_v7(), None, None,),
+            Err(ExecutionError::ReconciliationUnresolvable { .. })
+        ));
+
+        order.order_phase = ExecutionOrderPhase::Exit;
+        order.side = Side::Buy;
+        order.prepared_order_json.side = Side::Buy;
+        assert!(matches!(
+            ReconciliationService::share_basis(&order, ExecutionAccountId::from_v7(), None, None,),
+            Err(ExecutionError::ReconciliationUnresolvable { .. })
+        ));
     }
 }

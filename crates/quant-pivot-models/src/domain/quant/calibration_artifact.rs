@@ -165,6 +165,52 @@ pub struct ModelScoreCalibrationCommit {
     pub artifact: NewCalibrationArtifact,
 }
 
+/// Fully verified model-score commit admitted to the repository transaction.
+///
+/// Construction performs the payload/schema/self-hash verification outside the
+/// async persistence boundary. The repository consequently owns only lineage
+/// reads, identity/CAS checks, the append, and the terminal run transition; it
+/// cannot be called with an unverified model-score document.
+#[derive(Debug, Clone)]
+pub struct VerifiedModelScoreCalibrationCommit {
+    commit: ModelScoreCalibrationCommit,
+}
+
+impl VerifiedModelScoreCalibrationCommit {
+    #[must_use]
+    pub const fn model_run_id(&self) -> ModelRunId {
+        self.commit.model_run_id
+    }
+
+    #[must_use]
+    pub const fn artifact(&self) -> &NewCalibrationArtifact {
+        &self.commit.artifact
+    }
+
+    #[must_use]
+    pub fn payload(&self) -> Option<&ModelScoreCalibrationPayload> {
+        match &self.commit.artifact.payload {
+            CalibrationArtifactPayload::ModelScore(payload) => Some(payload),
+            CalibrationArtifactPayload::MarketPriceBias(_)
+            | CalibrationArtifactPayload::WeatherStationLeadBias(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (ModelRunId, NewCalibrationArtifact) {
+        (self.commit.model_run_id, self.commit.artifact)
+    }
+}
+
+impl TryFrom<ModelScoreCalibrationCommit> for VerifiedModelScoreCalibrationCommit {
+    type Error = String;
+
+    fn try_from(commit: ModelScoreCalibrationCommit) -> Result<Self, Self::Error> {
+        commit.artifact.verify_model_score()?;
+        Ok(Self { commit })
+    }
+}
+
 /// Idempotent outcome of a canonical model-score artifact commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]

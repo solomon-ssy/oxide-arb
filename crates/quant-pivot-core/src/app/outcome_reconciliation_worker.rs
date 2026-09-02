@@ -15,7 +15,7 @@ use crate::{
     infra::periodic_task::PeriodicTask,
 };
 
-/// Executes both outcome lanes without allowing one lane to starve the other.
+/// Executes all orthogonal outcome lanes without allowing one to starve another.
 pub struct OutcomeReconciliationWorker {
     service: Arc<OutcomeReconciliationService>,
 }
@@ -28,36 +28,42 @@ impl OutcomeReconciliationWorker {
 
     /// Execute one bounded pass, preserving fail-closed error semantics.
     ///
-    /// Execution truth is attempted first because it does not depend on the
-    /// external resolution source. Resolution is always attempted afterwards,
-    /// even when execution reconciliation fails.
+    /// Account truth runs first, economic horizon work second, and external
+    /// resolution last. Every lane runs even when an earlier lane fails.
     pub async fn run_once(&self, config: OutcomeReconciliationPassConfig) -> QuantResult<()> {
         let execution = self.service.run_execution_pass(config).await;
         if let Ok(summary) = &execution {
             (*summary).log_execution_summary();
         }
-
+        let economic = self.service.run_economic_pass(config).await;
+        if let Ok(summary) = &economic {
+            (*summary).log_economic_summary();
+        }
         let resolution = self.service.run_resolution_pass(config).await;
         if let Ok(summary) = &resolution {
             (*summary).log_resolution_summary();
         }
-
-        match (execution, resolution) {
-            (Ok(_), Ok(_)) => Ok(()),
-            (Err(error), Ok(_)) | (Ok(_), Err(error)) => Err(error),
-            (Err(execution_error), Err(resolution_error)) => {
-                tracing::warn!(
-                    error = %resolution_error,
-                    "resolution reconciliation also failed after execution reconciliation failure"
-                );
-                Err(execution_error)
+        let mut first_error = execution.err();
+        if let Err(error) = economic {
+            if first_error.is_none() {
+                first_error = Some(error);
+            } else {
+                tracing::warn!(%error, "economic outcome reconciliation also failed");
             }
         }
+        if let Err(error) = resolution {
+            if first_error.is_none() {
+                first_error = Some(error);
+            } else {
+                tracing::warn!(%error, "resolution reconciliation also failed");
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 }
 
 impl AppContext {
-    /// Register outcome reconciliation in every runtime mode.
+    /// Register outcome reconciliation independently of entry authorization.
     pub fn register_outcome_reconciliation_worker(&self, runner: &mut AppRunner) {
         let worker = Arc::new(OutcomeReconciliationWorker::new(Arc::clone(
             &self.execution.outcome_reconciliation,
@@ -93,8 +99,11 @@ impl AppContext {
                             worker
                                 .run_once(OutcomeReconciliationPassConfig {
                                     pass_started_at: Utc::now(),
+                                    sweep_secs: policy.sweep_secs,
                                     candidate_batch_size: policy.candidate_batch_size,
                                     source_block_span: policy.source_block_span,
+                                    economic_source_lateness_secs: policy
+                                        .economic_source_lateness_secs,
                                 })
                                 .await
                         }
@@ -115,6 +124,23 @@ impl OutcomeReconciliationPassSummary {
                 existing = self.execution_existing,
                 deferred = self.execution_deferred,
                 "execution outcome reconciliation completed"
+            );
+        }
+    }
+}
+
+impl OutcomeReconciliationPassSummary {
+    fn log_economic_summary(self) {
+        if self.economic_candidates > 0 {
+            tracing::info!(
+                candidates = self.economic_candidates,
+                inserted = self.economic_inserted,
+                existing = self.economic_existing,
+                deferred = self.economic_deferred,
+                capacity_deferred = self.economic_capacity_deferred,
+                censored = self.economic_censored,
+                claim_lost = self.economic_claim_lost,
+                "recommendation economic outcome reconciliation completed"
             );
         }
     }

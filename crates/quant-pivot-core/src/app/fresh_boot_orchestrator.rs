@@ -1757,6 +1757,7 @@ impl FreshBootOrchestrator {
                 StorageError::Database(_)
                 | StorageError::Connection(_)
                 | StorageError::Timeout { .. }
+                | StorageError::ClickHouseTimeout { .. }
                 | StorageError::ClickHouse(_),
             ) => Some(FreshBootRetryReason::StorageTransient),
             QuantError::Api(_)
@@ -1967,11 +1968,95 @@ impl AppContext {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Duration as ChronoDuration;
-    use quant_pivot_error::QuantResult;
-    use quant_pivot_models::runtime_config::BuyModelRoute;
+    use std::time::Duration;
 
-    use super::FreshBootOrchestrator;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
+    use quant_pivot_models::{
+        domain::data_plane::{
+            ExchangeHistoryChunkInfo, ExchangeHistoryChunkStatus, ExchangeHistoryContinuityBasis,
+            ExchangeHistoryFrontier,
+        },
+        runtime_config::BuyModelRoute,
+        types::{ContentHash, EvmBlockHash},
+    };
+    use uuid::Uuid;
+
+    use super::{FreshBootOrchestrator, FreshBootRetryReason};
+
+    struct ChunkFixture(ExchangeHistoryChunkInfo);
+
+    impl ChunkFixture {
+        fn between(from_block: i64, to_block: i64) -> Self {
+            let now = Utc::now();
+            Self(ExchangeHistoryChunkInfo {
+                chunk_id: Uuid::now_v7(),
+                frontier: ExchangeHistoryFrontier::Activation,
+                from_block,
+                to_block,
+                status: ExchangeHistoryChunkStatus::Accepted,
+                attempt_count: 1,
+                hypersync_count: Some(0),
+                attestor_count: Some(0),
+                hypersync_digest: Some(ContentHash::from_bytes([1; 32])),
+                attestor_digest: Some(ContentHash::from_bytes([1; 32])),
+                first_block_hash: Some(
+                    EvmBlockHash::parse(format!("0x{from_block:064x}")).expect("first block hash"),
+                ),
+                last_block_hash: Some(
+                    EvmBlockHash::parse(format!("0x{to_block:064x}")).expect("last block hash"),
+                ),
+                archive_height: Some(to_block + 12),
+                continuity_basis: Some(ExchangeHistoryContinuityBasis::HyperSyncBoundaryHeaders),
+                continuity_block: Some(from_block - 1),
+                continuity_hash: Some(
+                    EvmBlockHash::parse(format!("0x{:064x}", from_block - 1))
+                        .expect("parent block hash"),
+                ),
+                effective_through_at: Some(now),
+                state_revision: Some(1),
+                accepted_at: Some(now),
+                created_at: now,
+                updated_at: now,
+            })
+        }
+    }
+
+    #[test]
+    fn frozen_window_rejects_straddle() {
+        let first = ChunkFixture::between(90, 95);
+        let frozen_tail = ChunkFixture::between(96, 100);
+        assert!(FreshBootOrchestrator::verify_chunk(&first.0, 90, 100, None).is_ok());
+        assert!(
+            FreshBootOrchestrator::verify_chunk(
+                &frozen_tail.0,
+                96,
+                100,
+                first.0.last_block_hash.as_ref()
+            )
+            .is_ok()
+        );
+        let crossing = ChunkFixture::between(96, 104);
+        assert!(
+            FreshBootOrchestrator::verify_chunk(
+                &crossing.0,
+                96,
+                100,
+                first.0.last_block_hash.as_ref()
+            )
+            .is_err()
+        );
+        let appended = ChunkFixture::between(101, 104);
+        assert!(
+            FreshBootOrchestrator::verify_chunk(
+                &appended.0,
+                101,
+                104,
+                frozen_tail.0.last_block_hash.as_ref()
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn profiles_preserve_cadence() -> QuantResult<()> {
@@ -1996,5 +2081,17 @@ mod tests {
                 ChronoDuration::seconds(seconds)
             );
         }
+    }
+
+    #[test]
+    fn clickhouse_timeout_retries() {
+        let error = QuantError::from(StorageError::ClickHouseTimeout {
+            operation: "test.bootstrap",
+            duration: Duration::from_millis(50),
+        });
+        assert_eq!(
+            FreshBootOrchestrator::retry_reason(&error),
+            Some(FreshBootRetryReason::StorageTransient)
+        );
     }
 }

@@ -3,6 +3,128 @@
   "source": "crates/quant-pivot-models/src/enums",
   "enums": [
     {
+      "name": "AccountChainExecutionRole",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Maker",
+          "wire_value": "maker"
+        },
+        {
+          "rust_variant": "Taker",
+          "wire_value": "taker"
+        },
+        {
+          "rust_variant": "SelfMatch",
+          "wire_value": "self_match"
+        }
+      ]
+    },
+    {
+      "name": "AccountExecutionAssociationKind",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "SystemOrder",
+          "wire_value": "system_order"
+        },
+        {
+          "rust_variant": "RecoveryIncident",
+          "wire_value": "recovery_incident"
+        },
+        {
+          "rust_variant": "OpeningInventory",
+          "wire_value": "opening_inventory"
+        }
+      ]
+    },
+    {
+      "name": "AccountPauseOperationKind",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Pause",
+          "wire_value": "pause"
+        },
+        {
+          "rust_variant": "Unpause",
+          "wire_value": "unpause"
+        }
+      ]
+    },
+    {
+      "name": "AccountPauseOperationState",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Prepared",
+          "wire_value": "prepared"
+        },
+        {
+          "rust_variant": "Dispatched",
+          "wire_value": "dispatched"
+        },
+        {
+          "rust_variant": "Ambiguous",
+          "wire_value": "ambiguous"
+        },
+        {
+          "rust_variant": "Confirmed",
+          "wire_value": "confirmed"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        }
+      ]
+    },
+    {
+      "name": "AccountRecoveryIncidentKind",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "UnknownExternalExecution",
+          "wire_value": "unknown_external_execution"
+        },
+        {
+          "rust_variant": "BreakGlassRestart",
+          "wire_value": "break_glass_restart"
+        },
+        {
+          "rust_variant": "OpeningInventory",
+          "wire_value": "opening_inventory"
+        },
+        {
+          "rust_variant": "AccountMismatch",
+          "wire_value": "account_mismatch"
+        }
+      ]
+    },
+    {
+      "name": "AccountRecoveryIncidentStatus",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Open",
+          "wire_value": "open"
+        },
+        {
+          "rust_variant": "Reconciling",
+          "wire_value": "reconciling"
+        },
+        {
+          "rust_variant": "Sealed",
+          "wire_value": "sealed"
+        }
+      ]
+    },
+    {
       "name": "AccountSource",
       "module": "quant",
       "kind": "postgres",
@@ -35,8 +157,12 @@
           "wire_value": "report_status"
         },
         {
-          "rust_variant": "RuntimeMode",
-          "wire_value": "runtime_mode"
+          "rust_variant": "AuthorizationPolicy",
+          "wire_value": "authorization_policy"
+        },
+        {
+          "rust_variant": "EconomicHealth",
+          "wire_value": "economic_health"
         },
         {
           "rust_variant": "SettlementRecovery",
@@ -57,6 +183,10 @@
         {
           "rust_variant": "VenueMetadata",
           "wire_value": "venue_metadata"
+        },
+        {
+          "rust_variant": "VenueFunding",
+          "wire_value": "venue_funding"
         },
         {
           "rust_variant": "EntryConditionPlan",
@@ -191,33 +321,6 @@
       ]
     },
     {
-      "name": "ApprovalStatus",
-      "module": "quant",
-      "kind": "postgres",
-      "members": [
-        {
-          "rust_variant": "NotRequired",
-          "wire_value": "not_required"
-        },
-        {
-          "rust_variant": "Pending",
-          "wire_value": "pending"
-        },
-        {
-          "rust_variant": "Approved",
-          "wire_value": "approved"
-        },
-        {
-          "rust_variant": "Rejected",
-          "wire_value": "rejected"
-        },
-        {
-          "rust_variant": "Expired",
-          "wire_value": "expired"
-        }
-      ]
-    },
-    {
       "name": "AttributionArtifactKind",
       "module": "quant",
       "kind": "postgres",
@@ -264,6 +367,21 @@
         {
           "rust_variant": "Shadow",
           "wire_value": "shadow"
+        }
+      ]
+    },
+    {
+      "name": "AuthorizationKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "OperatorApproval",
+          "wire_value": "operator_approval"
+        },
+        {
+          "rust_variant": "ActivePolicy",
+          "wire_value": "active_policy"
         }
       ]
     },
@@ -352,10 +470,6 @@
         {
           "rust_variant": "OperationalPhaseBlocksReports",
           "wire_value": "operational_phase_blocks_reports"
-        },
-        {
-          "rust_variant": "RuntimeModeReportOnly",
-          "wire_value": "runtime_mode_report_only"
         },
         {
           "rust_variant": "KillSwitchBlocksEntries",
@@ -612,6 +726,10 @@
         {
           "rust_variant": "ExecutionOutcomeUnavailableAtCutoff",
           "wire_value": "execution_outcome_unavailable_at_cutoff"
+        },
+        {
+          "rust_variant": "EconomicOutcomeUnavailableAtCutoff",
+          "wire_value": "economic_outcome_unavailable_at_cutoff"
         }
       ]
     },
@@ -631,10 +749,6 @@
         {
           "rust_variant": "OutsideFrozenWindow",
           "wire_value": "outside_frozen_window"
-        },
-        {
-          "rust_variant": "ReportOnlyNoExecutionAuthority",
-          "wire_value": "report_only_no_execution_authority"
         },
         {
           "rust_variant": "ExecutionNotAttempted",
@@ -695,8 +809,8 @@
           "wire_value": "operations_policy"
         },
         {
-          "rust_variant": "ExecutionAutomationPolicy",
-          "wire_value": "execution_automation_policy"
+          "rust_variant": "ExecutionAuthorizationPolicy",
+          "wire_value": "execution_authorization_policy"
         }
       ]
     },
@@ -865,6 +979,21 @@
       ]
     },
     {
+      "name": "EntryAuthorizationPolicy",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "OperatorApprovalRequired",
+          "wire_value": "operator_approval_required"
+        },
+        {
+          "rust_variant": "PolicyAutomatic",
+          "wire_value": "policy_automatic"
+        }
+      ]
+    },
+    {
       "name": "EntryConditionAuditAction",
       "module": "quant",
       "kind": "postgres",
@@ -1000,6 +1129,25 @@
         {
           "rust_variant": "FullyFilled",
           "wire_value": "fully_filled"
+        }
+      ]
+    },
+    {
+      "name": "ExecutionAuthorityCeiling",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "AnalysisOnly",
+          "wire_value": "analysis_only"
+        },
+        {
+          "rust_variant": "OperatorApproval",
+          "wire_value": "operator_approval"
+        },
+        {
+          "rust_variant": "PolicyAutomatic",
+          "wire_value": "policy_automatic"
         }
       ]
     },
@@ -1532,25 +1680,6 @@
         {
           "rust_variant": "Maker",
           "wire_value": "maker"
-        }
-      ]
-    },
-    {
-      "name": "FeeMeasurementStage",
-      "module": "fee",
-      "kind": "postgres",
-      "members": [
-        {
-          "rust_variant": "PreparedExpected",
-          "wire_value": "prepared_expected"
-        },
-        {
-          "rust_variant": "AuthenticatedTradeDerived",
-          "wire_value": "authenticated_trade_derived"
-        },
-        {
-          "rust_variant": "OnChainSettled",
-          "wire_value": "on_chain_settled"
         }
       ]
     },
@@ -2265,10 +2394,6 @@
       "kind": "wire",
       "members": [
         {
-          "rust_variant": "ReportOnlyMode",
-          "wire_value": "report_only_mode"
-        },
-        {
           "rust_variant": "AutomationCapExceeded",
           "wire_value": "automation_cap_exceeded"
         }
@@ -2456,33 +2581,6 @@
         {
           "rust_variant": "Button",
           "wire_value": "button"
-        }
-      ]
-    },
-    {
-      "name": "ModeDenialReason",
-      "module": "execution",
-      "kind": "wire",
-      "members": [
-        {
-          "rust_variant": "ReportOnly",
-          "wire_value": "report_only"
-        },
-        {
-          "rust_variant": "RecommendationIneligible",
-          "wire_value": "recommendation_ineligible"
-        },
-        {
-          "rust_variant": "RiskEnvelopeInvalid",
-          "wire_value": "risk_envelope_invalid"
-        },
-        {
-          "rust_variant": "KillSwitchBlocksEntry",
-          "wire_value": "kill_switch_blocks_entry"
-        },
-        {
-          "rust_variant": "AutoExecutionNotAllowed",
-          "wire_value": "auto_execution_not_allowed"
         }
       ]
     },
@@ -2783,36 +2881,17 @@
       ]
     },
     {
-      "name": "OrderIntentKind",
-      "module": "execution",
-      "kind": "postgres",
-      "members": [
-        {
-          "rust_variant": "Buy",
-          "wire_value": "buy"
-        }
-      ]
-    },
-    {
       "name": "OrderIntentStatus",
       "module": "quant",
       "kind": "postgres",
       "members": [
         {
-          "rust_variant": "Draft",
-          "wire_value": "draft"
+          "rust_variant": "PendingAuthorization",
+          "wire_value": "pending_authorization"
         },
         {
-          "rust_variant": "PendingApproval",
-          "wire_value": "pending_approval"
-        },
-        {
-          "rust_variant": "Approved",
-          "wire_value": "approved"
-        },
-        {
-          "rust_variant": "ApprovedByPolicy",
-          "wire_value": "approved_by_policy"
+          "rust_variant": "Authorized",
+          "wire_value": "authorized"
         },
         {
           "rust_variant": "AdmissionPending",
@@ -2835,8 +2914,8 @@
           "wire_value": "filled"
         },
         {
-          "rust_variant": "Rejected",
-          "wire_value": "rejected"
+          "rust_variant": "AuthorizationRejected",
+          "wire_value": "authorization_rejected"
         },
         {
           "rust_variant": "Cancelled",
@@ -3016,8 +3095,8 @@
           "wire_value": "operational_admission"
         },
         {
-          "rust_variant": "ExecutionAutomationAdmission",
-          "wire_value": "execution_automation_policy_admission"
+          "rust_variant": "ExecutionAuthorizationAdmission",
+          "wire_value": "execution_authorization_admission"
         }
       ]
     },
@@ -3088,10 +3167,6 @@
         {
           "rust_variant": "AlertDispatcher",
           "wire_value": "alert_dispatcher"
-        },
-        {
-          "rust_variant": "RuntimeModeGate",
-          "wire_value": "runtime_mode_gate"
         }
       ]
     },
@@ -3292,21 +3367,33 @@
       ]
     },
     {
-      "name": "QuantRuntimeMode",
+      "name": "RecommendationEconomicOutcomeState",
       "module": "quant",
       "kind": "postgres",
       "members": [
         {
-          "rust_variant": "ReportOnly",
-          "wire_value": "report_only"
+          "rust_variant": "EntryNotTriggered",
+          "wire_value": "entry_not_triggered"
         },
         {
-          "rust_variant": "SemiAuto",
-          "wire_value": "semi_auto"
+          "rust_variant": "EntryUnfilled",
+          "wire_value": "entry_unfilled"
         },
         {
-          "rust_variant": "AutoExecution",
-          "wire_value": "auto_execution"
+          "rust_variant": "PolicyExited",
+          "wire_value": "policy_exited"
+        },
+        {
+          "rust_variant": "HorizonLiquidated",
+          "wire_value": "horizon_liquidated"
+        },
+        {
+          "rust_variant": "ResolvedBeforeHorizon",
+          "wire_value": "resolved_before_horizon"
+        },
+        {
+          "rust_variant": "Censored",
+          "wire_value": "censored"
         }
       ]
     },
@@ -4095,6 +4182,29 @@
       ]
     },
     {
+      "name": "RouteEconomicHealthState",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "InsufficientEvidence",
+          "wire_value": "insufficient_evidence"
+        },
+        {
+          "rust_variant": "Healthy",
+          "wire_value": "healthy"
+        },
+        {
+          "rust_variant": "Degraded",
+          "wire_value": "degraded"
+        },
+        {
+          "rust_variant": "DataIncomplete",
+          "wire_value": "data_incomplete"
+        }
+      ]
+    },
+    {
       "name": "RuntimeActivityActionKind",
       "module": "runtime_activity",
       "kind": "wire",
@@ -4537,12 +4647,12 @@
           "wire_value": "governed_canary"
         },
         {
-          "rust_variant": "SemiAuto",
-          "wire_value": "semi_auto"
+          "rust_variant": "OperatorApproval",
+          "wire_value": "operator_approval"
         },
         {
-          "rust_variant": "Auto",
-          "wire_value": "auto"
+          "rust_variant": "PolicyAutomatic",
+          "wire_value": "policy_automatic"
         }
       ]
     },
@@ -4623,6 +4733,25 @@
         {
           "rust_variant": "Expired",
           "wire_value": "expired"
+        }
+      ]
+    },
+    {
+      "name": "StrategyPositionOriginKind",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "SystemIntent",
+          "wire_value": "system_intent"
+        },
+        {
+          "rust_variant": "AccountRecoveryIncident",
+          "wire_value": "account_recovery_incident"
+        },
+        {
+          "rust_variant": "OpeningInventory",
+          "wire_value": "opening_inventory"
         }
       ]
     },

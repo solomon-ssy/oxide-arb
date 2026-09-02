@@ -16,25 +16,26 @@ use quant_pivot_models::{
             HistoryServingHeadSeal,
         },
         governance::DecisionPolicySnapshotInfo,
+        order::PolymarketOrderRules,
         quant::{
             EntryExecutionEconomics, ExecutableEconomicTier, ExistingPortfolioState,
             FeatureVectorInfo, MarketCandidate, NewPortfolioPlan, NewReportDataQualitySnapshot,
             NewReportRouteRun, PortfolioDecisionResult, PortfolioScenarioVisibility,
-            RepresentedRouteSet, RouteCandidateFunnel, RouteModelLineage, RouteRunOutcome,
-            TradePolicyArtifactInfo,
+            RepresentedRouteSet, RouteCandidateFunnel, RouteHistoryLineage, RouteModelLineage,
+            RouteRunOutcome, TradePolicyArtifactInfo,
         },
     },
     enums::quant::{EmptyReportReason, FillRequirement, OutcomeSide, TradePolicyStatus},
     hashing::CanonicalDigest,
     runtime_config::{BuyModelRoute, DecisionPolicySnapshot, MakerRebatePolicy},
     types::{
-        Bps, ContentHash, DecisionPolicySnapshotId, EconomicTierId, EntryOrderTemplate,
-        ExecutionAccountId, FeatureVectorId, MakerRebateDelayBasis, MakerRebateObjectiveStatus,
-        MakerRebateValuationEvidence, MakerRebateValuationHealth, MarketId, ModelRunId,
-        ModelVersionId, PortfolioPlanId, Price, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportRouteRunId, ReportRunId, ServingAuthority, Shares,
-        SignalCandidateId, TokenId, TradePolicyCohort, TradePolicyCohortProvenance, Usd,
-        calibration::CalibratedPayoutDistribution,
+        Bps, ContentHash, DecisionPolicySnapshotId, EconomicTierId, EntryConditionTemplate,
+        EntryOrderTemplate, ExecutionAccountId, FeatureVectorId, MakerRebateDelayBasis,
+        MakerRebateObjectiveStatus, MakerRebateValuationEvidence, MakerRebateValuationHealth,
+        MarketId, ModelRunId, ModelVersionId, PortfolioPlanId, Price, ReportDataQualitySnapshotId,
+        ReportDataQualityTokens, ReportFunnelDiagnostics, ReportRouteRunId, ReportRunId,
+        ServingAuthority, Shares, SignalCandidateId, TokenId, TradePolicyCohort,
+        TradePolicyCohortProvenance, Usd, calibration::CalibratedPayoutDistribution,
     },
 };
 use quant_pivot_repository::traits::{
@@ -57,14 +58,15 @@ use quant_pivot_research::{
         GlobalPortfolioInput, GlobalPortfolioPlanner, GlobalPortfolioResult,
         MakerRebateValuationFactory, MakerRebateValuationInput, PlannedEconomicTier,
         PortfolioScenarioGenerationInput, PortfolioScenarioGenerator, PortfolioScenarioLegInput,
-        SealedPortfolioScenarioArtifact, TierAdmissionRejection, VerifiedPortfolioScenarioModel,
+        SealedPortfolioScenarioArtifact, TierAdmissionRejection, TierAdmissionRejectionCode,
+        TierSeedBuild, VerifiedPortfolioScenarioModel,
     },
     selection::{
         MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector,
-        ModelFeatureRequirements, RouteAvailabilityContract, SelectedMarket,
+        ModelFeatureRequirements, SelectedMarket,
     },
 };
-use rust_decimal::{Decimal, RoundingStrategy};
+use rust_decimal::Decimal;
 use serde::Serialize;
 
 use super::{
@@ -75,6 +77,7 @@ use super::{
         PlannedRecommendationContract, PlannedReportRecommendation, ReportTierRejection,
         ReportTrigger,
     },
+    universe::{ReportUniverseContract, ReportUniverseRoute},
 };
 use crate::{
     governance::{RuntimeControlsHandle, resolve_return_model_calibration},
@@ -141,10 +144,8 @@ struct BuildContext {
 }
 
 struct ReportUniversePlan {
-    primary_route: BuyModelRoute,
     active: Vec<ActiveModelRequirements>,
-    active_routes: Vec<BuyModelRoute>,
-    plan_hash: ContentHash,
+    contract: ReportUniverseContract,
     serving_head: HistoryServingHeadSeal,
 }
 
@@ -161,16 +162,20 @@ struct CandidateTierBuild {
 struct FullL2TierBuild {
     admitted: Vec<(ExecutableTierSeed, TierSource)>,
     passive_rejection: Option<PitMakerRebateUnavailableReason>,
+    minimum_rejection: Option<(Shares, Shares)>,
 }
 
-impl ReportUniversePlan {
-    fn route_availability(&self) -> RouteAvailabilityContract {
-        RouteAvailabilityContract {
-            primary_route: self.primary_route,
-            active_routes: self.active_routes.clone(),
-            universe_plan_hash: self.plan_hash,
-        }
-    }
+enum PolicyTierBuild {
+    Ready {
+        seed: Box<ExecutableTierSeed>,
+        price: Price,
+        limit_price: Price,
+    },
+    Unfilled,
+    BelowMinimum {
+        requested: Shares,
+        minimum: Shares,
+    },
 }
 
 struct ReadyRoute {
@@ -278,19 +283,8 @@ impl ReportBuilder for DefaultReportBuilder {
 
 impl DefaultReportBuilder {
     async fn build_report(&self, request: BuildReportRequest) -> QuantResult<ComposedReport> {
-        if self.deps.readiness_gate.is_system_degraded() {
-            return Err(ReportError::InvariantViolation {
-                stage: "report_readiness",
-                detail: format!(
-                    "operational phase {:?} is below the report boundary",
-                    self.deps.readiness_gate.operational_phase()
-                ),
-            }
-            .into());
-        }
-
-        let context = self.prepare_context(&request).await?;
-        let universe = self.report_universe_plan(&context).await?;
+        self.require_report_ready()?;
+        let (context, universe) = self.prepare_report_context(&request).await?;
         let batch = self
             .deps
             .candidate_provider
@@ -313,7 +307,7 @@ impl DefaultReportBuilder {
         self.refresh_drawdown(&account, &mut equity).await?;
         let maker_rebate_valuation = self.maker_rebate_valuation(&context).await?;
 
-        let requirements = merged_requirements(&universe.active);
+        let requirements = universe.contract.requirements.clone();
         let selection = self
             .select_snapshot(&context, requirements, batch.candidates.clone(), &universe)
             .await?;
@@ -371,7 +365,12 @@ impl DefaultReportBuilder {
             tiers: &tiers,
         })?;
         self.record_rebate_diagnostics(&maker_rebate_valuation, &tier_build.rejections, &portfolio);
-        let tier_rejections = report_tier_rejections(&tiers, &portfolio.rejections)?;
+        let tier_rejections = report_tier_rejections(
+            &tiers,
+            &portfolio.rejections,
+            &context.config,
+            scenario_artifact.as_ref(),
+        )?;
         update_route_funnels(&mut routes, &tiers, &portfolio)?;
         let planned = planned_recommendations(&portfolio.selected, &tier_sources)?;
         // Every derived report fact is anchored to the database-owned frozen
@@ -431,6 +430,33 @@ impl DefaultReportBuilder {
             empty,
             top_n: context.top_n,
         })
+    }
+
+    fn require_report_ready(&self) -> QuantResult<()> {
+        if self.deps.readiness_gate.is_system_degraded() {
+            return Err(ReportError::InvariantViolation {
+                stage: "report_readiness",
+                detail: format!(
+                    "operational phase {:?} is below the report boundary",
+                    self.deps.readiness_gate.operational_phase()
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    async fn prepare_report_context(
+        &self,
+        request: &BuildReportRequest,
+    ) -> QuantResult<(BuildContext, ReportUniversePlan)> {
+        let mut context = self.prepare_context(request).await?;
+        let universe = self.report_universe_plan(&context).await?;
+        context.boundary = context.boundary.with_source_watermark(
+            DecisionSource::FinalizedExecution,
+            universe.serving_head.seal.effective_through_at,
+        )?;
+        Ok((context, universe))
     }
 
     async fn prepare_context(&self, request: &BuildReportRequest) -> QuantResult<BuildContext> {
@@ -635,7 +661,7 @@ impl DefaultReportBuilder {
                     features: context.config.profile_artifacts.features.definition.clone(),
                     model_requirements,
                     knowledge_lag_secs: context.boundary.knowledge_lag_secs(),
-                    route_availability: Some(universe.route_availability()),
+                    route_availability: Some(universe.contract.availability.clone()),
                 },
                 candidates,
             )
@@ -743,46 +769,19 @@ impl DefaultReportBuilder {
             .available_route_requirements(&context.version)
             .await?;
         active.sort_unstable_by_key(|route| route.route);
-        let active_routes = active.iter().map(|route| route.route).collect::<Vec<_>>();
-        let primary_route = BuyModelRoute::Pooled;
-        if !active_routes.contains(&primary_route) {
-            return Err(ReportError::RouteReadiness {
-                route: primary_route.as_str().to_owned(),
-                detail: "the primary pooled route is not active in the pinned serving generation"
-                    .to_owned(),
-            }
-            .into());
-        }
-        let route_lineage = active
-            .iter()
-            .map(|route| {
-                (
-                    route.route,
-                    route.model_version_id,
-                    route.version.serving_contract_hash,
-                    route.version.model_spec_definition_hash,
-                    route.version.profile_ref.content_hash,
-                )
-            })
-            .collect::<Vec<_>>();
-        let plan_hash = CanonicalDigest::content_hash_typed(
-            "quant-pivot/report-universe-plan",
-            1,
-            &(
-                context.version.decision_policy_snapshot_id,
-                context.version.snapshot_hash,
-                primary_route,
-                &active_routes,
-                &route_lineage,
-                serving_head.seal.serving_head_seal_id,
-                serving_head.seal.seal_hash,
-            ),
+        let contract = ReportUniverseContract::try_new(
+            context.version.decision_policy_snapshot_id,
+            context.version.snapshot_hash,
+            active
+                .iter()
+                .map(|route| ReportUniverseRoute::from(&route.serving))
+                .collect(),
+            serving_head.seal.serving_head_seal_id,
+            serving_head.seal.seal_hash,
         )?;
         Ok(ReportUniversePlan {
-            primary_route,
             active,
-            active_routes,
-            plan_hash,
+            contract,
             serving_head,
         })
     }
@@ -1214,6 +1213,27 @@ fn candidate_tiers(
                 routed.candidate.token_id
             ),
         })?;
+    let order_rules =
+        capture
+            .market
+            .order_rules
+            .ok_or_else(|| ReportError::InvariantViolation {
+                stage: "economic_tier",
+                detail: format!(
+                    "market {} has no point-in-time CLOB order rules",
+                    market.market_id
+                ),
+            })?;
+    if order_rules.tick_size != capture.market_context.tick_size {
+        return Err(ReportError::InvariantViolation {
+            stage: "economic_tier",
+            detail: format!(
+                "market {} captured tick differs from its CLOB order rules",
+                market.market_id
+            ),
+        }
+        .into());
+    }
     let fee =
         capture
             .market
@@ -1259,6 +1279,7 @@ fn candidate_tiers(
             fee_schedule: &execution_economics.fee_schedule,
             best_ask,
             horizon,
+            order_rules,
         });
     }
     let policy = route
@@ -1281,14 +1302,28 @@ fn candidate_tiers(
         execution_economics: &execution_economics,
         best_ask,
         horizon,
+        order_rules,
     })?;
+    let minimum_rejection = if built.admitted.is_empty() {
+        built.minimum_rejection.map(|(requested, minimum)| {
+            EconomicTierBuildRejection::BelowMinimumOrderSize {
+                market_id: market.market_id.clone(),
+                requested,
+                minimum,
+            }
+        })
+    } else {
+        None
+    };
     Ok(CandidateTierBuild {
         admitted: built.admitted,
-        rejection: built.passive_rejection.map(|reason| {
-            EconomicTierBuildRejection::PassiveMakerRebateUnavailable {
-                market_id: market.market_id.clone(),
-                reason,
-            }
+        rejection: minimum_rejection.or_else(|| {
+            built.passive_rejection.map(|reason| {
+                EconomicTierBuildRejection::PassiveMakerRebateUnavailable {
+                    market_id: market.market_id.clone(),
+                    reason,
+                }
+            })
         }),
     })
 }
@@ -1307,6 +1342,7 @@ struct FullL2TierInput<'a> {
     execution_economics: &'a PitMarketExecutionEconomics,
     best_ask: Price,
     horizon: u64,
+    order_rules: PolymarketOrderRules,
 }
 
 fn policy_tier_seed(
@@ -1314,16 +1350,17 @@ fn policy_tier_seed(
     cohort: &TradePolicyCohort,
     tier_ordinal: u32,
     lineage_hash: ContentHash,
-) -> QuantResult<Option<(ExecutableTierSeed, Price, Price)>> {
+) -> QuantResult<PolicyTierBuild> {
     let FullL2TierInput {
         context,
         market,
-        capture,
+        capture: _,
         routed,
         book,
         execution_economics,
         maker_rebate_valuation,
         best_ask,
+        order_rules,
         ..
     } = input;
     match &cohort.entry_order {
@@ -1342,8 +1379,12 @@ fn policy_tier_seed(
                 }
                 .into());
             }
-            let limit_price = aggressive_buy_limit(best_ask, *max_slippage_bps);
-            let Some(seed) = ExecutableCashTierSeedFactory::build(ExecutableCashTierSeedInput {
+            let limit_price = aggressive_buy_limit(best_ask, *max_slippage_bps, order_rules)
+                .map_err(|error| ReportError::InvariantViolation {
+                    stage: "economic_tier",
+                    detail: format!("aggressive BUY limit is invalid: {error}"),
+                })?;
+            let build = ExecutableCashTierSeedFactory::build(ExecutableCashTierSeedInput {
                 report_route_run_id: routed.report_route_run_id,
                 candidate_id: routed.candidate.signal_candidate_id,
                 tier_ordinal,
@@ -1360,10 +1401,15 @@ fn policy_tier_seed(
                 limit_price,
                 cash_budget: cohort.key.cash_budget_tier,
                 fill_requirement: *fill_requirement,
+                order_rules,
                 source_lineage_hash: lineage_hash,
-            })?
-            else {
-                return Ok(None);
+            })?;
+            let seed = match build {
+                TierSeedBuild::Ready(seed) => seed,
+                TierSeedBuild::Unfilled => return Ok(PolicyTierBuild::Unfilled),
+                TierSeedBuild::BelowMinimum { requested, minimum } => {
+                    return Ok(PolicyTierBuild::BelowMinimum { requested, minimum });
+                }
             };
             let execution_vwap = match &seed.entry_execution {
                 EntryExecutionEconomics::Aggressive(entry) => entry.execution_vwap,
@@ -1375,7 +1421,11 @@ fn policy_tier_seed(
                     .into());
                 }
             };
-            Ok(Some((seed, execution_vwap, limit_price)))
+            Ok(PolicyTierBuild::Ready {
+                seed,
+                price: execution_vwap,
+                limit_price,
+            })
         }
         EntryOrderTemplate::PassivePostOnly {
             placement,
@@ -1403,21 +1453,16 @@ fn policy_tier_seed(
                     stage: "economic_tier",
                     detail: "passive candidate has no best bid".to_owned(),
                 })?;
-            let limit_price = passive_buy_limit(
-                best_bid,
-                best_ask,
-                *placement,
-                capture.market_context.tick_size,
-            )
-            .map_err(|error| ReportError::InvariantViolation {
-                stage: "economic_tier",
-                detail: format!("passive post-only price is invalid: {error:?}"),
-            })?;
-            let requested_shares = Shares::new(
-                (cohort.key.cash_budget_tier.inner() / limit_price.inner())
-                    .round_dp_with_strategy(6, RoundingStrategy::ToZero),
-            );
-            let seed = ExecutablePassiveTierSeedFactory::build(ExecutablePassiveTierSeedInput {
+            let limit_price =
+                passive_buy_limit(best_bid, best_ask, *placement, order_rules.tick_size).map_err(
+                    |error| ReportError::InvariantViolation {
+                        stage: "economic_tier",
+                        detail: format!("passive post-only price is invalid: {error:?}"),
+                    },
+                )?;
+            let requested_shares =
+                Shares::new(cohort.key.cash_budget_tier.inner() / limit_price.inner());
+            let build = ExecutablePassiveTierSeedFactory::build(ExecutablePassiveTierSeedInput {
                 report_route_run_id: routed.report_route_run_id,
                 candidate_id: routed.candidate.signal_candidate_id,
                 tier_ordinal,
@@ -1436,9 +1481,20 @@ fn policy_tier_seed(
                 good_til_secs: *good_til_secs,
                 fill_distribution: distribution,
                 maker_rebate_valuation: (*maker_rebate_valuation).clone(),
+                order_rules,
                 source_lineage_hash: lineage_hash,
             })?;
-            Ok(Some((seed, limit_price, limit_price)))
+            match build {
+                TierSeedBuild::Ready(seed) => Ok(PolicyTierBuild::Ready {
+                    seed,
+                    price: limit_price,
+                    limit_price,
+                }),
+                TierSeedBuild::Unfilled => Ok(PolicyTierBuild::Unfilled),
+                TierSeedBuild::BelowMinimum { requested, minimum } => {
+                    Ok(PolicyTierBuild::BelowMinimum { requested, minimum })
+                }
+            }
         }
     }
 }
@@ -1457,17 +1513,16 @@ fn full_l2_candidate_tiers(input: FullL2TierInput<'_>) -> QuantResult<FullL2Tier
         best_ask: _,
         horizon,
         maker_rebate_valuation: _,
+        order_rules: _,
     } = input;
     let mut by_budget = BTreeMap::<Usd, Vec<(ExecutableTierSeed, TierSource)>>::new();
     let mut passive_rejection = None;
+    let mut minimum_rejection = None;
     for (index, cohort) in policy.payload_json.cohorts.iter().enumerate() {
         if cohort.key.category != market.category
             || cohort.key.horizon_secs != horizon
             || cohort.key.profile_ref != route.contract.research_profile_ref
-            || !matches!(
-                &cohort.entry_condition,
-                quant_pivot_models::types::EntryConditionTemplate::Immediate
-            )
+            || !matches!(&cohort.entry_condition, EntryConditionTemplate::Immediate)
         {
             continue;
         }
@@ -1500,12 +1555,21 @@ fn full_l2_candidate_tiers(input: FullL2TierInput<'_>) -> QuantResult<FullL2Tier
             cohort_index,
             execution_economics,
             portfolio,
+            order_rules: input.order_rules,
         })?;
-        let Some((seed, price, limit_price)) =
-            policy_tier_seed(input, cohort, tier_ordinal, lineage_hash)?
-        else {
-            continue;
-        };
+        let (seed, price, limit_price) =
+            match policy_tier_seed(input, cohort, tier_ordinal, lineage_hash)? {
+                PolicyTierBuild::Ready {
+                    seed,
+                    price,
+                    limit_price,
+                } => (*seed, price, limit_price),
+                PolicyTierBuild::Unfilled => continue,
+                PolicyTierBuild::BelowMinimum { requested, minimum } => {
+                    minimum_rejection.get_or_insert((requested, minimum));
+                    continue;
+                }
+            };
         if price < cohort.key.entry_price_min
             || price > cohort.key.entry_price_max
             || (price == cohort.key.entry_price_max && price != Price::ONE)
@@ -1546,6 +1610,7 @@ fn full_l2_candidate_tiers(input: FullL2TierInput<'_>) -> QuantResult<FullL2Tier
     Ok(FullL2TierBuild {
         admitted: route_unique_budget_tiers(by_budget, routed)?,
         passive_rejection,
+        minimum_rejection,
     })
 }
 
@@ -1561,6 +1626,29 @@ struct BootstrapTierInput<'a> {
     fee_schedule: &'a PitFeeSchedule,
     best_ask: Price,
     horizon: u64,
+    order_rules: PolymarketOrderRules,
+}
+
+impl BootstrapTierInput<'_> {
+    fn visible_ask_depth(&self, limit_price: Price) -> QuantResult<Decimal> {
+        let depth = self
+            .book
+            .asks
+            .iter()
+            .take_while(|level| level.price_decimal() <= limit_price)
+            .try_fold(Decimal::ZERO, |total, level| {
+                level
+                    .price_decimal()
+                    .inner()
+                    .checked_mul(level.size_decimal().inner())
+                    .and_then(|notional| total.checked_add(notional))
+                    .ok_or_else(|| ReportError::NumericOverflow {
+                        field: "bootstrap.visible_depth_usd",
+                        detail: "live ask depth overflowed Decimal".to_owned(),
+                    })
+            })?;
+        Ok(depth)
+    }
 }
 
 fn bootstrap_candidate_tiers(input: BootstrapTierInput<'_>) -> QuantResult<CandidateTierBuild> {
@@ -1575,6 +1663,7 @@ fn bootstrap_candidate_tiers(input: BootstrapTierInput<'_>) -> QuantResult<Candi
         fee_schedule,
         best_ask,
         horizon,
+        order_rules,
     } = input;
     let max_slippage_bps = Bps::new(Decimal::from(
         context
@@ -1591,22 +1680,14 @@ fn bootstrap_candidate_tiers(input: BootstrapTierInput<'_>) -> QuantResult<Candi
             .min_entry_book_depth_usd
             .value,
     );
-    let limit_price = aggressive_buy_limit(best_ask, max_slippage_bps);
-    let visible_depth = book
-        .asks
-        .iter()
-        .take_while(|level| level.price_decimal() <= limit_price)
-        .try_fold(Decimal::ZERO, |total, level| {
-            level
-                .price_decimal()
-                .inner()
-                .checked_mul(level.size_decimal().inner())
-                .and_then(|notional| total.checked_add(notional))
-                .ok_or_else(|| ReportError::NumericOverflow {
-                    field: "bootstrap.visible_depth_usd",
-                    detail: "live ask depth overflowed Decimal".to_owned(),
-                })
+    let limit_price =
+        aggressive_buy_limit(best_ask, max_slippage_bps, order_rules).map_err(|error| {
+            ReportError::InvariantViolation {
+                stage: "economic_tier",
+                detail: format!("bootstrap aggressive BUY limit is invalid: {error}"),
+            }
         })?;
+    let visible_depth = input.visible_ask_depth(limit_price)?;
     if visible_depth < min_depth_usd.inner() {
         return Ok(CandidateTierBuild {
             admitted: Vec::new(),
@@ -1625,6 +1706,7 @@ fn bootstrap_candidate_tiers(input: BootstrapTierInput<'_>) -> QuantResult<Candi
             detail: "bootstrap candidate Route has no model run".to_owned(),
         })?;
     let mut tiers = Vec::new();
+    let mut minimum_rejection = None;
     for (index, cash_budget) in route
         .contract
         .profile
@@ -1650,8 +1732,9 @@ fn bootstrap_candidate_tiers(input: BootstrapTierInput<'_>) -> QuantResult<Candi
             portfolio,
             tier_ordinal,
             cash_budget,
+            order_rules,
         })?;
-        let Some(seed) = ExecutableCashTierSeedFactory::build(ExecutableCashTierSeedInput {
+        let build = ExecutableCashTierSeedFactory::build(ExecutableCashTierSeedInput {
             report_route_run_id: routed.report_route_run_id,
             candidate_id: routed.candidate.signal_candidate_id,
             tier_ordinal,
@@ -1668,10 +1751,16 @@ fn bootstrap_candidate_tiers(input: BootstrapTierInput<'_>) -> QuantResult<Candi
             limit_price,
             cash_budget,
             fill_requirement: FillRequirement::AllowPartial,
+            order_rules,
             source_lineage_hash: lineage_hash,
-        })?
-        else {
-            continue;
+        })?;
+        let seed = match build {
+            TierSeedBuild::Ready(seed) => *seed,
+            TierSeedBuild::Unfilled => continue,
+            TierSeedBuild::BelowMinimum { requested, minimum } => {
+                minimum_rejection.get_or_insert((requested, minimum));
+                continue;
+            }
         };
         tiers.push((
             seed,
@@ -1695,9 +1784,20 @@ fn bootstrap_candidate_tiers(input: BootstrapTierInput<'_>) -> QuantResult<Candi
             },
         ));
     }
+    let rejection = if tiers.is_empty() {
+        minimum_rejection.map(|(requested, minimum)| {
+            EconomicTierBuildRejection::BelowMinimumOrderSize {
+                market_id: market.market_id.clone(),
+                requested,
+                minimum,
+            }
+        })
+    } else {
+        None
+    };
     Ok(CandidateTierBuild {
         admitted: tiers,
-        rejection: None,
+        rejection,
     })
 }
 
@@ -1777,6 +1877,7 @@ struct TierLineageInput<'a> {
     cohort_index: u32,
     execution_economics: &'a PitMarketExecutionEconomics,
     portfolio: &'a PromotedPortfolioContext,
+    order_rules: PolymarketOrderRules,
 }
 
 fn tier_lineage_hash(input: &TierLineageInput<'_>) -> QuantResult<ContentHash> {
@@ -1791,6 +1892,7 @@ fn tier_lineage_hash(input: &TierLineageInput<'_>) -> QuantResult<ContentHash> {
         signal_candidate_id: SignalCandidateId,
         book_snapshot_hash: ContentHash,
         execution_economics_hash: ContentHash,
+        order_rules: PolymarketOrderRules,
         trade_policy_hash: ContentHash,
         cohort_index: u32,
         cohort: &'a TradePolicyCohort,
@@ -1813,7 +1915,7 @@ fn tier_lineage_hash(input: &TierLineageInput<'_>) -> QuantResult<ContentHash> {
         })?;
     Ok(CanonicalDigest::content_hash_typed(
         "quant-pivot/economic-tier-source",
-        2,
+        3,
         &Preimage {
             decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id,
             decision_at: input.context.boundary.decision_at(),
@@ -1824,6 +1926,7 @@ fn tier_lineage_hash(input: &TierLineageInput<'_>) -> QuantResult<ContentHash> {
             signal_candidate_id: input.routed.candidate.signal_candidate_id,
             book_snapshot_hash,
             execution_economics_hash: input.execution_economics.composite_hash,
+            order_rules: input.order_rules,
             trade_policy_hash: input
                 .route
                 .trade_policy
@@ -1849,6 +1952,7 @@ struct BootstrapLineageInput<'a> {
     portfolio: &'a PromotedPortfolioContext,
     tier_ordinal: u32,
     cash_budget: Usd,
+    order_rules: PolymarketOrderRules,
 }
 
 fn bootstrap_tier_lineage_hash(input: &BootstrapLineageInput<'_>) -> QuantResult<ContentHash> {
@@ -1869,7 +1973,7 @@ fn bootstrap_tier_lineage_hash(input: &BootstrapLineageInput<'_>) -> QuantResult
         })?;
     Ok(CanonicalDigest::content_hash_typed(
         "quant-pivot/bootstrap-economic-tier-source",
-        1,
+        2,
         &(
             input.context.version.decision_policy_snapshot_id,
             input.context.boundary.decision_at(),
@@ -1880,6 +1984,7 @@ fn bootstrap_tier_lineage_hash(input: &BootstrapLineageInput<'_>) -> QuantResult
             input.routed.candidate.signal_candidate_id,
             book_snapshot_hash,
             input.fee_schedule.schedule_hash,
+            input.order_rules,
             input.route.contract.recommendation_contract_hash,
             input.portfolio.scenario_model.content_hash,
             input.tier_ordinal,
@@ -2237,28 +2342,68 @@ fn build_portfolio(input: &PortfolioBuildInput<'_>) -> QuantResult<PortfolioBuil
 fn report_tier_rejections(
     tiers: &[ExecutableEconomicTier],
     rejected: &[TierAdmissionRejection],
+    config: &DecisionPolicySnapshot,
+    scenario: Option<&SealedPortfolioScenarioArtifact>,
 ) -> QuantResult<Vec<ReportTierRejection>> {
     let markets = tiers
         .iter()
-        .map(|tier| (tier.economic_tier_id, tier.market_id.clone()))
+        .map(|tier| (tier.economic_tier_id, tier))
         .collect::<HashMap<_, _>>();
     rejected
         .iter()
         .map(|rejection| {
-            Ok(ReportTierRejection {
-                economic_tier_id: rejection.economic_tier_id,
-                market_id: markets
-                    .get(&rejection.economic_tier_id)
-                    .cloned()
-                    .ok_or_else(|| ReportError::InvariantViolation {
+            let tier = markets
+                .get(&rejection.economic_tier_id)
+                .copied()
+                .ok_or_else(|| ReportError::InvariantViolation {
+                    stage: "portfolio_rejection",
+                    detail: format!(
+                        "rejected tier {} is absent from solver input",
+                        rejection.economic_tier_id
+                    ),
+                })?;
+            let diagnostics =
+                if rejection.code == TierAdmissionRejectionCode::ProfitProbabilityFloor {
+                    let scenario = scenario.ok_or_else(|| ReportError::InvariantViolation {
                         stage: "portfolio_rejection",
                         detail: format!(
-                            "rejected tier {} is absent from solver input",
+                            "probability-rejected tier {} has no scenario artifact",
                             rejection.economic_tier_id
                         ),
-                    })?,
+                    })?;
+                    let admission = &config.execution_risk.portfolio.admission;
+                    Some(ReportFunnelDiagnostics::ProfitProbabilityFloor {
+                        economic_tier_id: tier.economic_tier_id,
+                        scenario_artifact_id: scenario.portfolio_scenario_artifact_id,
+                        scenario_artifact_hash: scenario.content_hash,
+                        nominal_profit_probability_bps: tier.economics.profit_probability_bps,
+                        lower_profit_probability_bps: tier.profit_probability_lower_bps,
+                        minimum_profit_probability_bps: admission.min_profit_probability_bps,
+                        probability_interval_width_bps: tier.probability_interval_width_bps,
+                        maximum_probability_interval_width_bps: admission
+                            .max_probability_interval_width_bps,
+                        nominal_expected_net_usd: tier.economics.nominal_expected_net_usd,
+                        robust_expected_net_usd: tier.economics.robust_expected_net_usd,
+                    })
+                } else {
+                    None
+                };
+            let report_rejection = ReportTierRejection {
+                economic_tier_id: rejection.economic_tier_id,
+                market_id: tier.market_id.clone(),
                 code: rejection.code,
-            })
+                diagnostics,
+            };
+            report_rejection
+                .validate()
+                .map_err(|detail| ReportError::InvariantViolation {
+                    stage: "portfolio_rejection",
+                    detail: format!(
+                        "rejected tier {} has invalid diagnostics: {detail}",
+                        rejection.economic_tier_id
+                    ),
+                })?;
+            Ok(report_rejection)
         })
         .collect()
 }
@@ -2353,9 +2498,11 @@ fn route_rows(
                 pit_lineage_digest: route.contract.pit_lineage_digest,
                 serving_contract_digest: route.contract.serving_contract_hash,
                 recommendation_contract_hash: route.contract.recommendation_contract_hash,
-                report_universe_plan_hash: universe.plan_hash,
-                history_serving_head_seal_id: universe.serving_head.seal.serving_head_seal_id,
-                history_serving_head_seal_hash: universe.serving_head.seal.seal_hash,
+                report_universe_plan_hash: universe.contract.availability.universe_plan_hash,
+                history: RouteHistoryLineage::Runtime {
+                    serving_head_seal_id: universe.serving_head.seal.serving_head_seal_id,
+                    serving_head_seal_hash: universe.serving_head.seal.seal_hash,
+                },
                 serving_authority: route.contract.serving_authority,
             };
             NewReportRouteRun {
@@ -2467,7 +2614,12 @@ fn represented_routes(
         .filter(|position| position.size.is_positive())
     {
         let route = BuyModelRoute::from(position.category);
-        if !universe.active_routes.contains(&route) {
+        if !universe
+            .contract
+            .availability
+            .active_routes
+            .contains(&route)
+        {
             return Err(ReportError::UnmodeledOpenExposure {
                 route: route.as_str().to_owned(),
                 market_id: position.market_id.to_string(),
@@ -2477,7 +2629,7 @@ fn represented_routes(
         }
     }
     let represented = RepresentedRouteSet::from_routes(
-        once(universe.primary_route)
+        once(universe.contract.availability.primary_route)
             .chain(
                 selection
                     .included
@@ -2496,7 +2648,7 @@ fn represented_routes(
     if represented
         .routes
         .iter()
-        .any(|route| !universe.active_routes.contains(route))
+        .any(|route| !universe.contract.availability.active_routes.contains(route))
     {
         return Err(ReportError::InvariantViolation {
             stage: "report_universe",
@@ -2505,14 +2657,6 @@ fn represented_routes(
         .into());
     }
     Ok(represented)
-}
-
-fn merged_requirements(routes: &[ActiveModelRequirements]) -> ModelFeatureRequirements {
-    let mut merged = ModelFeatureRequirements::default();
-    for route in routes {
-        merged.merge(route.model_requirements.clone());
-    }
-    merged
 }
 
 fn route_vectors(

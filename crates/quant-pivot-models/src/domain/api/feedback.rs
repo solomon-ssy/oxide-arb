@@ -198,7 +198,9 @@ pub struct RevokePromotionPermitRequest {
 }
 
 /// Authenticated intent to consume one exact permit and atomically change one
-/// model route. Candidate, route, runtime mode, and gate identities are
+/// model route.
+///
+/// Candidate, route, entry-authorization policy, and gate identities are
 /// intentionally absent and remain server-derived.
 #[derive(Debug, Clone, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
@@ -869,7 +871,7 @@ pub struct FeedbackCoverageView {
     pub artifact_hash: ContentHash,
     pub evaluation_window_start: DateTime<Utc>,
     pub label_cutoff: DateTime<Utc>,
-    pub policy_evaluation_count: u64,
+    pub model_learning_candidate_count: u64,
     pub mature_label_count: u64,
     pub new_mature_label_count: u64,
     pub minimum_mature_labels: u64,
@@ -1225,7 +1227,7 @@ mod tests {
                     .parse::<PolicyIdempotencyKey>()
                     .expect("valid bootstrap idempotency key"),
                 reason_code: "initial_champion".to_owned(),
-                note: "establish first report-only category route".to_owned(),
+                note: "establish first analysis-only category route".to_owned(),
             }
             .validate()
             .is_ok()

@@ -75,8 +75,8 @@ use sea_orm::DatabaseConnection;
 
 use super::{
     execution_pg_seed::{
-        CalibratedModelHead, CalibratedModelSeed, SharedDemoInfra, fixture_profile_ref,
-        seed_calibrated_model,
+        CalibratedModelHead, CalibratedModelSeed, CalibrationEvidencePreset, SharedDemoInfra,
+        fixture_profile_ref, seed_calibrated_model,
     },
     model_serving_fixtures::{ModelDatasetLedgerFixture, ModelVersionFixture},
     model_spec_fixtures::new_model_spec_fixture,
@@ -177,6 +177,73 @@ struct DatasetSeed {
     feature_schema_hash: ContentHash,
     label_schema_hash: ContentHash,
     trade_policy: Option<ModelServingTradePolicyBinding>,
+    source_plan: DatasetSourcePlan,
+}
+
+enum DatasetSourcePlan {
+    TrainingFixture,
+    Feedback(Box<FeedbackCycleFreezePlan>),
+}
+
+struct DatasetWindows {
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    source_start: DateTime<Utc>,
+    source_end: DateTime<Utc>,
+    research_program_hash: ContentHash,
+}
+
+impl DatasetSourcePlan {
+    fn windows(
+        &self,
+        examples: &[TrainingExample],
+        scope: &str,
+        target_horizon_secs: u64,
+    ) -> QuantResult<DatasetWindows> {
+        if let Self::Feedback(plan) = self {
+            return Ok(DatasetWindows {
+                window_start: plan.evaluation().window_start(),
+                window_end: plan.evaluation().cutoff(),
+                source_start: plan.source_start(),
+                source_end: plan.label_cutoff(),
+                research_program_hash: plan.research_program_hash(),
+            });
+        }
+        let window_start = examples
+            .iter()
+            .map(TrainingExample::decision_at)
+            .min()
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "browser Dataset fixture requires examples".to_owned(),
+            })?;
+        let window_end = examples
+            .iter()
+            .map(TrainingExample::decision_at)
+            .max()
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "browser Dataset fixture requires examples".to_owned(),
+            })?
+            + Duration::hours(1);
+        let horizon =
+            i64::try_from(target_horizon_secs).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("browser profile horizon overflow: {error}"),
+            })?;
+        let source_end = window_end
+            .checked_add_signed(Duration::seconds(horizon))
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "browser Source Slice terminal bound overflow".to_owned(),
+            })?;
+        Ok(DatasetWindows {
+            window_start,
+            window_end,
+            source_start: window_start,
+            source_end,
+            research_program_hash: CanonicalDigest::content_hash_json(&(
+                scope,
+                "research-program",
+            ))?,
+        })
+    }
 }
 
 struct BrowserEvaluationSeed<'a> {
@@ -302,6 +369,7 @@ impl BrowserModelSeed<'_> {
                 training_dataset_id: self.training.id,
                 training_input_hash,
                 head: self.head.clone(),
+                calibration_preset: CalibrationEvidencePreset::Baseline,
             },
         ))
         .await;
@@ -323,10 +391,42 @@ impl BrowserModelSeed<'_> {
 }
 
 impl BrowserEvaluationSeed<'_> {
+    fn feedback_plan(&self, days_ago: i64) -> QuantResult<FeedbackCycleFreezePlan> {
+        let profile = fixture_profile_ref()
+            .resolve_builtin_research_profile()
+            .map_err(|detail| ResearchError::DatasetBuild { detail })?;
+        FeedbackCycleFreezePlan::derive(
+            &profile,
+            self.model_spec_id,
+            self.model_spec_definition_hash,
+            self.decision_policy_snapshot_id,
+            self.runtime_config_hash,
+            self.observed_at - Duration::days(days_ago),
+        )
+    }
+
+    fn examples_for(
+        &self,
+        scope: &str,
+        plan: &FeedbackCycleFreezePlan,
+    ) -> QuantResult<Vec<TrainingExample>> {
+        let sample_start = plan.evaluation().cutoff()
+            - Duration::seconds((TICK_COUNT - 1) * TICK_INTERVAL_SECS)
+            - Duration::hours(1);
+        model_examples(
+            scope,
+            sample_start,
+            self.factor_serving_plane,
+            self.trade_policy.is_some(),
+        )
+    }
+
     async fn persist(
         &self,
         feedback_cycle_fixture: FeedbackCycleFixture,
     ) -> QuantResult<(PersistedDataset, Option<PersistedDataset>)> {
+        let evaluation_plan = self.feedback_plan(30)?;
+        let evaluation_examples = self.examples_for("evaluation", &evaluation_plan)?;
         let evaluation = persist_dataset(
             self.db,
             self.store,
@@ -339,46 +439,42 @@ impl BrowserEvaluationSeed<'_> {
                 decision_policy_snapshot_id: self.decision_policy_snapshot_id,
                 runtime_config_hash: self.runtime_config_hash,
                 purpose: DatasetPurpose::Evaluation,
-                examples: model_examples(
-                    "evaluation",
-                    self.observed_at - Duration::days(30),
-                    self.factor_serving_plane,
-                    self.trade_policy.is_some(),
-                )?,
+                examples: evaluation_examples,
                 feature_schema_hash: self.feature_schema_hash,
                 label_schema_hash: self.label_schema_hash,
                 trade_policy: self.trade_policy.clone(),
+                source_plan: DatasetSourcePlan::Feedback(Box::new(evaluation_plan)),
             },
         )
         .await?;
         let cancellation_evaluation = match feedback_cycle_fixture {
             FeedbackCycleFixture::HistoricalOnly => None,
-            FeedbackCycleFixture::GovernedCancellation => Some(
-                persist_dataset(
-                    self.db,
-                    self.store,
-                    DatasetSeed {
-                        scope: "browser-research-cancellation-evaluation".to_owned(),
-                        model_spec_id: self.model_spec_id,
-                        model_family: self.model_family,
-                        model_spec_definition_hash: self.model_spec_definition_hash,
-                        factor_serving_plane: self.factor_serving_plane.clone(),
-                        decision_policy_snapshot_id: self.decision_policy_snapshot_id,
-                        runtime_config_hash: self.runtime_config_hash,
-                        purpose: DatasetPurpose::Evaluation,
-                        examples: model_examples(
-                            "cancellation-evaluation",
-                            self.observed_at - Duration::days(45),
-                            self.factor_serving_plane,
-                            self.trade_policy.is_some(),
-                        )?,
-                        feature_schema_hash: self.feature_schema_hash,
-                        label_schema_hash: self.label_schema_hash,
-                        trade_policy: self.trade_policy.clone(),
-                    },
+            FeedbackCycleFixture::GovernedCancellation => {
+                let plan = self.feedback_plan(45)?;
+                let examples = self.examples_for("cancellation-evaluation", &plan)?;
+                Some(
+                    persist_dataset(
+                        self.db,
+                        self.store,
+                        DatasetSeed {
+                            scope: "browser-research-cancellation-evaluation".to_owned(),
+                            model_spec_id: self.model_spec_id,
+                            model_family: self.model_family,
+                            model_spec_definition_hash: self.model_spec_definition_hash,
+                            factor_serving_plane: self.factor_serving_plane.clone(),
+                            decision_policy_snapshot_id: self.decision_policy_snapshot_id,
+                            runtime_config_hash: self.runtime_config_hash,
+                            purpose: DatasetPurpose::Evaluation,
+                            examples,
+                            feature_schema_hash: self.feature_schema_hash,
+                            label_schema_hash: self.label_schema_hash,
+                            trade_policy: self.trade_policy.clone(),
+                            source_plan: DatasetSourcePlan::Feedback(Box::new(plan)),
+                        },
+                    )
+                    .await?,
                 )
-                .await?,
-            ),
+            }
         };
         Ok((evaluation, cancellation_evaluation))
     }
@@ -574,6 +670,7 @@ async fn seed_research(
                     feature_schema_hash,
                     label_schema_hash,
                     trade_policy: None,
+                    source_plan: DatasetSourcePlan::TrainingFixture,
                 },
             )
             .await?;
@@ -627,7 +724,6 @@ async fn seed_research(
         model_version_id,
         &evaluation,
         infra.decision_policy_snapshot_id,
-        now,
     )
     .await?;
     let feedback_cycles = FeedbackCycleSeed::persist_model(FeedbackCycleSeedInput {
@@ -1087,23 +1183,19 @@ async fn persist_dataset(
     store: &Arc<dyn ArtifactStore>,
     seed: DatasetSeed,
 ) -> QuantResult<PersistedDataset> {
-    let window_start = seed
-        .examples
-        .iter()
-        .map(TrainingExample::decision_at)
-        .min()
-        .ok_or_else(|| ResearchError::DatasetBuild {
-            detail: "browser Dataset fixture requires examples".to_owned(),
+    let profile_ref = fixture_profile_ref();
+    let profile = profile_ref
+        .resolve_builtin_research_profile()
+        .map_err(|detail| ResearchError::DatasetBuild {
+            detail: format!("resolve browser ResearchProfile: {detail}"),
         })?;
-    let window_end = seed
-        .examples
-        .iter()
-        .map(TrainingExample::decision_at)
-        .max()
-        .ok_or_else(|| ResearchError::DatasetBuild {
-            detail: "browser Dataset fixture requires examples".to_owned(),
-        })?
-        + Duration::hours(1);
+    let windows = seed.source_plan.windows(
+        &seed.examples,
+        &seed.scope,
+        profile.spec.target_horizon_secs,
+    )?;
+    let window_start = windows.window_start;
+    let window_end = windows.window_end;
     let semantic_hash = TrainingDatasetArtifact::compute_dataset_hash(
         DatasetHashContract {
             model_spec_id: &seed.model_spec_id,
@@ -1117,37 +1209,17 @@ async fn persist_dataset(
         },
         &seed.examples,
     )?;
-    let profile_ref = fixture_profile_ref();
-    let profile = profile_ref
-        .resolve_builtin_research_profile()
-        .map_err(|detail| ResearchError::DatasetBuild {
-            detail: format!("resolve browser ResearchProfile: {detail}"),
-        })?;
-    let source_window_end = window_end
-        .checked_add_signed(Duration::seconds(
-            i64::try_from(profile.spec.target_horizon_secs).map_err(|error| {
-                ResearchError::DatasetBuild {
-                    detail: format!("browser profile horizon overflow: {error}"),
-                }
-            })?,
-        ))
-        .ok_or_else(|| ResearchError::DatasetBuild {
-            detail: "browser Source Slice terminal bound overflow".to_owned(),
-        })?;
     let stored_source = persist_replayable_source_slice(
         store,
         &seed.examples,
         ReplayableSourceSliceFixture {
             profile_ref,
             evaluation_track: ResearchEvaluationTrack::ResearchOnly,
-            research_program_hash: CanonicalDigest::content_hash_json(&(
-                &seed.scope,
-                "research-program",
-            ))?,
+            research_program_hash: windows.research_program_hash,
             decision_policy_snapshot_id: seed.decision_policy_snapshot_id,
             runtime_config_hash: seed.runtime_config_hash,
-            window_start,
-            window_end: source_window_end,
+            window_start: windows.source_start,
+            window_end: windows.source_end,
         },
     )
     .await?;
@@ -1232,11 +1304,10 @@ async fn seed_backtest_report(
     model_version_id: ModelVersionId,
     evaluation: &PersistedDataset,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    now: DateTime<Utc>,
 ) -> QuantResult<BacktestReportId> {
     let model_run_id = ModelRunId::from_v7();
-    let window_start = now - Duration::days(30);
-    let window_end = window_start + Duration::hours(TICK_COUNT * TICK_INTERVAL_SECS / 3_600);
+    let window_start = evaluation.feedback_request.window.window_start();
+    let window_end = evaluation.feedback_request.window.cutoff();
     let model_runs = PgModelRunRepository::new(db.clone());
     model_runs
         .create(NewModelRun {
@@ -1251,10 +1322,11 @@ async fn seed_backtest_report(
         })
         .await?;
     let backtest_report_id = BacktestReportId::from_v7();
+    let sample_start = window_end - Duration::seconds(TICK_COUNT * TICK_INTERVAL_SECS);
     let curve = [(0, -18), (45, 4), (90, 16), (135, 11), (180, 31), (225, 47)]
         .into_iter()
         .map(|(minutes, pnl)| PnlCurvePoint {
-            decision_at: window_start + Duration::minutes(minutes),
+            decision_at: sample_start + Duration::minutes(minutes),
             cumulative_realized_pnl_usd: Decimal::from(pnl),
         })
         .collect();
@@ -1335,11 +1407,11 @@ async fn seed_backtest_report(
 mod tests {
     use std::collections::BTreeMap;
 
-    use chrono::Utc;
+    use chrono::{DateTime, Duration, Utc};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use super::{FactorServingPlane, model_example};
+    use super::{DatasetSourcePlan, FactorServingPlane, model_example, model_examples};
     use crate::support::execution_pg_seed::CalibratedModelHead;
     use quant_pivot_models::{
         clickhouse::{MarketResolutionFactInput, MarketResolutionRow},
@@ -1347,6 +1419,23 @@ mod tests {
             ContentHash, EvmBlockHash, EvmTransactionHash, PayoutRatio, stable_name::FactorName,
         },
     };
+
+    #[test]
+    fn training_window_stays_independent() {
+        let factor_plane = FactorServingPlane::try_empty().expect("empty factor plane");
+        let first_tick = DateTime::from_timestamp(1_760_000_000, 123_000_000)
+            .expect("non-cadence training timestamp");
+        let examples = model_examples("training-clock", first_tick, &factor_plane, false)
+            .expect("training fixture examples");
+        let windows = DatasetSourcePlan::TrainingFixture
+            .windows(&examples, "training-clock", 86_400)
+            .expect("independent training bounds");
+
+        assert_eq!(windows.window_start, first_tick);
+        assert_eq!(windows.window_end, first_tick + Duration::hours(4));
+        assert_eq!(windows.source_start, first_tick);
+        assert_eq!(windows.source_end, first_tick + Duration::hours(28));
+    }
 
     #[test]
     fn resolution_tokens_are_canonical() {
@@ -1382,19 +1471,23 @@ mod tests {
             panic!("production control must freeze an explicit alpha simplex");
         };
         let expected = BTreeMap::from([
-            (FactorName::new("momentum_ema_slope"), dec!(0.03)),
-            (FactorName::new("momentum_macd"), dec!(0.15)),
-            (FactorName::new("momentum_roc"), dec!(0.03)),
-            (FactorName::new("momentum_vol_adjusted"), dec!(0.18)),
+            (FactorName::new("mean_reversion"), dec!(0.148)),
+            (FactorName::new("momentum_ema_slope"), dec!(0.018)),
+            (FactorName::new("momentum_macd"), dec!(0.090)),
+            (FactorName::new("momentum_roc"), dec!(0.270)),
+            (FactorName::new("momentum_vol_adjusted"), dec!(0.108)),
             (
                 FactorName::new("struct.resolution_proximity_regime"),
-                dec!(0.17),
+                dec!(0.102),
             ),
-            (FactorName::new("struct.reversal_after_shock"), dec!(0.44)),
+            (FactorName::new("struct.reversal_after_shock"), dec!(0.264)),
         ]);
 
         assert_eq!(weights, expected);
         assert_eq!(weights.values().copied().sum::<Decimal>(), Decimal::ONE);
-        assert!(!weights.contains_key(&FactorName::new("mean_reversion")));
+        let concentrated_signal =
+            weights[&FactorName::new("mean_reversion")] + weights[&FactorName::new("momentum_roc")];
+        assert_eq!(concentrated_signal, dec!(0.418));
+        assert!(concentrated_signal < dec!(0.50));
     }
 }

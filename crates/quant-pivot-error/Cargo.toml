@@ -33,8 +33,5 @@ bitcode = { workspace = true, optional = true }
 # Serialization error types (ApiError::Deserialize, WsError::MessageParse)
 serde_json = { workspace = true, optional = true }
 
-[dev-dependencies]
-rust_decimal_macros = { workspace = true }
-
 [lints]
 workspace = true

@@ -4,9 +4,10 @@ use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     domain::quant::{
         FeedbackCohortContractError, FeedbackCohortDecision, FeedbackCohortEvidence,
-        FeedbackCohortSnapshot, FeedbackExecutionEvidence, FeedbackExecutionState,
-        FeedbackRecommendationContext, FeedbackResolutionEvidence,
-        RecommendationExecutionRollupInfo, RecommendationResolutionOutcomeInfo,
+        FeedbackCohortSnapshot, FeedbackEconomicEvidence, FeedbackExecutionEvidence,
+        FeedbackExecutionState, FeedbackRecommendationContext, FeedbackResolutionEvidence,
+        RecommendationEconomicOutcomeInfo, RecommendationExecutionRollupInfo,
+        RecommendationResolutionOutcomeInfo,
     },
     enums::quant::{CohortCensorReason, CohortExclusionReason, FeedbackCohort, ReportKind},
 };
@@ -23,6 +24,7 @@ pub fn evaluate_feedback_cohort(
     context: &FeedbackRecommendationContext,
     resolution_outcome: Option<&RecommendationResolutionOutcomeInfo>,
     execution_rollup: Option<&RecommendationExecutionRollupInfo>,
+    economic_outcome: Option<&RecommendationEconomicOutcomeInfo>,
 ) -> Result<FeedbackCohortDecision, FeedbackCohortContractError> {
     let window = snapshot.decision_window();
     if context.profile_ref() != window.profile_ref() {
@@ -65,6 +67,7 @@ pub fn evaluate_feedback_cohort(
             published_at,
             resolution_outcome,
             execution_rollup,
+            economic_outcome,
         ),
     }
 }
@@ -112,17 +115,51 @@ fn evaluate_policy(
     published_at: DateTime<Utc>,
     resolution_outcome: Option<&RecommendationResolutionOutcomeInfo>,
     execution_rollup: Option<&RecommendationExecutionRollupInfo>,
+    economic_outcome: Option<&RecommendationEconomicOutcomeInfo>,
 ) -> Result<FeedbackCohortDecision, FeedbackCohortContractError> {
+    let Some(economic) = visible_economic(snapshot, context, economic_outcome)? else {
+        return Ok(FeedbackCohortDecision::Censored(
+            CohortCensorReason::EconomicOutcomeUnavailableAtCutoff,
+        ));
+    };
     let resolution = visible_resolution(snapshot, context, resolution_outcome)?;
     let execution = visible_execution(snapshot, context, published_at, execution_rollup)?;
     let execution_state = execution.as_ref().map(execution_state).transpose()?;
     Ok(FeedbackCohortDecision::Eligible(
         FeedbackCohortEvidence::PolicyEvaluation {
+            economic,
             execution_state,
             resolution_outcome_hash: resolution.map(|evidence| evidence.outcome_hash),
             execution_rollup_hash: execution.map(|evidence| evidence.rollup_hash),
         },
     ))
+}
+
+fn visible_economic(
+    snapshot: &FeedbackCohortSnapshot,
+    context: &FeedbackRecommendationContext,
+    outcome: Option<&RecommendationEconomicOutcomeInfo>,
+) -> Result<Option<FeedbackEconomicEvidence>, FeedbackCohortContractError> {
+    let Some(outcome) = outcome.filter(|outcome| outcome.available_at <= snapshot.truth_cutoff())
+    else {
+        return Ok(None);
+    };
+    outcome
+        .verify()
+        .map_err(FeedbackCohortContractError::InvalidEconomicOutcome)?;
+    if outcome.recommendation_id != context.recommendation_id() {
+        return Err(FeedbackCohortContractError::EconomicRecommendationMismatch);
+    }
+    if outcome.decision_at != context.decision_at() || outcome.horizon_at <= context.decision_at() {
+        return Err(FeedbackCohortContractError::EconomicHorizonNotForwardLooking);
+    }
+    Ok(Some(FeedbackEconomicEvidence {
+        state: outcome.state,
+        horizon_at: outcome.horizon_at,
+        available_at: outcome.available_at,
+        net_return_bps: outcome.payload_json.amounts.net_return_bps,
+        evidence_hash: outcome.evidence_hash,
+    }))
 }
 
 fn visible_resolution(
@@ -221,25 +258,29 @@ mod tests {
     use chrono::{DateTime, Duration, Utc};
     use quant_pivot_models::{
         domain::quant::{
-            ExecutionAttemptOutcomeInfo, FeedbackCohortContractError, FeedbackCohortDecision,
-            FeedbackCohortEvidence, FeedbackCohortSnapshot, FeedbackCohortWindow,
-            FeedbackRecommendationContext, NewExecutionAttemptOutcome,
-            NewRecommendationExecutionRollup, NewRecommendationResolutionOutcome,
-            RecommendationExecutionRollupInfo, RecommendationInfo, RecommendationReportInfo,
-            RecommendationResolutionOutcomeInfo, ReportRouteRunInfo, RouteCandidateFunnel,
-            RouteModelLineage, RouteRunOutcome,
+            EconomicExitEvidenceKind, ExecutionAttemptOutcomeInfo, FeedbackCohortContractError,
+            FeedbackCohortDecision, FeedbackCohortEvidence, FeedbackCohortSnapshot,
+            FeedbackCohortWindow, FeedbackRecommendationContext, NewExecutionAttemptOutcome,
+            NewRecommendationEconomicOutcome, NewRecommendationExecutionRollup,
+            NewRecommendationResolutionOutcome, RecommendationEconomicAmounts,
+            RecommendationEconomicEvidence, RecommendationEconomicOutcomeInfo,
+            RecommendationEconomicOutcomeInput, RecommendationEconomicOutcomePayload,
+            RecommendationEconomicStateDetail, RecommendationExecutionRollupInfo,
+            RecommendationInfo, RecommendationReportInfo, RecommendationResolutionOutcomeInfo,
+            ReportRouteRunInfo, RouteCandidateFunnel, RouteHistoryLineage, RouteModelLineage,
+            RouteRunOutcome,
         },
         enums::quant::{
             CohortCensorReason, CohortExclusionReason, ExecutionAttemptNoFillReason,
             ExecutionAttemptTerminalState, ExecutionOrderState, FeedbackCohort, OutcomeSide,
-            RecommendationReportStatus, RecommendationResolutionKind, RecommendationStatus,
-            ReportKind,
+            RecommendationEconomicOutcomeState, RecommendationReportStatus,
+            RecommendationResolutionKind, RecommendationStatus, ReportKind,
         },
         types::{
-            CalibrationArtifactId, ContentHash, ExecutionAccountId, ExecutionOrderId,
-            HistoryServingHeadSealId, OrderIntentId, PayoutRatio, RecommendationId,
-            RecommendationReportId, ReconciliationId, SchemaVersion, ServingAuthority, Shares,
-            TradePolicyArtifactId, Usd,
+            CalibrationArtifactId, ContentHash, EconomicTierId, ExecutionAccountId,
+            ExecutionOrderId, HistoryServingHeadSealId, OrderIntentId, PayoutRatio,
+            RecommendationId, RecommendationReportId, ReconciliationId, SchemaVersion,
+            ServingAuthority, Shares, TradePolicyArtifactId, Usd,
         },
     };
     use rust_decimal_macros::dec;
@@ -270,6 +311,7 @@ mod tests {
             context,
             resolution_outcome,
             execution_rollup,
+            None,
         )
     }
 
@@ -313,8 +355,10 @@ mod tests {
             serving_contract_digest: hash('9'),
             recommendation_contract_hash: hash('7'),
             report_universe_plan_hash: hash('a'),
-            history_serving_head_seal_id: HistoryServingHeadSealId::new(Uuid::from_u128(11)),
-            history_serving_head_seal_hash: hash('b'),
+            history: RouteHistoryLineage::Runtime {
+                serving_head_seal_id: HistoryServingHeadSealId::new(Uuid::from_u128(11)),
+                serving_head_seal_hash: hash('b'),
+            },
             serving_authority: ServingAuthority::ExecutionEligible,
         };
         let route_run = ReportRouteRunInfo {
@@ -509,12 +553,121 @@ mod tests {
         }
     }
 
+    fn empty_execution_rollup(
+        context: &FeedbackRecommendationContext,
+        available_at: DateTime<Utc>,
+    ) -> RecommendationExecutionRollupInfo {
+        let terminal_at =
+            context.published_at().expect("published recommendation") + Duration::seconds(1);
+        let seal = NewRecommendationExecutionRollup::aggregate(
+            context.recommendation_id(),
+            0,
+            terminal_at,
+            terminal_at,
+            Vec::new(),
+        )
+        .expect("aggregate empty execution rollup");
+        let rollup = seal.rollup;
+        let rollup_hash = rollup
+            .expected_rollup_hash(available_at)
+            .expect("empty execution rollup hash");
+        RecommendationExecutionRollupInfo {
+            recommendation_id: rollup.recommendation_id,
+            intent_count: rollup.intent_count,
+            attempt_count: rollup.attempt_count,
+            unfilled_attempt_count: rollup.unfilled_attempt_count,
+            partially_filled_attempt_count: rollup.partially_filled_attempt_count,
+            fully_filled_attempt_count: rollup.fully_filled_attempt_count,
+            total_requested_shares: rollup.total_requested_shares,
+            total_filled_shares: rollup.total_filled_shares,
+            total_entry_fee_usd: rollup.total_entry_fee_usd,
+            total_exit_fee_usd: rollup.total_exit_fee_usd,
+            total_settlement_payout_usd: rollup.total_settlement_payout_usd,
+            total_realized_pnl_usd: rollup.total_realized_pnl_usd,
+            first_attempt_terminal_at: rollup.first_attempt_terminal_at,
+            last_attempt_terminal_at: rollup.last_attempt_terminal_at,
+            terminal_at: rollup.terminal_at,
+            source_observed_at: rollup.source_observed_at,
+            available_at,
+            attempt_set_hash: rollup.attempt_set_hash,
+            rollup_hash,
+            created_at: available_at,
+        }
+    }
+
+    fn economic_outcome(
+        context: &FeedbackRecommendationContext,
+        available_at: DateTime<Utc>,
+    ) -> RecommendationEconomicOutcomeInfo {
+        let horizon_at = context.decision_at() + Duration::seconds(context.horizon_secs());
+        let outcome =
+            NewRecommendationEconomicOutcome::try_seal(RecommendationEconomicOutcomeInput {
+                recommendation_id: context.recommendation_id(),
+                recommendation_report_id: context.recommendation_report_id(),
+                report_route_run_id: context.report_route_run_id(),
+                decision_policy_snapshot_id: context.decision_policy_snapshot_id(),
+                economic_tier_id: EconomicTierId::from_v7(),
+                model_version_id: context.model_version_id(),
+                trade_policy_artifact_id: TradePolicyArtifactId::from_v7(),
+                research_profile_artifact_id: context.profile_ref().artifact_id(),
+                state: RecommendationEconomicOutcomeState::EntryNotTriggered,
+                decision_at: context.decision_at(),
+                horizon_at,
+                source_available_until: horizon_at,
+                replay_kernel_version: "test-policy-replay".to_owned(),
+                payload: RecommendationEconomicOutcomePayload {
+                    detail: RecommendationEconomicStateDetail::EntryNotTriggered,
+                    amounts: RecommendationEconomicAmounts {
+                        entry_filled_shares: Shares::ZERO,
+                        exited_shares: Shares::ZERO,
+                        entry_cost_usd: Usd::ZERO,
+                        exit_proceeds_usd: Usd::ZERO,
+                        resolution_payout_usd: Usd::ZERO,
+                        execution_fee_usd: Usd::ZERO,
+                        expected_maker_rebate_usd: Usd::ZERO,
+                        net_pnl_usd: Some(Usd::ZERO),
+                        net_return_bps: Some(dec!(0)),
+                    },
+                    evidence: RecommendationEconomicEvidence {
+                        exit_evidence_kind: EconomicExitEvidenceKind::None,
+                        full_l2_covered: true,
+                        fee_covered: true,
+                        passive_trade_covered: None,
+                        replay_input_hash: hash('e'),
+                        replay_output_hash: hash('f'),
+                    },
+                },
+                available_at,
+            })
+            .expect("economic outcome");
+        RecommendationEconomicOutcomeInfo {
+            recommendation_id: outcome.recommendation_id,
+            recommendation_report_id: outcome.recommendation_report_id,
+            report_route_run_id: outcome.report_route_run_id,
+            decision_policy_snapshot_id: outcome.decision_policy_snapshot_id,
+            economic_tier_id: outcome.economic_tier_id,
+            model_version_id: outcome.model_version_id,
+            trade_policy_artifact_id: outcome.trade_policy_artifact_id,
+            research_profile_artifact_id: outcome.research_profile_artifact_id,
+            state: outcome.state,
+            decision_at: outcome.decision_at,
+            horizon_at: outcome.horizon_at,
+            source_available_until: outcome.source_available_until,
+            replay_kernel_version: outcome.replay_kernel_version,
+            payload_json: outcome.payload_json,
+            evidence_hash: outcome.evidence_hash,
+            available_at: outcome.available_at,
+            created_at: outcome.available_at,
+        }
+    }
+
     #[test]
     fn cohort_matrix_keeps_orthogonal() {
         let context = context();
         let window = window(&context);
         let resolution = resolution_outcome(&context, window.cutoff() - Duration::minutes(2));
         let execution = execution_rollup(&context, window.cutoff() - Duration::minutes(1));
+        let economic = economic_outcome(&context, window.cutoff() - Duration::seconds(30));
 
         let model = evaluate_feedback_cohort(
             FeedbackCohort::ModelLearning,
@@ -558,12 +711,15 @@ mod tests {
                 && evidence.total_filled_shares == Shares::ZERO
         ));
 
-        let policy = evaluate_feedback_cohort(
+        let snapshot = FeedbackCohortSnapshot::try_new(window.clone(), window.cutoff())
+            .expect("policy snapshot");
+        let policy = evaluate_snapshot(
             FeedbackCohort::PolicyEvaluation,
-            &window,
+            &snapshot,
             &context,
             Some(&resolution),
             Some(&execution),
+            Some(&economic),
         )
         .expect("policy cohort");
         assert!(matches!(
@@ -577,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_execution_not_attempted() {
+    fn missing_execution_is_censored() {
         let context = context();
         let cohort_window = window(&context);
         let decision = evaluate_feedback_cohort(
@@ -588,6 +744,28 @@ mod tests {
             None,
         )
         .expect("missing execution classification");
+        assert_eq!(
+            decision,
+            FeedbackCohortDecision::Censored(
+                CohortCensorReason::ExecutionOutcomeUnavailableAtCutoff
+            )
+        );
+    }
+
+    #[test]
+    fn zero_rollup_is_excluded() {
+        let context = context();
+        let cohort_window = window(&context);
+        let rollup =
+            empty_execution_rollup(&context, cohort_window.cutoff() - Duration::seconds(1));
+        let decision = evaluate_feedback_cohort(
+            FeedbackCohort::ExecutionLearning,
+            &cohort_window,
+            &context,
+            None,
+            Some(&rollup),
+        )
+        .expect("zero-attempt execution classification");
         assert_eq!(
             decision,
             FeedbackCohortDecision::Excluded(CohortExclusionReason::ExecutionNotAttempted)
@@ -635,14 +813,12 @@ mod tests {
             None,
         )
         .expect("policy remains observable");
-        assert!(matches!(
+        assert_eq!(
             policy,
-            FeedbackCohortDecision::Eligible(FeedbackCohortEvidence::PolicyEvaluation {
-                resolution_outcome_hash: None,
-                execution_rollup_hash: None,
-                ..
-            })
-        ));
+            FeedbackCohortDecision::Censored(
+                CohortCensorReason::EconomicOutcomeUnavailableAtCutoff
+            )
+        );
     }
 
     #[test]
@@ -665,6 +841,7 @@ mod tests {
             &snapshot,
             &context,
             Some(&resolution),
+            None,
             None,
         )
         .expect("mature resolution after decision window");

@@ -438,6 +438,15 @@ impl SessionRegistry {
         }
     }
 
+    async fn dispatch_event(&self, event: CoreEvent) -> bool {
+        let Some((key, envelope)) = event.event_envelope() else {
+            return true;
+        };
+        let delivery = DeliveryClass::for_channel(key.channel);
+        let frame = ByteString::from(envelope.to_text());
+        self.fanout(key, frame, delivery).await
+    }
+
     /// Number of sessions installed in the actor (diagnostics only).
     #[must_use]
     pub fn session_count(&self) -> usize {
@@ -625,6 +634,7 @@ pub struct SessionHub {
     reliable: Receiver<ReliableFanout>,
     best_effort: Arc<BestEffortCoalescer>,
     fail_closed: CancellationToken,
+    accepting: bool,
     sessions: AHashMap<SessionId, SessionRecord>,
     topic_subscribers: AHashMap<SubscriptionKey, AHashSet<SessionId>>,
     subject_sessions: AHashMap<UserId, AHashSet<SessionId>>,
@@ -651,6 +661,7 @@ impl SessionHub {
             reliable,
             best_effort,
             fail_closed,
+            accepting: true,
             sessions: AHashMap::new(),
             topic_subscribers: AHashMap::new(),
             subject_sessions: AHashMap::new(),
@@ -663,16 +674,31 @@ impl SessionHub {
         }
     }
 
-    /// Process commands until staged shutdown or all handles are dropped.
-    pub async fn run(mut self, shutdown: CancellationToken) {
+    /// Close live sessions at root shutdown, then keep draining commands until
+    /// the dedicated fan-out stage ends.
+    pub async fn run(
+        mut self,
+        root_shutdown: CancellationToken,
+        stage_shutdown: CancellationToken,
+    ) {
         loop {
             tokio::select! {
                 biased;
 
-                () = shutdown.cancelled() => {
-                    self.close_all_sessions();
-                    tracing::info!("ws session hub shutting down");
+                () = stage_shutdown.cancelled() => {
+                    self.close_ingress();
+                    let (control, reliable, best_effort) = self.drain_pending();
+                    tracing::info!(
+                        control,
+                        reliable,
+                        best_effort,
+                        "ws session hub shutting down after bounded drain"
+                    );
                     return;
+                }
+                () = root_shutdown.cancelled(), if self.accepting => {
+                    let closed = self.close_ingress();
+                    tracing::info!(closed, "ws session hub closed ingress at root shutdown");
                 }
                 () = self.fail_closed.cancelled() => {
                     self.close_all_sessions();
@@ -717,6 +743,34 @@ impl SessionHub {
             .queue_depth
             .with_label_values(&[lane])
             .set(i64::try_from(receiver.len()).unwrap_or(i64::MAX));
+    }
+
+    fn drain_pending(&mut self) -> (usize, usize, usize) {
+        let mut control = 0_usize;
+        while let Ok(command) = self.control.try_recv() {
+            self.apply_control(command);
+            control = control.saturating_add(1);
+        }
+        let mut reliable = 0_usize;
+        while let Ok(command) = self.reliable.try_recv() {
+            self.fanout(&command.key, &command.frame, DeliveryClass::Reliable);
+            reliable = reliable.saturating_add(1);
+        }
+        let mut best_effort = 0_usize;
+        while let Some((key, pending)) = self.best_effort.pop() {
+            self.fanout(&key, &pending.frame, DeliveryClass::BestEffort);
+            best_effort = best_effort.saturating_add(1);
+        }
+        self.update_receiver_depth("control", &self.control);
+        self.update_receiver_depth("reliable", &self.reliable);
+        (control, reliable, best_effort)
+    }
+
+    fn close_ingress(&mut self) -> usize {
+        self.accepting = false;
+        let closed = self.sessions.len();
+        self.close_all_sessions();
+        closed
     }
 
     fn apply_control(&mut self, command: SessionControlCommand) {
@@ -793,6 +847,10 @@ impl SessionHub {
     }
 
     fn register(&mut self, session_id: SessionId, registration: SessionRegistration) -> bool {
+        if !self.accepting {
+            registration.cancellation.cancel();
+            return false;
+        }
         if self.sessions.contains_key(&session_id) {
             return false;
         }
@@ -1059,7 +1117,15 @@ pub async fn spawn_ws_broadcaster(
     loop {
         tokio::select! {
             () = shutdown.cancelled() => {
-                tracing::info!("ws broadcaster shutting down");
+                let mut drained = 0_usize;
+                while let Ok(event) = rx.try_recv() {
+                    if !registry.dispatch_event(event).await {
+                        tracing::info!(drained, "ws session hub command queue closed during broadcaster drain");
+                        return;
+                    }
+                    drained = drained.saturating_add(1);
+                }
+                tracing::info!(drained, "ws broadcaster shutting down after bounded drain");
                 return;
             }
             event = rx.recv_async() => {
@@ -1067,13 +1133,9 @@ pub async fn spawn_ws_broadcaster(
                     tracing::info!("ws broadcaster event bus closed");
                     return;
                 };
-                if let Some((key, envelope)) = event.event_envelope() {
-                    let delivery = DeliveryClass::for_channel(key.channel);
-                    let frame = ByteString::from(envelope.to_text());
-                    if !registry.fanout(key, frame, delivery).await {
-                        tracing::info!("ws session hub command queue closed");
-                        return;
-                    }
+                if !registry.dispatch_event(event).await {
+                    tracing::info!("ws session hub command queue closed");
+                    return;
                 }
             }
         }
@@ -1090,7 +1152,10 @@ mod tests {
     use bytestring::ByteString;
     use prometheus::{GaugeVec, Histogram, HistogramOpts, IntCounter, IntGauge, IntGaugeVec, Opts};
     use quant_pivot_models::{
-        domain::ws::{SubscriptionKey, WsChannel},
+        domain::{
+            runtime::{CoreEvent, CoreEventPublisher},
+            ws::{SubscriptionKey, WsChannel},
+        },
         types::{MarketId, UserId},
     };
     use tokio::{
@@ -1103,7 +1168,7 @@ mod tests {
     use super::{
         CONTROL_TIMEOUT, DeliveryClass, HUB_MAX_FRAME_BYTES, HUB_RELIABLE_CAPACITY,
         SESSION_REPLAY_CAPACITY, SessionHub, SessionHubMetrics, SessionId, SessionRegistration,
-        SessionRegistry, SharedFrame,
+        SessionRegistry, SharedFrame, spawn_ws_broadcaster,
     };
 
     static METRIC_ID: AtomicU64 = AtomicU64::new(1);
@@ -1207,9 +1272,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broadcaster_drains_shutdown() {
+        let (registry, hub, _metrics, hub_shutdown) = test_hub();
+        let hub_task = tokio::spawn(hub.run(hub_shutdown.clone(), hub_shutdown.clone()));
+        let (registration, mut receiver, _) = registration(8, user(1), "fanout-drain", false);
+        let session_id = registry.register(registration).await.expect("register");
+        let key = SubscriptionKey::global(WsChannel::ConfigActivated);
+        assert!(registry.subscribe(session_id, key).await);
+        let hub_keepalive = registry.clone();
+        let (events, event_rx) = CoreEventPublisher::bounded(8);
+        for version_id in ["first", "second"] {
+            events.publish(CoreEvent::ConfigActivated {
+                version_id: version_id.to_owned(),
+            });
+        }
+        let broadcaster_shutdown = CancellationToken::new();
+        broadcaster_shutdown.cancel();
+
+        spawn_ws_broadcaster(event_rx, registry, broadcaster_shutdown).await;
+
+        let first = timeout(CONTROL_TIMEOUT, receiver.recv())
+            .await
+            .expect("first drained frame")
+            .expect("first frame");
+        let second = timeout(CONTROL_TIMEOUT, receiver.recv())
+            .await
+            .expect("second drained frame")
+            .expect("second frame");
+        assert!(first.contains("first"));
+        assert!(second.contains("second"));
+        drop(first);
+        drop(second);
+        assert_eq!(events.dropped_count(), 0);
+        hub_shutdown.cancel();
+        hub_task.await.expect("hub task");
+        drop(hub_keepalive);
+    }
+
+    #[tokio::test]
+    async fn hub_releases_reliable() {
+        let (registry, mut hub, metrics, shutdown) = test_hub();
+        let (registration, mut receiver, cancellation) =
+            registration(8, user(1), "hub-drain", false);
+        let session_id = SessionId(1);
+        assert!(hub.register(session_id, registration));
+        let key = SubscriptionKey::global(WsChannel::ConfigActivated);
+        assert!(hub.subscribe(session_id, key.clone()));
+        assert!(
+            registry
+                .fanout(
+                    key,
+                    ByteString::from_static("terminal-frame"),
+                    DeliveryClass::Reliable,
+                )
+                .await
+        );
+        assert!(metrics.frame_bytes.get() > 0);
+        shutdown.cancel();
+
+        hub.run(shutdown.clone(), shutdown).await;
+
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(metrics.frame_bytes.get(), 0);
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn root_closes_hub_ingress() {
+        let (registry, hub, _metrics, _) = test_hub();
+        let root_shutdown = CancellationToken::new();
+        let stage_shutdown = CancellationToken::new();
+        let task = tokio::spawn(hub.run(root_shutdown.clone(), stage_shutdown.clone()));
+        let (active_registration, _receiver, active_cancellation) =
+            registration(8, user(1), "active-session", false);
+        registry
+            .register(active_registration)
+            .await
+            .expect("register active");
+
+        root_shutdown.cancel();
+        timeout(CONTROL_TIMEOUT, active_cancellation.cancelled())
+            .await
+            .expect("root shutdown closes active session");
+        assert_eq!(registry.session_count(), 0);
+
+        let (racing, _receiver, racing_cancellation) =
+            registration(8, user(2), "racing-session", false);
+        assert!(registry.register(racing).await.is_none());
+        assert!(racing_cancellation.is_cancelled());
+        assert!(!task.is_finished());
+
+        stage_shutdown.cancel();
+        task.await.expect("hub task");
+    }
+
+    #[tokio::test]
     async fn replay_targets_exact_session() {
         let (registry, hub, _metrics, shutdown) = test_hub();
-        let task = tokio::spawn(hub.run(shutdown.clone()));
+        let task = tokio::spawn(hub.run(shutdown.clone(), shutdown.clone()));
         let (first, mut first_rx, _) = registration(8, user(1), "family-1", false);
         let first_id = registry.register(first).await.expect("register first");
         let (second, mut second_rx, _) = registration(8, user(2), "family-2", false);
@@ -1236,7 +1396,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_replay_disconnects() {
         let (registry, hub, metrics, shutdown) = test_hub();
-        let task = tokio::spawn(hub.run(shutdown.clone()));
+        let task = tokio::spawn(hub.run(shutdown.clone(), shutdown.clone()));
         let (registration, _receiver, cancellation) =
             registration(8, user(1), "replay-overflow", false);
         let session_id = registry.register(registration).await.expect("register");
@@ -1255,7 +1415,7 @@ mod tests {
     #[tokio::test]
     async fn topic_index_delivers_subscribers() {
         let (registry, hub, _metrics, shutdown) = test_hub();
-        let task = tokio::spawn(hub.run(shutdown.clone()));
+        let task = tokio::spawn(hub.run(shutdown.clone(), shutdown.clone()));
         let (first, mut first_rx, _) = registration(8, user(1), "family-1", false);
         let first_id = registry.register(first).await.expect("register first");
         assert!(registry.subscribe(first_id, book("0xaaa")).await);
@@ -1286,7 +1446,7 @@ mod tests {
     #[tokio::test]
     async fn watched_market_tracks_subscription() {
         let (registry, hub, _metrics, shutdown) = test_hub();
-        let task = tokio::spawn(hub.run(shutdown.clone()));
+        let task = tokio::spawn(hub.run(shutdown.clone(), shutdown.clone()));
         let (first, _first_rx, _) = registration(8, user(1), "family-1", false);
         let first_id = registry.register(first).await.expect("register first");
         let (second, _second_rx, _) = registration(8, user(2), "family-2", false);
@@ -1309,7 +1469,7 @@ mod tests {
     #[tokio::test]
     async fn system_frames_without_subscription() {
         let (registry, hub, _metrics, shutdown) = test_hub();
-        let task = tokio::spawn(hub.run(shutdown.clone()));
+        let task = tokio::spawn(hub.run(shutdown.clone(), shutdown.clone()));
         let (reader, mut reader_rx, _) = registration(8, user(1), "family-1", true);
         registry.register(reader).await.expect("register reader");
         let (other, mut other_rx, _) = registration(8, user(2), "family-2", false);
@@ -1333,7 +1493,7 @@ mod tests {
     #[tokio::test]
     async fn subject_family_indexes_sessions() {
         let (registry, hub, _metrics, shutdown) = test_hub();
-        let task = tokio::spawn(hub.run(shutdown.clone()));
+        let task = tokio::spawn(hub.run(shutdown.clone(), shutdown.clone()));
         let (first, _first_rx, first_cancel) = registration(8, user(1), "family-1", false);
         registry.register(first).await.expect("register first");
         let (second, _second_rx, second_cancel) = registration(8, user(1), "family-2", false);
@@ -1356,7 +1516,7 @@ mod tests {
     #[tokio::test]
     async fn slow_client_drops_lifecycle() {
         let (registry, hub, metrics, shutdown) = test_hub();
-        let task = tokio::spawn(hub.run(shutdown.clone()));
+        let task = tokio::spawn(hub.run(shutdown.clone(), shutdown.clone()));
         let (registration, mut receiver, cancellation) = registration(1, user(1), "family", false);
         let session_id = registry.register(registration).await.expect("register");
         let key = book("0xaaa");
@@ -1536,7 +1696,7 @@ mod tests {
                 .await
         });
         tokio::task::yield_now().await;
-        let task = tokio::spawn(hub.run(shutdown.clone()));
+        let task = tokio::spawn(hub.run(shutdown.clone(), shutdown.clone()));
 
         assert!(overflow.await.expect("overflow task"));
         assert!(cancellation.is_cancelled());
@@ -1552,7 +1712,7 @@ mod tests {
         const FLOOD_EVENTS: usize = 10_000;
 
         let (registry, hub, _metrics, shutdown) = test_hub();
-        let task = tokio::spawn(hub.run(shutdown.clone()));
+        let task = tokio::spawn(hub.run(shutdown.clone(), shutdown.clone()));
         let topic = book("0xflood");
         let target_subject = user(1);
         let mut receivers = Vec::with_capacity(SESSION_COUNT);

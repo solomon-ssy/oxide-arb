@@ -1,35 +1,29 @@
 //! Outcome-reconciliation source contracts against disposable `PostgreSQL`.
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use quant_pivot_models::{
     domain::quant::{
         AccountExecutionFeeFact, ExecutionAttemptDeferredReason, ExecutionAttemptDerivation,
         ExecutionAttemptReconciliationError, ExecutionAttemptReconciliationResult,
-        ExecutionAttemptSourceGraph, NewAccountChainExecution, NewExecutionAttemptOutcome,
+        ExecutionAttemptSourceGraph, NewExecutionAttemptOutcome,
     },
     enums::{
-        execution::{
-            AccountChainExecutionRole, ExecutionOrderPhase, PositionLedgerState,
-            ReconciliationResult,
-        },
+        execution::{ExecutionOrderPhase, PositionLedgerState, ReconciliationResult},
         quant::{ExecutionAttemptTerminalState, ExecutionOrderState},
     },
     hashing::CanonicalDigest,
     types::{
-        AccountChainExecutionId, ContentHash, EvmAddress, EvmBlockHash, EvmTransactionHash,
-        ExecutionOrderId, MarketId, OrderId, OrderIntentId, Price, ReconciliationId, Shares,
-        TokenId, Usd, VenueOrderAmount,
+        AccountChainExecutionId, ExecutionOrderId, MarketId, OrderId, OrderIntentId, Price,
+        ReconciliationId, Shares, TokenId, Usd, VenueOrderAmount,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgAccountChainExecutionRepository, PgAccountRecoveryRepository,
         PgExecutionAttemptOutcomeRepository, PgExecutionOrderRepository,
         PgExecutionSubmissionRepository, PgOrderIntentRepository, PgReconciliationRepository,
         PgStrategyPositionLotRepository,
     },
     traits::{
-        AccountChainExecutionRepository, AccountRecoveryRepository,
         ExecutionAttemptOutcomeRepository, ExecutionOrderRepository, OrderIntentRepository,
         ReconciliationRepository, StrategyPositionLotRepository,
     },
@@ -37,8 +31,8 @@ use quant_pivot_repository::{
 use quant_pivot_system_tests::{
     postgres::{self, PostgresClock, setup_pg},
     support::execution_pg_seed::{
-        ExecutionTxnIds, close_position_full, fill_entry_lot, fixture_execution_account,
-        seed_approved_intent, seed_report_fixture,
+        ExecutionTxnIds, close_position_full, fill_entry_lot, seed_approved_intent,
+        seed_intent_account_fees, seed_report_fixture,
     },
 };
 use rust_decimal_macros::dec;
@@ -117,7 +111,7 @@ async fn closed_execution_source_reconciled() {
             ExecutionAttemptDeferredReason::AccountChainExecutionMissing
         )
     );
-    seed_account_fees(&db, &graph).await;
+    seed_intent_account_fees(&db, &intent_id).await;
     let cutoff = db.statement_time().await;
     let first = repository
         .reconcile_intent(&intent_id, cutoff)
@@ -153,81 +147,6 @@ async fn closed_execution_source_reconciled() {
     );
 }
 
-async fn seed_account_fees(db: &DatabaseConnection, graph: &ExecutionAttemptSourceGraph) {
-    let account = fixture_execution_account();
-    let executions = PgAccountChainExecutionRepository::new(db.clone());
-    let recovery = PgAccountRecoveryRepository::new(db.clone());
-    for (index, order) in graph.orders.iter().enumerate() {
-        let reconciliation = graph
-            .reconciliations
-            .iter()
-            .find(|reconciliation| reconciliation.execution_order_id == order.execution_order_id)
-            .expect("fee reconciliation");
-        if !matches!(
-            reconciliation.result,
-            ReconciliationResult::Filled | ReconciliationResult::PartiallyFilled
-        ) {
-            continue;
-        }
-        let source_event_hash =
-            CanonicalDigest::content_hash_json(&order.execution_order_id).expect("source hash");
-        let account_chain_execution_id =
-            AccountChainExecutionId::from_content_hash(&source_event_hash);
-        let observed_at = Utc::now();
-        let digit =
-            char::from_digit(u32::try_from(index + 1).expect("index") % 10, 10).expect("hex digit");
-        executions
-            .append(vec![NewAccountChainExecution {
-                account_chain_execution_id,
-                execution_account_id: graph.intent.execution_account_id,
-                role: AccountChainExecutionRole::Maker,
-                chain_id: 137,
-                protocol_version: 2,
-                exchange_address: EvmAddress::parse("0xe111180000d2663c0091e4f400237545b87b996b")
-                    .expect("exchange"),
-                block_number: 100 + i64::try_from(index).expect("block index"),
-                block_hash: EvmBlockHash::parse(format!("0x{}", digit.to_string().repeat(64)))
-                    .expect("block hash"),
-                transaction_hash: EvmTransactionHash::parse(format!(
-                    "0x{}",
-                    digit.to_string().repeat(64)
-                ))
-                .expect("transaction hash"),
-                transaction_index: i64::try_from(index).expect("transaction index"),
-                log_index: i64::try_from(index).expect("log index"),
-                order_id: order.venue_order_id.clone().expect("venue order id"),
-                maker_address: account.funder_address.clone(),
-                taker_address: EvmAddress::parse("0x2222222222222222222222222222222222222222")
-                    .expect("taker"),
-                order_side: order.side,
-                order_token_id: order.token_id.clone(),
-                maker_amount_raw: "1000000".to_owned(),
-                taker_amount_raw: "1000000".to_owned(),
-                account_side: Some(order.side),
-                account_token_id: Some(order.token_id.clone()),
-                shares: reconciliation.venue_filled_shares,
-                principal_usd: reconciliation
-                    .venue_filled_shares
-                    .zip(reconciliation.venue_avg_price)
-                    .map(|(shares, price)| shares * price),
-                exact_fee_usd: Some(order.prepared_order_json.expected_fee),
-                builder_code: None,
-                metadata: None,
-                source_event_hash,
-                availability_policy_hash: ContentHash::from_bytes([9; 32]),
-                observed_at,
-                available_at: observed_at,
-            }])
-            .await
-            .expect("account fee execution");
-        let associated = recovery
-            .associate_execution(&account_chain_execution_id, observed_at)
-            .await
-            .expect("account fee association");
-        assert!(associated.incident.is_none());
-    }
-}
-
 async fn load_source_graph(
     db: &DatabaseConnection,
     ids: &ExecutionTxnIds,
@@ -259,36 +178,36 @@ async fn load_source_graph(
         .expect("load source position");
     let account_execution_fees = reconciliations
         .iter()
-        .filter_map(|reconciliation| {
+        .filter(|reconciliation| {
             matches!(
                 reconciliation.result,
                 ReconciliationResult::Filled | ReconciliationResult::PartiallyFilled
             )
-            .then(|| {
-                let order = orders
-                    .iter()
-                    .find(|order| order.execution_order_id == reconciliation.execution_order_id)
-                    .expect("fee execution order");
-                let source_event_hash =
-                    CanonicalDigest::content_hash_json(&reconciliation.execution_order_id)
-                        .expect("fee source hash");
-                AccountExecutionFeeFact {
-                    account_chain_execution_id: AccountChainExecutionId::from_content_hash(
-                        &source_event_hash,
-                    ),
-                    execution_order_id: reconciliation.execution_order_id,
-                    exact_fee_usd: Usd::new(
-                        order.prepared_order_json.expected_fee.inner()
-                            * reconciliation
-                                .venue_filled_shares
-                                .expect("filled reconciliation shares")
-                                .inner()
-                            / order.shares.inner(),
-                    ),
-                    source_event_hash,
-                    available_at: reconciliation.updated_at,
-                }
-            })
+        })
+        .map(|reconciliation| {
+            let order = orders
+                .iter()
+                .find(|order| order.execution_order_id == reconciliation.execution_order_id)
+                .expect("fee execution order");
+            let source_event_hash =
+                CanonicalDigest::content_hash_json(&reconciliation.execution_order_id)
+                    .expect("fee source hash");
+            AccountExecutionFeeFact {
+                account_chain_execution_id: AccountChainExecutionId::from_content_hash(
+                    &source_event_hash,
+                ),
+                execution_order_id: reconciliation.execution_order_id,
+                exact_fee_usd: Usd::new(
+                    order.prepared_order_json.expected_fee.inner()
+                        * reconciliation
+                            .venue_filled_shares
+                            .expect("filled reconciliation shares")
+                            .inner()
+                        / order.shares.inner(),
+                ),
+                source_event_hash,
+                available_at: reconciliation.updated_at,
+            }
         })
         .collect();
     ExecutionAttemptSourceGraph {
@@ -417,8 +336,9 @@ fn assert_multiple_exit_aggregated(graph: &ExecutionAttemptSourceGraph) {
     second_order.price = Price::new(dec!(0.6));
     second_order.shares = Shares::new(dec!(20));
     second_order.cost_usd = Usd::new(dec!(12));
-    second_order.prepared_order_json.worst_price = Price::new(dec!(0.6));
+    second_order.prepared_order_json.limit_price = Price::new(dec!(0.6));
     second_order.prepared_order_json.venue_amount = VenueOrderAmount::Shares(Shares::new(dec!(20)));
+    second_order.prepared_order_json.requested_shares = Shares::new(dec!(20));
     second_order.prepared_order_json.expected_filled_shares = Shares::new(dec!(20));
     second_order.prepared_order_json.total_cash_delta = dec!(12);
     second_order.updated_at += Duration::milliseconds(1);
@@ -427,8 +347,9 @@ fn assert_multiple_exit_aggregated(graph: &ExecutionAttemptSourceGraph) {
     first_order.price = Price::new(dec!(0.5));
     first_order.shares = Shares::new(dec!(20));
     first_order.cost_usd = Usd::new(dec!(10));
-    first_order.prepared_order_json.worst_price = Price::new(dec!(0.5));
+    first_order.prepared_order_json.limit_price = Price::new(dec!(0.5));
     first_order.prepared_order_json.venue_amount = VenueOrderAmount::Shares(Shares::new(dec!(20)));
+    first_order.prepared_order_json.requested_shares = Shares::new(dec!(20));
     first_order.prepared_order_json.expected_filled_shares = Shares::new(dec!(20));
     first_order.prepared_order_json.total_cash_delta = dec!(10);
 
@@ -513,6 +434,7 @@ fn assert_partial_not_full(graph: &ExecutionAttemptSourceGraph) {
             order.cost_usd = Usd::new(dec!(11));
             order.prepared_order_json.venue_amount =
                 VenueOrderAmount::Shares(Shares::new(dec!(20)));
+            order.prepared_order_json.requested_shares = Shares::new(dec!(20));
             order.prepared_order_json.expected_filled_shares = Shares::new(dec!(20));
             order.prepared_order_json.total_cash_delta = dec!(11);
             order.execution_order_id

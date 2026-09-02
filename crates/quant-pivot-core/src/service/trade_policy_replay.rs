@@ -7,10 +7,12 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap, hash_map::Entry},
+    sync::Arc,
 };
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use chrono_tz::Tz;
+use quant_pivot_compute::{ComputeExecutor, OfflineMemoryLease};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::BookL2LedgerRow,
@@ -49,7 +51,7 @@ use quant_pivot_models::{
         TradePolicyEvidenceObjectKind, TradePolicyFillEvidenceRow, TradePolicyLatencyScenario,
         TradePolicyObservationCapability, TradePolicyObservationEligibilityRow,
         TradePolicyParameterSource, TradePolicyQualityGate, TradePolicyReplayGap,
-        TradePolicyStatisticalSummaryRow, Usd, VerticalGateEvidence,
+        TradePolicyStatisticalSummaryRow, TrainingExampleId, Usd, VerticalGateEvidence,
         WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
         WeatherDailyTemperatureInput, WeatherObservationDayClosedOutsideBand,
         WeatherTemperatureStatistic,
@@ -61,7 +63,7 @@ use quant_pivot_research::{
         BookWalkOutcome, FeeError, LiquidityRole, PitFeeSchedule, PitMakerRebateEvidence,
         PitMakerRebateUnavailableReason, PitMarketExecutionEconomics,
     },
-    model::{QuantModelRuntime, SignalCandidate},
+    model::{ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime, SignalCandidate},
     pit::BookSnapshotAt,
     policy_evidence::PolicyEvidenceRecord,
     policy_replay::{
@@ -75,6 +77,8 @@ use quant_pivot_research::{
     training::TrainingExample,
 };
 use rust_decimal::{Decimal, RoundingStrategy, prelude::ToPrimitive};
+use tokio::runtime::Handle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
@@ -124,86 +128,168 @@ impl FrozenPolicySignals {
     }
 }
 
-/// Re-infer every frozen cross-section once. The runtime is hash/schema
-/// was built from the complete verified model preimage and consumes Dataset
-/// bytes verbatim.
+struct FrozenInferenceGroup {
+    decision_at: DateTime<Utc>,
+    indexes: Vec<usize>,
+}
+
+pub(super) struct FrozenInferenceRequest<'a> {
+    pub compute: Arc<ComputeExecutor>,
+    pub memory_lease: &'a OfflineMemoryLease,
+    pub cancel: &'a CancellationToken,
+    pub runtime: Arc<dyn QuantModelRuntime>,
+    pub model_version: ModelVersionInfo,
+    pub feature_schema_hash: ContentHash,
+    pub factor_schema_hash: ContentHash,
+    pub examples: Arc<[TrainingExample]>,
+    pub fit_count: usize,
+}
+
+/// Re-infer every frozen cross-section once under an already-admitted memory
+/// lease. Dataset grouping, runtime-input materialization, and output folding
+/// execute on the governed offline pool; the application runtime only awaits
+/// the governed task completion.
 pub(super) async fn reinfer_frozen_policy_signals(
-    runtime: &dyn QuantModelRuntime,
-    model_version: &ModelVersionInfo,
-    feature_schema_hash: &ContentHash,
-    factor_schema_hash: &ContentHash,
-    examples: &[TrainingExample],
+    request: FrozenInferenceRequest<'_>,
 ) -> QuantResult<FrozenPolicySignals> {
-    let contract = model_version
-        .verified_serving_contract()
-        .map_err(|error| methodology(format!("invalid persisted serving contract: {error}")))?;
-    let bindings = contract.bindings();
-    if bindings.schemas.feature_schema_hash != *feature_schema_hash
-        || bindings.factors.plane.factor_schema_hash() != *factor_schema_hash
-    {
-        return Err(methodology(format!(
-            "model {} serving schema/factor plane differs from frozen policy Dataset",
-            model_version.model_version_id
-        )));
-    }
-    let mut groups = BTreeMap::<DateTime<Utc>, Vec<&TrainingExample>>::new();
-    for example in examples {
-        groups
-            .entry(example.decision_at())
-            .or_default()
-            .push(example);
-    }
-    let mut by_market = HashMap::<MarketId, Vec<TimedSignal>>::new();
-    for (decision_at, mut group) in groups {
-        group.sort_by(|left, right| left.market_id.cmp(&right.market_id));
-        let input = build_frozen_runtime_input(runtime, &ModelRunId::from_v7(), &group)?;
-        let output = runtime.infer_batch(input).await?;
-        let mut emitted = HashMap::<MarketId, SignalCandidate>::new();
-        for candidate in output.candidates {
-            if candidate.decision_at != decision_at {
+    let FrozenInferenceRequest {
+        compute,
+        memory_lease,
+        cancel,
+        runtime,
+        model_version,
+        feature_schema_hash,
+        factor_schema_hash,
+        examples,
+        fit_count,
+    } = request;
+    let prepare_cancel = cancel.clone();
+    let (examples, groups) = compute
+        .run_leased_cancellable(memory_lease, cancel, move || {
+            ensure_replay_active(&prepare_cancel, "before frozen inference grouping")?;
+            if fit_count == 0 || fit_count > examples.len() {
+                return Err(methodology(
+                    "frozen inference fit view is empty or exceeds its Dataset".to_owned(),
+                ));
+            }
+            let contract = model_version.verified_serving_contract().map_err(|error| {
+                methodology(format!("invalid persisted serving contract: {error}"))
+            })?;
+            let bindings = contract.bindings();
+            if bindings.schemas.feature_schema_hash != feature_schema_hash
+                || bindings.factors.plane.factor_schema_hash() != factor_schema_hash
+            {
                 return Err(methodology(format!(
-                    "model re-inference emitted decision {} for frozen cross-section {decision_at}",
-                    candidate.decision_at
+                    "model {} serving schema/factor plane differs from frozen policy Dataset",
+                    model_version.model_version_id
                 )));
             }
-            match emitted.entry(candidate.market_id.clone()) {
-                Entry::Vacant(entry) => {
-                    entry.insert(candidate);
-                }
-                Entry::Occupied(mut entry) => {
-                    if candidate.route_rank < entry.get().route_rank {
-                        entry.insert(candidate);
+            let mut grouped = BTreeMap::<DateTime<Utc>, Vec<usize>>::new();
+            for (index, example) in examples[..fit_count].iter().enumerate() {
+                grouped
+                    .entry(example.decision_at())
+                    .or_default()
+                    .push(index);
+            }
+            let groups = grouped
+                .into_iter()
+                .map(|(decision_at, mut indexes)| {
+                    indexes.sort_by(|left, right| {
+                        examples[*left].market_id.cmp(&examples[*right].market_id)
+                    });
+                    FrozenInferenceGroup {
+                        decision_at,
+                        indexes,
+                    }
+                })
+                .collect::<Vec<FrozenInferenceGroup>>();
+            ensure_replay_active(&prepare_cancel, "after frozen inference grouping")?;
+            Ok((examples, groups))
+        })
+        .await?;
+
+    let batch_handle = Handle::current();
+    let batch_cancel = cancel.clone();
+    compute
+        .run_leased_cancellable(memory_lease, cancel, move || {
+            let mut by_market = HashMap::<MarketId, Vec<TimedSignal>>::new();
+            for group in groups {
+                ensure_replay_active(&batch_cancel, "before frozen input materialization")?;
+                let rows = group
+                    .indexes
+                    .iter()
+                    .map(|index| &examples[*index])
+                    .collect::<Vec<_>>();
+                let input =
+                    build_frozen_runtime_input(runtime.as_ref(), &ModelRunId::from_v7(), &rows)?;
+                ensure_replay_active(&batch_cancel, "after frozen input materialization")?;
+                // Production model runtimes consume only the already-built,
+                // in-memory batch. Driving that future from this Rayon owner
+                // keeps its synchronous dense/predict/sort/calibration work
+                // under the same job, CPU, and memory leases.
+                let output = infer_frozen_batch(&batch_handle, runtime.as_ref(), input)?;
+                ensure_replay_active(&batch_cancel, "after frozen runtime inference")?;
+                let mut emitted = HashMap::<MarketId, SignalCandidate>::new();
+                for candidate in output.candidates {
+                    if candidate.decision_at != group.decision_at {
+                        return Err(methodology(format!(
+                            "model re-inference emitted decision {} for frozen cross-section {}",
+                            candidate.decision_at, group.decision_at
+                        )));
+                    }
+                    match emitted.entry(candidate.market_id.clone()) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(candidate);
+                        }
+                        Entry::Occupied(mut entry) => {
+                            if candidate.route_rank < entry.get().route_rank {
+                                entry.insert(candidate);
+                            }
+                        }
                     }
                 }
+                for index in group.indexes {
+                    let example = &examples[index];
+                    by_market
+                        .entry(example.market_id.clone())
+                        .or_default()
+                        .push(TimedSignal {
+                            decision_at: group.decision_at,
+                            candidate: emitted.get(&example.market_id).cloned(),
+                        });
+                }
+                ensure_replay_active(&batch_cancel, "after frozen output fold")?;
             }
-        }
-        for example in group {
-            by_market
-                .entry(example.market_id.clone())
-                .or_default()
-                .push(TimedSignal {
-                    decision_at,
-                    candidate: emitted.get(&example.market_id).cloned(),
-                });
-        }
-    }
-    for timeline in by_market.values_mut() {
-        timeline.sort_by_key(|item| item.decision_at);
-        if timeline
-            .windows(2)
-            .any(|pair| pair[0].decision_at == pair[1].decision_at)
-        {
-            return Err(methodology(
-                "policy Dataset contains duplicate market/decision rows".to_owned(),
-            ));
-        }
-    }
-    Ok(FrozenPolicySignals { by_market })
+            ensure_replay_active(&batch_cancel, "before frozen signal finalization")?;
+            for timeline in by_market.values_mut() {
+                timeline.sort_by_key(|item| item.decision_at);
+                if timeline
+                    .windows(2)
+                    .any(|pair| pair[0].decision_at == pair[1].decision_at)
+                {
+                    return Err(methodology(
+                        "policy Dataset contains duplicate market/decision rows".to_owned(),
+                    ));
+                }
+            }
+            ensure_replay_active(&batch_cancel, "after frozen signal finalization")?;
+            Ok(FrozenPolicySignals { by_market })
+        })
+        .await
+}
+
+fn infer_frozen_batch(
+    handle: &Handle,
+    runtime: &dyn QuantModelRuntime,
+    input: ModelRuntimeInput,
+) -> QuantResult<ModelRuntimeOutput> {
+    handle.block_on(runtime.infer_batch(input))
 }
 
 pub(super) struct WeatherReplayRequest<'a> {
     pub page: &'a ReplayPage,
-    pub examples: &'a [TrainingExample],
+    pub dataset: &'a [TrainingExample],
+    pub example_indexes: &'a [usize],
     pub signals: &'a FrozenPolicySignals,
     pub candidates: &'a [TradePolicyCandidateSpec],
     pub profile: &'a ResearchProfileArtifact,
@@ -216,7 +302,9 @@ pub(super) struct WeatherReplayRequest<'a> {
 /// Analysis-path latency.
 #[derive(Debug, Clone)]
 pub(super) struct WeatherExampleReplay {
-    pub example: TrainingExample,
+    pub example_id: TrainingExampleId,
+    pub market_id: MarketId,
+    pub decision_at: DateTime<Utc>,
     pub token_id: TokenId,
     pub weather_linkage_available: bool,
     pub model_reinference_available: bool,
@@ -410,8 +498,8 @@ impl WeatherPolicyEvidence {
         cohort_hash: ContentHash,
     ) {
         self.candidate_trials.push(TradePolicyCandidateTrialRow {
-            example_id: replay.example.example_id,
-            market_id: replay.example.market_id.clone(),
+            example_id: replay.example_id,
+            market_id: replay.market_id.clone(),
             token_id: replay.token_id.clone(),
             candidate_id: outcome.candidate_id.clone(),
             cohort_hash,
@@ -442,20 +530,20 @@ impl WeatherPolicyEvidence {
         });
         if let Some(gap) = outcome.gap {
             self.coverage_gaps.push(TradePolicyCoverageGapRow {
-                example_id: replay.example.example_id,
-                market_id: replay.example.market_id.clone(),
+                example_id: replay.example_id,
+                market_id: replay.market_id.clone(),
                 token_id: replay.token_id.clone(),
                 candidate_id: Some(outcome.candidate_id.clone()),
                 cohort_hash: Some(cohort_hash),
                 latency_multiplier: Some(outcome.latency.stress_multiplier),
-                decision_at: replay.example.decision_at(),
+                decision_at: replay.decision_at,
                 gap,
                 detail: format!("shared replay kernel terminal: {gap:?}"),
             });
         }
         self.fills.extend(outcome.fills.iter().map(|fill| {
             TradePolicyFillEvidenceRow {
-                example_id: replay.example.example_id,
+                example_id: replay.example_id,
                 cohort_hash,
                 candidate_id: outcome.candidate_id.clone(),
                 outcome_side: outcome.outcome_side,
@@ -766,8 +854,7 @@ fn evidence_horizon_end(
     horizon_secs: u64,
 ) -> QuantResult<DateTime<Utc>> {
     replay
-        .example
-        .decision_at()
+        .decision_at
         .checked_add_signed(Duration::seconds(i64::try_from(horizon_secs).map_err(
             |error| {
                 methodology(format!(
@@ -847,10 +934,10 @@ fn append_row_evidence(
         evidence
             .observation_eligibility
             .push(TradePolicyObservationEligibilityRow {
-                example_id: replay.example.example_id,
-                market_id: replay.example.market_id.clone(),
+                example_id: replay.example_id,
+                market_id: replay.market_id.clone(),
                 token_id: replay.token_id.clone(),
-                decision_at: replay.example.decision_at(),
+                decision_at: replay.decision_at,
                 label_horizon_end: horizon_end,
                 cohort_hash: *cohort_hash,
                 candidate_count: u32::try_from(candidate_ids.len()).map_err(|error| {
@@ -881,8 +968,7 @@ fn performance_observations(
         .iter()
         .map(|replay| {
             let label_horizon_end = replay
-                .example
-                .decision_at()
+                .decision_at
                 .checked_add_signed(Duration::seconds(i64::try_from(horizon_secs).map_err(
                     |error| methodology(format!("policy horizon does not fit chrono: {error}")),
                 )?))
@@ -890,10 +976,10 @@ fn performance_observations(
             Ok(PolicyPerformanceObservation {
                 observation_id: format!(
                     "{}:{}:{}",
-                    replay.example.example_id, cash_budget, latency_multiplier
+                    replay.example_id, cash_budget, latency_multiplier
                 ),
-                market_id: replay.example.market_id.clone(),
-                decision_at: replay.example.decision_at(),
+                market_id: replay.market_id.clone(),
+                decision_at: replay.decision_at,
                 label_horizon_end,
                 candidate_expected_return_bps: candidate_ids
                     .iter()
@@ -1382,14 +1468,21 @@ pub(super) fn replay_weather_page(
         .copied()
         .ok_or_else(|| methodology("Weather profile has no cash-budget tier".to_owned()))?;
     let base_delay_ms = shadow_action_delay_ms(request.latency_profile)?;
-    let mut replayed = Vec::with_capacity(request.examples.len());
-    for example in request.examples {
+    let mut replayed = Vec::with_capacity(request.example_indexes.len());
+    for index in request.example_indexes {
+        let example = request.dataset.get(*index).ok_or_else(|| {
+            methodology(format!(
+                "Weather replay example index {index} exceeds its frozen Dataset"
+            ))
+        })?;
         let initial_signal = request
             .signals
             .exact(&example.market_id, example.decision_at());
         let Some(initial_signal) = initial_signal else {
             replayed.push(WeatherExampleReplay {
-                example: example.clone(),
+                example_id: example.example_id,
+                market_id: example.market_id.clone(),
+                decision_at: example.decision_at(),
                 token_id: example.token_id.clone(),
                 weather_linkage_available: false,
                 model_reinference_available: false,
@@ -1481,7 +1574,9 @@ pub(super) fn replay_weather_page(
             }
         }
         replayed.push(WeatherExampleReplay {
-            example: example.clone(),
+            example_id: example.example_id,
+            market_id: example.market_id.clone(),
+            decision_at: example.decision_at(),
             token_id: initial_signal.token_id.clone(),
             weather_linkage_available: linkage.is_some(),
             model_reinference_available: true,
@@ -1648,7 +1743,7 @@ fn base_observations(
         .collect()
 }
 
-fn policy_book(snapshot: BookSnapshotAt) -> Option<PolicyReplayBook> {
+pub fn policy_book(snapshot: BookSnapshotAt) -> Option<PolicyReplayBook> {
     let source = snapshot.source_event?;
     Some(PolicyReplayBook {
         bids: snapshot.bids.iter().copied().collect(),
@@ -1753,7 +1848,7 @@ fn rebate_evidence_error(market_id: &MarketId, at: DateTime<Utc>, error: FeeErro
     .into()
 }
 
-fn passive_trades(
+pub fn passive_trades(
     page: &ReplayPage,
     token_id: &TokenId,
     after: DateTime<Utc>,
@@ -1844,7 +1939,7 @@ fn passive_trades(
     (trades, true)
 }
 
-fn resolution_at(
+pub fn resolution_at(
     page: &ReplayPage,
     market_id: &MarketId,
     token_id: &TokenId,
@@ -2253,7 +2348,8 @@ fn condition_inputs(
         })
         .unwrap_or_default();
     let factors = factor_inputs(
-        request.examples,
+        request.dataset,
+        request.example_indexes,
         &example.market_id,
         observation.at,
         request.profile.spec.decision_cadence_secs,
@@ -2281,14 +2377,16 @@ fn condition_inputs(
 }
 
 fn factor_inputs(
-    examples: &[TrainingExample],
+    dataset: &[TrainingExample],
+    example_indexes: &[usize],
     market_id: &MarketId,
     at: DateTime<Utc>,
     valid_for_secs: u64,
     binding: &EntryConditionBinding,
 ) -> QuantResult<Vec<FactorSnapshotInput>> {
-    let Some(example) = examples
+    let Some(example) = example_indexes
         .iter()
+        .filter_map(|index| dataset.get(*index))
         .filter(|example| example.market_id == *market_id && example.decision_at() <= at)
         .max_by_key(|example| example.decision_at())
     else {
@@ -2574,6 +2672,155 @@ fn deterministic_market_selection_id(hash: &ContentHash) -> MarketSelectionId {
     MarketSelectionId::new(Uuid::new_v5(&NAMESPACE, canonical.as_bytes()))
 }
 
+fn ensure_replay_active(cancel: &CancellationToken, stage: &str) -> QuantResult<()> {
+    if cancel.is_cancelled() {
+        return Err(ResearchError::Cancelled {
+            detail: format!("Weather policy replay cancelled {stage}"),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 fn methodology(detail: String) -> QuantError {
     ResearchError::ValidationMethodology { detail }.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        },
+        thread,
+        time::Duration as StdDuration,
+    };
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
+    use quant_pivot_error::{QuantResult, research::ResearchError};
+    use quant_pivot_models::{
+        enums::model::ModelFamily,
+        types::{ContentHash, ModelRunId, ModelVersionId, stable_name::FeatureName},
+    };
+    use quant_pivot_research::model::{
+        FactorInferenceTable, ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput,
+        QuantModelRuntime,
+    };
+    use tokio::{runtime::Handle, task, time::interval};
+    use tokio_util::sync::CancellationToken;
+
+    use super::infer_frozen_batch;
+
+    struct BlockingRuntime {
+        thread_name: Mutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl QuantModelRuntime for BlockingRuntime {
+        fn model_version_id(&self) -> ModelVersionId {
+            ModelVersionId::from_v7()
+        }
+
+        fn model_family(&self) -> ModelFamily {
+            ModelFamily::WeightedFactor
+        }
+
+        fn feature_schema_hash(&self) -> ContentHash {
+            ContentHash::from_bytes([7; 32])
+        }
+
+        fn required_features(&self) -> Vec<FeatureName> {
+            Vec::new()
+        }
+
+        async fn infer_batch(&self, _input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
+            let current = thread::current();
+            let name = current.name().unwrap_or("unnamed").to_owned();
+            *self
+                .thread_name
+                .lock()
+                .map_err(|error| ResearchError::Inference {
+                    detail: format!("thread-name witness lock poisoned: {error}"),
+                })? = Some(name);
+            thread::sleep(StdDuration::from_millis(120));
+            Ok(ModelRuntimeOutput {
+                calibration_scores: Vec::new(),
+                rank_scores: Vec::new(),
+                candidates: Vec::new(),
+                runtime_metrics: ModelRuntimeMetrics {
+                    markets_scored: 0,
+                    candidates_emitted: 0,
+                    inference_duration_ms: 120,
+                },
+                input_audit: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn native_inference_keeps_heartbeat() -> QuantResult<()> {
+        let compute = ComputeExecutor::new()?;
+        let cancel = CancellationToken::new();
+        let memory_lease = compute
+            .acquire_offline_memory_cancellable(OfflineMemory::try_gib(1)?, &cancel)
+            .await?;
+        let runtime = Arc::new(BlockingRuntime {
+            thread_name: Mutex::new(None),
+        });
+        let runtime_witness = Arc::clone(&runtime);
+        let heartbeat_count = Arc::new(AtomicUsize::new(0));
+        let heartbeat_witness = Arc::clone(&heartbeat_count);
+        let heartbeat_cancel = CancellationToken::new();
+        let heartbeat_stop = heartbeat_cancel.clone();
+        let heartbeat = tokio::spawn(async move {
+            let mut ticker = interval(StdDuration::from_millis(5));
+            loop {
+                tokio::select! {
+                    biased;
+                    () = heartbeat_stop.cancelled() => break,
+                    _ = ticker.tick() => {
+                        heartbeat_witness.fetch_add(1, AtomicOrdering::Relaxed);
+                    }
+                }
+            }
+        });
+        task::yield_now().await;
+
+        let handle = Handle::current();
+        let runtime_for_work: Arc<dyn QuantModelRuntime> = runtime;
+        compute
+            .run_leased_cancellable(&memory_lease, &cancel, move || {
+                infer_frozen_batch(
+                    &handle,
+                    runtime_for_work.as_ref(),
+                    ModelRuntimeInput::FactorTable(FactorInferenceTable {
+                        model_run_id: ModelRunId::from_v7(),
+                        decision_at: Utc::now(),
+                        rows: Vec::new(),
+                    }),
+                )
+            })
+            .await?;
+        heartbeat_cancel.cancel();
+        heartbeat.await.map_err(|error| ResearchError::Inference {
+            detail: format!("heartbeat task failed: {error}"),
+        })?;
+
+        assert!(heartbeat_count.load(AtomicOrdering::Relaxed) >= 4);
+        let thread_name = runtime_witness
+            .thread_name
+            .lock()
+            .map_err(|error| ResearchError::Inference {
+                detail: format!("thread-name witness lock poisoned: {error}"),
+            })?
+            .clone()
+            .ok_or_else(|| ResearchError::Inference {
+                detail: "runtime did not record its execution thread".to_owned(),
+            })?;
+        assert!(thread_name.starts_with("quant-offline-"));
+        Ok(())
+    }
 }

@@ -1,90 +1,86 @@
-# Docker integration tests
+# Disposable infrastructure system tests
 
-Tests that spin up real Postgres, Redis, or ClickHouse via [testcontainers](https://github.com/testcontainers/testcontainers-rs) are **ignored by default** so `cargo test --workspace` stays fast and does not require Docker.
+The current Docker-backed integration owner is `quant-pivot-system-tests`. Its suites share owned
+disposable PostgreSQL, Redis, and ClickHouse infrastructure through the repository test harness.
+There is no `cargo test-docker` alias and no `cargo xtask test-docker` command.
 
 ## Prerequisites
 
-- Docker **daemon** running (Docker Desktop, Colima, OrbStack, etc.). Installing the CLI alone is not enough.
-- Sufficient disk/RAM for container images on first run.
+- A running Docker daemon (Docker Desktop, Colima, OrbStack, or equivalent).
+- Enough disk/RAM to start the pinned PostgreSQL and ClickHouse images.
+- `cargo-nextest` when reproducing the exact CI partition.
 
-## Run all Docker integration tests
+## Canonical full system command
 
-From the repo root:
+From the repository root:
 
 ```bash
-cargo test-docker
+cargo nextest run -p quant-pivot-system-tests --profile system
 ```
 
-Tests run **serially** (`--test-threads=1`) to avoid port and resource contention between containers.
+This is the exact command owned by the `system` job in
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml). The profile and test harness own
+serialization, shared-stack lifetime, evidence capture, and failure cleanup; do not emulate them by
+running every workspace `#[ignore]` test.
 
-## Run a single suite
+## Targeted reproduction
+
+Use the concrete system-test binary or filter that failed, for example:
 
 ```bash
-cargo test -p quant-pivot-core --test market_selection_e2e -- --ignored --test-threads=1
+cargo test -p quant-pivot-system-tests --test infrastructure_contracts \
+  infrastructure_contracts_share_stack -- --nocapture
 ```
 
-## What each suite covers
+The disposable ClickHouse copies the exact
+`docker/clickhouse/config.d/quant-pivot-governance.xml` file mounted by the production Compose
+service. Startup verifies the bounded background pools and rejects high-churn system-log tables;
+tests must not launch a default 26.5 image that bypasses this contract.
 
-| Crate | Test binary | Services |
-|-------|-------------|----------|
-| `quant-pivot-storage` | `migration_pg` | Postgres (native `qp_*` enum lane) |
-| `quant-pivot-repository` | `pg_account_capital` | Postgres |
-| `quant-pivot-repository` | `pg_equity_snapshot` | Postgres |
-| `quant-pivot-repository` | `pg_market_selection` | Postgres |
-| `quant-pivot-repository` | `pg_governance` | Postgres |
-| `quant-pivot-repository` | `pg_rbac` | Postgres |
-| `quant-pivot-repository` | `pg_training_dataset` | Postgres |
-| `quant-pivot-repository` | `pg_research_job` | Postgres (research job ledger FSM) |
-| `quant-pivot-repository` | `pg_backtest_report` | Postgres |
-| `quant-pivot-repository` | `pg_comparison_report` | Postgres |
-| `quant-pivot-repository` | `pg_execution_submission` | Postgres |
-| `quant-pivot-repository` | `portfolio_optimizer_meta` | Postgres |
-| `quant-pivot-repository` | `ch_fact_read_pit` | ClickHouse |
-| `quant-pivot-storage` | `redis_integration` | Redis |
-| `quant-pivot-storage` | `clickhouse_integration` | ClickHouse |
-| `quant-pivot-storage` | `cache_tiered_integration` | Redis |
-| `quant-pivot-core` | `health_checker` | Postgres (WS probe wiring) |
-| `quant-pivot-core` | `market_selection_e2e` | Postgres (typed selection member enums) |
-| `quant-pivot-core` | `equity_snapshot` | Postgres |
-| `quant-pivot-core` | `factor_plane_e2e` | Postgres + ClickHouse (ignored cases) |
-| `quant-pivot-core` | `governance_e2e` | Postgres |
-| `quant-pivot-core` | `model_train_backtest_e2e` | Postgres + ClickHouse |
-| `quant-pivot-core` | `report_pipeline_e2e` | Postgres |
-| `quant-pivot-web` | `web` | Postgres + Redis (full HTTP/RBAC/WS E2E) |
-
-Implementation lives in `crates/quant-pivot-xtask` (`cargo xtask test-docker`).
-
-## Do not use workspace-wide `--ignored`
+The Phase 12 governed feedback rehearsal has a separate production-composed command:
 
 ```bash
-# Avoid — also runs live Polymarket / RPC tests in quant-pivot-api
+cargo xtask production-stack feedback-closure --runs 1 --retain-artifacts
+```
+
+That rehearsal must remain inside owned disposable infrastructure and loopback rejectors. Its
+manifest must prove unchanged runtime authority/money-path counts and zero venue, chain, capital,
+and relayer writes; it is not a live canary or Operational Activation.
+
+The system partition also owns two deliberately separate artifact-store contracts:
+
+- the pinned MinIO fixture proves versioned Object Lock writes and its provider-native global
+  stale-multipart sweep, including an uploaded part becoming `NoSuchUpload` under a shortened test
+  policy;
+- the AWS SDK protocol test proves the production S3 rule is exactly prefix-scoped
+  `AbortIncompleteMultipartUpload(days_after_initiation = 1)` on PUT and survives an independent GET
+  readback without expiration, transition, legacy-prefix, tag, or size-filter fields.
+
+MinIO does not persist the standard S3 abort action. Do not add a dummy object-expiration action to
+make its lifecycle PUT succeed: MinIO drops the abort member on readback and the extra action changes
+object-retention semantics.
+
+Target either contract without running the production rehearsal:
+
+```bash
+cargo test -p quant-pivot-system-tests --lib s3_lifecycle_roundtrips -- --nocapture
+cargo test -p quant-pivot-system-tests --lib minio_sweeps_stale_upload -- --nocapture
+```
+
+## Do not use workspace-wide ignored tests
+
+```bash
+# Avoid: mixes unrelated external-network/credential probes with system tests.
 cargo test --workspace -- --ignored
 ```
 
-Network and credential-dependent tests live under `quant-pivot-api` with different ignore reasons. See [network-integration.md](./network-integration.md).
-
-## CI
-
-The `integration-docker` job in `.github/workflows/ci.yml` runs `cargo test-docker` on every push and pull request to `main`.
+External read-only and explicitly credentialed probes have different authority and are documented
+in [network-integration.md](network-integration.md).
 
 ## Troubleshooting
 
-**`unauthorized: incorrect username or password` when pulling images**
-
-Docker Hub rate limits or stale credentials in Docker Desktop. Fix: `docker logout` then pull again, or log in with `docker login`. First run also needs network access to pull `postgres`, `redis`, and `clickhouse/clickhouse-server` images.
-
-**`Docker daemon is not running`**
-
-Start Docker Desktop / Colima / OrbStack before running `cargo test-docker`. On macOS with OrbStack, `orbctl start` if `orbctl status` shows `Stopped`.
-
-**`quant-pivot-web` auth tests: login 200 but refresh/logout 503**
-
-Usually Redis testcontainer cold-start or pool pressure under parallel runs. The web harness connects the shared Redis pool (`connect_pool`) and waits for a successful blacklist `health_check` before serving requests. Prefer `cargo test-docker` (serial) over parallel `cargo test -p quant-pivot-web --test web -- --ignored` without `--test-threads=1`.
-
-## Test tiers (summary)
-
-| Tier | Command | Requires |
-|------|---------|----------|
-| Unit (default) | `cargo test --workspace` | nothing |
-| Docker | `cargo test-docker` | Docker daemon |
-| Network / live | `cargo test -p quant-pivot-api -- --ignored --test-threads=1` | outbound network + secrets |
+- Verify Docker first with `docker info`.
+- Preserve the first failing system-test log and `target/production-stack/*/backend.log` when present.
+- Retry a named failing scenario only after recording the original root cause; a retry does not erase
+  failed evidence.
+- Docker image pull/authentication failures are infrastructure failures, not passing test evidence.

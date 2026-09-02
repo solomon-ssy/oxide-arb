@@ -20,12 +20,13 @@ use quant_pivot_models::{
             book::BookSnapshot,
             registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
         },
+        order::PolymarketOrderRules,
     },
     enums::catalog::CatalogTimestampQuality,
     hashing::CanonicalDigest,
     types::{
         Bps, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId,
-        ClobMarketInfoVersionId, EventId, MarketId, TokenId,
+        ClobMarketInfoVersionId, EventId, MarketId, Shares, TokenId,
     },
 };
 use quant_pivot_research::pit::{
@@ -42,6 +43,7 @@ pub struct InMemoryDecisionSnapshotSource {
     events: HashMap<EventId, Arc<EventRegistryInfo>>,
     leg_sets: HashMap<EventId, NegRiskLegSet>,
     fee_schedules: HashMap<MarketId, MarketFeeSchedule>,
+    order_rules: HashMap<MarketId, PolymarketOrderRules>,
 }
 
 impl InMemoryDecisionSnapshotSource {
@@ -76,6 +78,7 @@ impl InMemoryDecisionSnapshotSource {
         let mut events = HashMap::new();
         let mut leg_sets = HashMap::new();
         let mut fee_schedules = HashMap::new();
+        let mut order_rules = HashMap::new();
         for market_id in registry.active_markets().iter() {
             let Some(market) = registry.get_market(market_id) else {
                 continue;
@@ -113,6 +116,11 @@ impl InMemoryDecisionSnapshotSource {
                     },
                 );
             }
+            order_rules.insert(
+                market.market_id.clone(),
+                PolymarketOrderRules::new(market.tick_size, Shares::new(market.min_order_size))
+                    .expect("explicit test venue order rules"),
+            );
             markets.insert(market.market_id.clone(), market);
         }
         Self {
@@ -121,6 +129,7 @@ impl InMemoryDecisionSnapshotSource {
             events,
             leg_sets,
             fee_schedules,
+            order_rules,
         }
     }
 
@@ -153,6 +162,11 @@ impl InMemoryDecisionSnapshotSource {
             assert!(
                 self.fee_schedules.contains_key(&market.market_id),
                 "PIT fixture market {} is missing its zero-fee schedule",
+                market.market_id
+            );
+            assert!(
+                self.order_rules.contains_key(&market.market_id),
+                "PIT fixture market {} is missing explicit order rules",
                 market.market_id
             );
             for token_id in [&market.token_yes, &market.token_no] {
@@ -258,6 +272,7 @@ impl PointInTimeSnapshotSource for InMemoryDecisionSnapshotSource {
             end_date: market.end_date,
             created_at: market.created_at,
             fee_schedule: self.fee_schedules.get(market_id).cloned(),
+            order_rules: self.order_rules.get(market_id).copied(),
             maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         };
         Ok(Some(ResolvedMarketSnapshot {

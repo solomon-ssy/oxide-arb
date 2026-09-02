@@ -564,7 +564,7 @@ fn validate_request(request: &PolicyPerformanceRequest<'_>) -> QuantResult<()> {
     Ok(())
 }
 
-fn interval_uniqueness_weights(
+pub(crate) fn interval_uniqueness_weights(
     observations: &[PolicyPerformanceObservation],
 ) -> QuantResult<Vec<Decimal>> {
     let mut weights = vec![Decimal::ZERO; observations.len()];

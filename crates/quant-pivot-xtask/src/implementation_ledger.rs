@@ -157,6 +157,18 @@ fn validate_sources(design: &str, ledger: &str) -> Vec<String> {
             active.join(", ")
         )),
     }
+    if checkpoint_task == "none" {
+        let unfinished = tasks
+            .iter()
+            .filter_map(|(id, task)| (task.status != "DONE").then_some(id.as_str()))
+            .collect::<Vec<_>>();
+        if !unfinished.is_empty() {
+            violations.push(format!(
+                "current_task_id `none` requires every task to be DONE; unfinished=[{}]",
+                unfinished.join(", ")
+            ));
+        }
+    }
 
     let passed = evidence
         .lines()
@@ -436,6 +448,29 @@ mod tests {
             violations
                 .iter()
                 .any(|item| item.contains("W1-01") && item.contains("dependency"))
+        );
+    }
+
+    #[test]
+    fn rejects_false_terminal_checkpoint() {
+        let design = "design";
+        let ledger = fixture(
+            design,
+            r"
+| ID | Status | Dependencies | Task | Evidence |
+|---|---|---|---|---|
+| W0-01 | DONE | 无 | docs | test |
+| W0-02 | TODO | W0-01 | code | test |
+",
+            "| now | W0-01 | PASS | ok |",
+        )
+        .replace("`current_task_id`: `W0-02`", "`current_task_id`: `none`");
+        let violations = validate_sources(design, &ledger);
+
+        assert!(
+            violations
+                .iter()
+                .any(|item| item.contains("requires every task to be DONE"))
         );
     }
 }

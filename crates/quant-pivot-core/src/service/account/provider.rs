@@ -18,6 +18,15 @@ use crate::ingest::market_registry::MarketRegistry;
 pub trait AccountProvider: Send + Sync {
     /// Snapshot the real venue account at `as_of`, or fail closed.
     async fn snapshot(&self, as_of: DateTime<Utc>) -> QuantResult<AccountSnapshot>;
+
+    /// Assemble the same real-account snapshot from collateral already decoded
+    /// by an atomic funding read. Positions and reservations remain freshly read;
+    /// collateral is not fetched a second time.
+    async fn snapshot_with_collateral(
+        &self,
+        as_of: DateTime<Utc>,
+        collateral: Usd,
+    ) -> QuantResult<AccountSnapshot>;
 }
 
 /// Credential-gated factory for the venue account provider.

@@ -432,6 +432,51 @@ pub fn replay_policy_candidate(
     latency: PolicyReplayLatency,
     observations: &[PolicyReplayObservation],
 ) -> QuantResult<PolicyReplayOutcome> {
+    replay_candidate(
+        candidate,
+        token_side,
+        cash_budget,
+        tick_size,
+        latency,
+        observations,
+        None,
+    )
+}
+
+/// Replay one recommendation and force any residual position through the
+/// canonical full-depth exit path at the frozen economic horizon.
+pub fn replay_policy_horizon(
+    candidate: &TradePolicyCandidateSpec,
+    token_side: OutcomeSide,
+    cash_budget: Usd,
+    tick_size: TickSize,
+    latency: PolicyReplayLatency,
+    observations: &[PolicyReplayObservation],
+    horizon_at: DateTime<Utc>,
+) -> QuantResult<PolicyReplayOutcome> {
+    replay_candidate(
+        candidate,
+        token_side,
+        cash_budget,
+        tick_size,
+        latency,
+        observations,
+        Some(horizon_at),
+    )
+}
+
+fn replay_candidate(
+    candidate: &TradePolicyCandidateSpec,
+    token_side: OutcomeSide,
+    cash_budget: Usd,
+    tick_size: TickSize,
+    latency: PolicyReplayLatency,
+    observations: &[PolicyReplayObservation],
+    horizon_at: Option<DateTime<Utc>>,
+) -> QuantResult<PolicyReplayOutcome> {
+    let observations = horizon_at.map_or(observations, |horizon| {
+        &observations[..observations.partition_point(|observation| observation.at <= horizon)]
+    });
     validate_observations(observations)?;
     if observations.is_empty() {
         return Ok(PolicyReplayOutcome::gap(
@@ -456,7 +501,7 @@ pub fn replay_policy_candidate(
         }
     };
     match entry {
-        EntryAttempt::Filled(entry) => replay_open_position(
+        EntryAttempt::Filled(entry) => OpenPositionReplayInput {
             candidate,
             token_side,
             cash_budget,
@@ -464,7 +509,9 @@ pub fn replay_policy_candidate(
             delay,
             observations,
             entry,
-        ),
+            horizon_at,
+        }
+        .replay(),
         EntryAttempt::PassiveNoFill {
             triggered_at,
             expired_at,
@@ -913,45 +960,78 @@ fn passive_price(
     Ok((price, queue_ahead))
 }
 
-fn replay_open_position(
-    candidate: &TradePolicyCandidateSpec,
+struct OpenPositionReplayInput<'a> {
+    candidate: &'a TradePolicyCandidateSpec,
     token_side: OutcomeSide,
     cash_budget: Usd,
     latency: PolicyReplayLatency,
     delay: Duration,
-    observations: &[PolicyReplayObservation],
+    observations: &'a [PolicyReplayObservation],
     entry: EntryResult,
-) -> QuantResult<PolicyReplayOutcome> {
-    let initial_signal = observations
-        .iter()
-        .find(|observation| observation.at >= entry.entered_at)
-        .and_then(|observation| observation.signal.as_ref())
-        .cloned();
-    let mut state = open_position_state(entry, initial_signal)?;
-    let entered_at = state.entered_at;
-    for observation in observations
-        .iter()
-        .filter(|observation| observation.at >= entered_at)
-    {
-        if advance_open_position(
+    horizon_at: Option<DateTime<Utc>>,
+}
+
+impl OpenPositionReplayInput<'_> {
+    fn replay(self) -> QuantResult<PolicyReplayOutcome> {
+        let Self {
             candidate,
             token_side,
+            cash_budget,
+            latency,
             delay,
             observations,
-            observation,
-            &mut state,
-        )? {
-            break;
+            entry,
+            horizon_at,
+        } = self;
+        let initial_signal = observations
+            .iter()
+            .find(|observation| observation.at >= entry.entered_at)
+            .and_then(|observation| observation.signal.as_ref())
+            .cloned();
+        let mut state = open_position_state(entry, initial_signal)?;
+        let entered_at = state.entered_at;
+        for observation in observations
+            .iter()
+            .filter(|observation| observation.at >= entered_at)
+        {
+            if advance_open_position(
+                candidate,
+                token_side,
+                delay,
+                observations,
+                observation,
+                &mut state,
+            )? {
+                break;
+            }
         }
+        if let Some(horizon_at) = horizon_at
+            && state.remaining > Shares::ZERO
+            && state.gap.is_none()
+        {
+            let visible_end =
+                observations.partition_point(|observation| observation.at <= horizon_at);
+            let visible = &observations[..visible_end];
+            let execution = execute_exit(
+                candidate,
+                ExitReason::TimeExit,
+                state.remaining,
+                horizon_at,
+                Duration::zero(),
+                visible,
+                next_ordinal(&state.fills)?,
+            )?;
+            apply_exit_execution(&mut state, ExitReason::TimeExit, execution);
+        }
+        Ok(finalize_open_position(
+            candidate,
+            token_side,
+            cash_budget,
+            latency,
+            observations,
+            state,
+        ))
     }
-    Ok(finalize_open_position(
-        candidate,
-        token_side,
-        cash_budget,
-        latency,
-        observations,
-        state,
-    ))
 }
 
 fn open_position_state(
@@ -1006,7 +1086,7 @@ fn advance_open_position(
     state: &mut OpenPositionState,
 ) -> QuantResult<bool> {
     if let Some(resolution) = &observation.resolution {
-        settle_resolution(state, resolution)?;
+        settle_resolution(state, resolution, observation.at)?;
         return Ok(true);
     }
     if !observation.decision_tick {
@@ -1163,9 +1243,18 @@ fn apply_exit_execution(
 fn settle_resolution(
     state: &mut OpenPositionState,
     resolution: &PolicyReplayResolution,
+    applied_at: DateTime<Utc>,
 ) -> QuantResult<()> {
     if state.remaining == Shares::ZERO {
         return Ok(());
+    }
+    if applied_at <= state.entered_at
+        || resolution.resolved_at > applied_at
+        || resolution.observed_at > applied_at
+    {
+        return Err(methodology(
+            "resolution application must follow entry and contain only visible evidence".to_owned(),
+        ));
     }
     let payout = state.remaining.inner() * resolution.token_payout_ratio.inner();
     let reason = ExitReason::ResolutionRedeem;
@@ -1173,8 +1262,10 @@ fn settle_resolution(
         leg_ordinal: next_ordinal(&state.fills)?,
         side: Side::Sell,
         exit_reason: Some(reason),
-        triggered_at: resolution.resolved_at,
-        filled_at: resolution.observed_at,
+        // Source event timestamps remain on the canonical resolution fact.
+        // Cash becomes available only when this replay actually consumes it.
+        triggered_at: applied_at,
+        filled_at: applied_at,
         liquidity_role: LiquidityRole::Maker,
         outcome: BookWalkOutcome::Filled,
         requested_shares: Some(state.remaining),
@@ -1194,7 +1285,7 @@ fn settle_resolution(
     state.exited += state.remaining;
     state.remaining = Shares::ZERO;
     state.terminal_reason = Some(reason);
-    state.terminal_at = Some(resolution.observed_at);
+    state.terminal_at = Some(applied_at);
     Ok(())
 }
 
@@ -1538,7 +1629,10 @@ fn methodology(detail: String) -> QuantError {
 mod tests {
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
+        domain::{
+            data_plane::{DecisionClock, DecisionSource},
+            market::{book::BookLevel, fee::BuilderFeeAttribution},
+        },
         enums::{
             common::{Side, TickSize},
             execution::ExitReason,
@@ -1559,7 +1653,7 @@ mod tests {
     use super::{
         POLICY_REPLAY_KERNEL_VERSION, PolicyReplayBook, PolicyReplayLatency,
         PolicyReplayObservation, PolicyReplayResolution, PolicyReplaySignal, PolicyReplayTrade,
-        replay_policy_candidate,
+        replay_policy_candidate, replay_policy_horizon,
     };
     use crate::execution_semantics::{
         BookWalkOutcome, PitFeeSchedule, PitMakerRebateEvidence, PitMakerRebateSchedule,
@@ -1723,6 +1817,35 @@ mod tests {
     }
 
     #[test]
+    fn horizon_uses_bid_ladder() {
+        let observations = vec![
+            observation(0, dec!(0.49), dec!(0.50)),
+            observation(60, dec!(0.51), dec!(0.52)),
+        ];
+        let outcome = replay_policy_horizon(
+            &candidate(FillRequirement::AllowPartial),
+            OutcomeSide::Yes,
+            Usd::new(dec!(25)),
+            TickSize::Hundredth,
+            PolicyReplayLatency {
+                base_delay_ms: 0,
+                stress_multiplier: Decimal::ONE,
+            },
+            &observations,
+            at(60),
+        )
+        .expect("horizon replay");
+
+        assert_eq!(outcome.gap, None);
+        assert_eq!(outcome.terminal_at, Some(at(60)));
+        assert_eq!(outcome.terminal_reason, Some(ExitReason::TimeExit));
+        assert_eq!(
+            outcome.full_l2_coverage,
+            TradePolicyEvidenceCoverage::Covered,
+        );
+    }
+
+    #[test]
     fn two_x_uses_returns() {
         let observations = vec![
             observation(0, dec!(0.49), dec!(0.50)),
@@ -1804,6 +1927,100 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn pit_visibility_requires_freshness() {
+        let decision_at = at(0);
+        let action_at = decision_at + Duration::milliseconds(110);
+        let decision_boundary = DecisionClock::new(2)
+            .boundary(decision_at)
+            .expect("decision boundary");
+        let action_boundary = DecisionClock::new(2)
+            .boundary(action_at)
+            .expect("action boundary");
+        let initial_book_at = decision_boundary.cutoff_for(DecisionSource::Book);
+        let fresh_book_at = action_boundary.cutoff_for(DecisionSource::Book);
+        let mut policy = candidate(FillRequirement::AllowPartial);
+        policy.entry_execution = EntryOrderTemplate::Aggressive {
+            fill_requirement: FillRequirement::AllowPartial,
+            max_slippage_bps: Bps::new(dec!(100)),
+            max_book_age_ms: 2_000,
+        };
+        for (case, event_at, expected_gap) in [
+            (
+                "decision book after latency",
+                initial_book_at,
+                Some(TradePolicyReplayGap::EntryBookStale),
+            ),
+            ("exact action freshness", fresh_book_at, None),
+            (
+                "one millisecond stale",
+                fresh_book_at - Duration::milliseconds(1),
+                Some(TradePolicyReplayGap::EntryBookStale),
+            ),
+        ] {
+            let mut trigger = observation(0, dec!(0.49), dec!(0.50));
+            let trigger_book = trigger.book.as_mut().expect("trigger book");
+            trigger_book.observed_at = initial_book_at;
+            trigger_book.available_at = initial_book_at;
+            trigger.fee_schedule = Some(schedule(initial_book_at));
+            let mut action = observation(0, dec!(0.49), dec!(0.50));
+            action.at = action_at;
+            action.decision_tick = false;
+            let action_book = action.book.as_mut().expect("action book");
+            action_book.observed_at = event_at;
+            action_book.available_at = event_at;
+            action_book.token_sequence = 2;
+            action.fee_schedule = Some(schedule(initial_book_at));
+            // Every action book is PIT-valid under the actual two-second lag.
+            // Execution freshness is a separate age check at D + 110 ms.
+            assert!(
+                event_at <= action_boundary.cutoff_for(DecisionSource::Book),
+                "{case}"
+            );
+            assert!(event_at <= action_boundary.knowledge_cutoff(), "{case}");
+            let mut terminal = observation(60, dec!(0.49), dec!(0.50));
+            let terminal_book = terminal.book.as_mut().expect("terminal book");
+            terminal_book.observed_at = at(58);
+            terminal_book.available_at = at(58);
+            terminal.fee_schedule = Some(schedule(at(58)));
+            let outcome = replay_policy_horizon(
+                &policy,
+                OutcomeSide::Yes,
+                Usd::new(dec!(25)),
+                TickSize::Hundredth,
+                PolicyReplayLatency {
+                    base_delay_ms: 110,
+                    stress_multiplier: Decimal::ONE,
+                },
+                &[trigger, action, terminal],
+                at(60),
+            )
+            .expect("complete fee/depth replay");
+            assert_eq!(outcome.gap, expected_gap, "{case}");
+            if expected_gap.is_none() {
+                assert_eq!(outcome.entered_at, Some(action_at), "{case}");
+                assert_eq!(outcome.entry_fill_latency_ms, Some(110), "{case}");
+                assert_eq!(outcome.entry_fill_ratio, Decimal::ONE, "{case}");
+                assert_eq!(outcome.exit_fill_ratio, Decimal::ONE, "{case}");
+                assert_eq!(
+                    outcome.terminal_reason,
+                    Some(ExitReason::TimeExit),
+                    "{case}"
+                );
+                assert_eq!(
+                    outcome.full_l2_coverage,
+                    TradePolicyEvidenceCoverage::Covered,
+                    "{case}"
+                );
+                assert!(outcome.fee_covered, "{case}");
+                assert!(outcome.execution_fee_usd.is_positive(), "{case}");
+            } else {
+                assert_eq!(outcome.entered_at, None, "{case}");
+                assert!(outcome.fills.is_empty(), "{case}");
+            }
+        }
     }
 
     #[test]
@@ -2243,6 +2460,100 @@ mod tests {
             outcome.fills.last().and_then(|fill| fill.vwap),
             Some(Price::new(dec!(0.5)))
         );
+    }
+
+    #[test]
+    fn resolution_uses_application_time() {
+        let mut held = candidate(FillRequirement::AllowPartial);
+        held.exit.settlement_mode = ExitSettlementMode::HoldToResolution;
+        held.exit.scale_out_targets.clear();
+        let mut economics = Vec::new();
+        for (observed_at, delay_ms, entered_at) in [(3, 5_000, 5), (12, 5_000, 5), (12, 0, 0)] {
+            let mut action = observation(5, dec!(0.49), dec!(0.50));
+            action.decision_tick = false;
+            let mut terminal = observation(12, dec!(0.49), dec!(0.50));
+            terminal.decision_tick = false;
+            terminal.book = None;
+            terminal.fee_schedule = None;
+            terminal.signal = None;
+            terminal.resolution = Some(PolicyReplayResolution {
+                token_payout_ratio: PayoutRatio::try_new(dec!(0.5)).expect("half payout"),
+                resolved_at: at(2),
+                observed_at: at(observed_at),
+            });
+            let observations = [observation(0, dec!(0.49), dec!(0.50)), action, terminal];
+            let outcome = replay_policy_candidate(
+                &held,
+                OutcomeSide::Yes,
+                Usd::new(dec!(25)),
+                TickSize::Hundredth,
+                PolicyReplayLatency {
+                    base_delay_ms: delay_ms,
+                    stress_multiplier: Decimal::ONE,
+                },
+                &observations,
+            )
+            .expect("PIT resolution application replay");
+            assert_eq!(outcome.gap, None);
+            assert_eq!(outcome.entered_at, Some(at(entered_at)));
+            assert_eq!(outcome.terminal_at, Some(at(12)));
+            assert_eq!(outcome.terminal_reason, Some(ExitReason::ResolutionRedeem));
+            assert_eq!(outcome.entry_filled_shares, outcome.exited_shares);
+            let payout = outcome.fills.last().expect("resolution payout fill");
+            assert_eq!(payout.triggered_at, at(12));
+            assert_eq!(payout.filled_at, at(12));
+            assert!(payout.filled_at > outcome.entered_at.expect("executed entry"));
+            assert_eq!(
+                payout.gross_amount,
+                Usd::new(outcome.entry_filled_shares.inner() * dec!(0.5))
+            );
+            assert_eq!(payout.execution_fee_usd, Usd::ZERO);
+            assert_eq!(payout.expected_maker_rebate_accrual_usd, Usd::ZERO);
+            assert_eq!(
+                outcome.execution_fee_usd,
+                outcome.fills[0].execution_fee_usd
+            );
+            assert_eq!(
+                observations[2]
+                    .resolution
+                    .as_ref()
+                    .expect("source resolution")
+                    .observed_at,
+                at(observed_at)
+            );
+            economics.push((
+                outcome.entry_filled_shares,
+                payout.gross_amount,
+                outcome.execution_fee_usd,
+                outcome.expected_net_return_bps,
+            ));
+        }
+        assert!(economics.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn resolution_rejects_future_source() {
+        for (resolved_at, observed_at) in [(13, 13), (2, 13)] {
+            let mut terminal = observation(12, dec!(0.49), dec!(0.50));
+            terminal.resolution = Some(PolicyReplayResolution {
+                token_payout_ratio: PayoutRatio::ONE,
+                resolved_at: at(resolved_at),
+                observed_at: at(observed_at),
+            });
+            let error = replay_policy_candidate(
+                &candidate(FillRequirement::AllowPartial),
+                OutcomeSide::Yes,
+                Usd::new(dec!(25)),
+                TickSize::Hundredth,
+                PolicyReplayLatency {
+                    base_delay_ms: 0,
+                    stress_multiplier: Decimal::ONE,
+                },
+                &[observation(0, dec!(0.49), dec!(0.50)), terminal],
+            )
+            .expect_err("future resolution source must remain forbidden");
+            assert!(error.to_string().contains("future evidence"));
+        }
     }
 
     #[test]

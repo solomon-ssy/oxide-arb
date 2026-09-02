@@ -14,7 +14,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::data_plane::{DecisionBoundary, DecisionSource},
     enums::{
@@ -41,8 +41,7 @@ use quant_pivot_research::{
 };
 
 use crate::prefetch::historical_window::{
-    Prefetched, ReplaySample, feature_window, finalized_execution_window, replay_boundary,
-    selected_market,
+    Prefetched, ReplaySample, feature_window, finalized_execution_window, selected_market,
 };
 
 /// Provenance used to decide whether PIT finalized-execution facts were complete enough
@@ -80,22 +79,20 @@ pub struct ReplayConfig {
 
 /// Per-call inputs for materializing one cross-section from a prefetched window.
 pub struct CrossSectionRequest<'a> {
-    /// Point-in-time engine resolving books/markets visible at `decision_at`.
+    /// Point-in-time engine resolving books/markets visible at the frozen boundary.
     pub pit: &'a dyn PointInTimeSnapshotSource,
     /// Prefetched facts backing the trailing feature windows.
     pub prefetched: &'a Prefetched,
     /// Explicit finalized-execution provenance; never inferred from row presence.
     pub finalized_execution_evidence: ReplayExecutionSource<'a>,
-    /// Frozen decision time for the replayed cross-section.
-    pub decision_at: DateTime<Utc>,
+    /// Complete frozen decision and source cutoffs; never reconstructed downstream.
+    pub boundary: &'a DecisionBoundary,
     /// `(market, token)` samples in this decision-time group.
     pub group: &'a [ReplaySample],
     /// Exact frozen model-input contract used by online feature materialization.
     pub required_features: &'a [FeatureName],
     /// Exact `ResearchProfile` category. `None` is the explicit pooled plane.
     pub category_scope: Option<MarketCategory>,
-    /// Source visibility delay applied to features.
-    pub knowledge_lag: Duration,
 }
 
 /// One PIT-resolved cross-section: aligned feature vectors, selection snapshots,
@@ -179,18 +176,8 @@ pub async fn materialize_cross_section(
     config: &ReplayConfig,
     request: &CrossSectionRequest<'_>,
 ) -> QuantResult<Option<ReplayCrossSection>> {
-    let decision_at = request.decision_at;
-    if request.knowledge_lag.subsec_nanos() != 0 {
-        return Err(QuantError::config(
-            "historical knowledge lag must be expressed in whole seconds",
-        ));
-    }
-    let boundary = replay_boundary(
-        decision_at,
-        request.knowledge_lag.as_secs(),
-        config.domain.crypto.availability_lag_secs,
-        config.domain.weather.availability_lag_secs,
-    )?;
+    request.boundary.validate()?;
+    let boundary = request.boundary.clone();
     let ReplayInputs {
         selected,
         outcome_bindings,

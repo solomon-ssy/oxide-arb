@@ -7,7 +7,7 @@
 //! re-inference (see [`CompositeExitSignalEvaluator`](crate::execution::CompositeExitSignalEvaluator)),
 //! so it only ever runs when the thesis is checkable and holding.
 //!
-//! Fail-safe throughout: a disabled config, a non-auto-execution intent, an
+//! Fail-safe throughout: a disabled config, an intent without active-policy authorization, an
 //! unavailable scorer, a low-confidence / low-alpha score, or `shadow_mode` all
 //! resolve to [`ExitSignalVerdict::Holds`] (never a forced or accidental exit).
 //! Every evaluation — including shadow — is mirrored to the
@@ -54,7 +54,7 @@ use crate::{
             fresh_exit_outcome, liquidity_score_cap, runtime_decision_boundary,
             selected_market_for_lot,
         },
-        model_serving_preimage::ModelServingPreimageService,
+        model_serving_preimage::{ModelPreimageReadContext, ModelServingPreimageService},
     },
 };
 
@@ -141,7 +141,10 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
             return Ok(None);
         }
 
-        let runtime = match self.deps.serving_preimages.load(&version).await {
+        let context = ModelPreimageReadContext::default();
+        let source = self.deps.serving_preimages.load(&version, &context).await;
+        drop(context);
+        let runtime = match source {
             Ok(source) => match source.sell_runtime() {
                 Ok(runtime) => runtime,
                 Err(error) => {
@@ -335,7 +338,8 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
         // Opportunistic exits are auto-submitted advisory scale-outs; a human
         // owns the exit for operator-authorized intents.
         if ctx.intent.authorization_kind != Some(AuthorizationKind::ActivePolicy) {
-            self.metrics.inc_opportunistic_sell_eval("skipped_non_auto");
+            self.metrics
+                .inc_opportunistic_sell_eval("skipped_non_active_policy");
             return ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds);
         }
 

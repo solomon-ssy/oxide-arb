@@ -5,7 +5,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    clickhouse::{ChDecimal64, ChPrice, ChProbability, ChShares, ChUsd},
+    clickhouse::{ChBps, ChDecimal64, ChPrice, ChProbability, ChShares, ChUsd},
     enums::clickhouse::{
         ChCapitalAllocationState, ChExecutionSide, ChExitSignalEvaluatorKind, ChExitSignalVerdict,
         ChFactorDirection, ChFactorValueState, ChFeatureCellState, ChFeatureSourceKind,
@@ -184,16 +184,19 @@ pub struct QuantSignalCandidateEventRow {
     pub event_time: i64,
     pub signal_candidate_id: SignalCandidateId,
     pub model_run_id: ModelRunId,
+    pub model_version_id: ModelVersionId,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: ChOutcomeSide,
     pub score: ChProbability,
     pub confidence: ChProbability,
+    pub expected_return_bps: ChBps,
     pub entry_price: ChPrice,
     pub target_price: ChPrice,
     pub stop_price: ChPrice,
     pub route_rank: u32,
     pub rejection_reason: String,
+    pub ingestion_time: i64,
 }
 
 /// Immutable report-scoped recommendation decision fact.

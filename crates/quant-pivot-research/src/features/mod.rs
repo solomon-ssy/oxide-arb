@@ -27,11 +27,12 @@ use async_trait::async_trait;
 pub use availability::FeatureAvailabilityOracle;
 pub use builder::{
     ConfiguredFeatureBuilder, FeatureComputeCtx, FeatureGroupBuilder, FeatureSourceWindows,
-    RawFeature, ResolvedInputs,
+    RawFeature, ResolvedInputs, ResolvedLeg,
 };
 pub use decision_capture::{
-    MarketDecisionCapture, MarketDecisionCaptureInput, RejectedMarketDraft, ResolvedMarketBundle,
-    capture_market_decision, draft_data_quality_snapshot,
+    MarketDecisionCapture, MarketDecisionCaptureInput, RejectedMarketDraft,
+    ResolvedDataQualityInput, ResolvedMarketBundle, capture_market_decision,
+    draft_data_quality_snapshot,
 };
 pub use domain::{
     CryptoDomainFeatureBuilder, DomainComputeCtx, DomainFeatureBuilder, DomainSliceData,

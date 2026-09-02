@@ -1,22 +1,18 @@
 //! Crypto source-native live ingestion and gap recovery.
 
+#[cfg(feature = "domain-chainlink")]
+use std::{cmp::Ordering, future::Future, slice};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, VecDeque},
     sync::Arc,
     time::Duration as StdDuration,
 };
-#[cfg(feature = "domain-chainlink")]
-use std::{future::Future, slice};
 
-#[cfg(feature = "domain-chainlink")]
-use chrono::DateTime;
 use chrono::{NaiveDate, Utc};
 use quant_pivot_api::binance::BinanceAggTradeSource;
 #[cfg(feature = "domain-chainlink")]
 pub(crate) use quant_pivot_api::chainlink::ChainlinkDataStreamsSource;
-use quant_pivot_error::{QuantError, QuantResult};
-#[cfg(feature = "domain-chainlink")]
-use quant_pivot_models::types::ContentHash;
+use quant_pivot_error::{QuantError, QuantResult, infra::InfraError};
 use quant_pivot_models::{
     clickhouse::CryptoPriceReportRow,
     domain::{
@@ -27,16 +23,20 @@ use quant_pivot_models::{
     types::{BinanceSymbol, ChainlinkFeedKey, DomainInstrumentKey, DomainSourceId},
 };
 use quant_pivot_repository::traits::{
-    DomainProjectionRepository, DomainSourceCursorRepository, FactWriter, MarketLinkageRepository,
+    DomainProjectionRepository, DomainSourceCursorRepository, MarketLinkageRepository,
 };
 use quant_pivot_research::linkage::rules;
+use quant_pivot_storage::write::{DurableWriteTimeouts, DurableWriter};
 use tokio::{
-    task::JoinHandle,
+    task::{JoinError, JoinSet},
     time::{Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::app::domain_source_supervisor::DomainSourceSupervisor;
+use crate::app::{
+    crypto_fact_persistence::{CryptoFactPersistence, PendingCryptoFact},
+    domain_source_supervisor::DomainSourceSupervisor,
+};
 
 const DISCOVERY_INTERVAL: StdDuration = StdDuration::from_secs(30);
 const RECONNECT_BACKOFF: StdDuration = StdDuration::from_secs(2);
@@ -49,17 +49,12 @@ struct CryptoBindings {
     chainlink: BTreeMap<DomainInstrumentKey, ChainlinkFeedKey>,
 }
 
-struct SourceTask {
-    cancel: CancellationToken,
-    handle: JoinHandle<()>,
-}
-
 pub struct CryptoLiveIngestWorker {
     source_supervisor: Arc<DomainSourceSupervisor>,
     linkages: Arc<dyn MarketLinkageRepository>,
     cursors: Arc<dyn DomainSourceCursorRepository>,
     projections: Arc<dyn DomainProjectionRepository>,
-    crypto_writer: Arc<dyn FactWriter<CryptoPriceReportRow>>,
+    persistence: CryptoFactPersistence,
     binance: Option<Arc<BinanceAggTradeSource>>,
     binance_usdm_futures: Option<Arc<BinanceAggTradeSource>>,
     #[cfg(feature = "domain-chainlink")]
@@ -71,7 +66,8 @@ pub struct CryptoLiveIngestDeps {
     pub linkages: Arc<dyn MarketLinkageRepository>,
     pub cursors: Arc<dyn DomainSourceCursorRepository>,
     pub projections: Arc<dyn DomainProjectionRepository>,
-    pub crypto_writer: Arc<dyn FactWriter<CryptoPriceReportRow>>,
+    pub crypto_writer: Arc<DurableWriter<CryptoPriceReportRow>>,
+    pub write_timeouts: DurableWriteTimeouts,
     pub binance: Option<Arc<BinanceAggTradeSource>>,
     pub binance_usdm_futures: Option<Arc<BinanceAggTradeSource>>,
     #[cfg(feature = "domain-chainlink")]
@@ -81,12 +77,18 @@ pub struct CryptoLiveIngestDeps {
 impl CryptoLiveIngestWorker {
     #[must_use]
     pub fn new(deps: CryptoLiveIngestDeps) -> Self {
+        let persistence = CryptoFactPersistence::new(
+            Arc::clone(&deps.source_supervisor),
+            Arc::clone(&deps.projections),
+            deps.crypto_writer,
+            deps.write_timeouts,
+        );
         Self {
             source_supervisor: deps.source_supervisor,
             linkages: deps.linkages,
             cursors: deps.cursors,
             projections: deps.projections,
-            crypto_writer: deps.crypto_writer,
+            persistence,
             binance: deps.binance,
             binance_usdm_futures: deps.binance_usdm_futures,
             #[cfg(feature = "domain-chainlink")]
@@ -94,11 +96,8 @@ impl CryptoLiveIngestWorker {
         }
     }
 
-    pub async fn run(self: Arc<Self>, shutdown: CancellationToken) {
-        if let Err(error) = self.source_supervisor.ensure_boot_reconciled().await {
-            tracing::error!(%error, "Crypto ingest blocked: expected-source reconciliation failed");
-            return;
-        }
+    pub async fn run(self: Arc<Self>, shutdown: CancellationToken) -> QuantResult<()> {
+        self.source_supervisor.ensure_boot_reconciled().await?;
         let binance = Arc::clone(&self).run_binance_supervisor(
             BinanceMarketSegment::Spot,
             self.binance.clone(),
@@ -112,10 +111,11 @@ impl CryptoLiveIngestWorker {
         #[cfg(feature = "domain-chainlink")]
         {
             let chainlink = Arc::clone(&self).run_chainlink_supervisor(shutdown.child_token());
-            tokio::join!(binance, binance_usdm_futures, chainlink);
+            tokio::try_join!(binance, binance_usdm_futures, chainlink)?;
         }
         #[cfg(not(feature = "domain-chainlink"))]
-        tokio::join!(binance, binance_usdm_futures);
+        tokio::try_join!(binance, binance_usdm_futures)?;
+        Ok(())
     }
 
     async fn discover(&self) -> QuantResult<CryptoBindings> {
@@ -195,10 +195,10 @@ impl CryptoLiveIngestWorker {
                 if source.source_id == DomainSourceId::polymarket_rtds_binance()
                     || source.source_id == DomainSourceId::polymarket_rtds_chainlink() => {}
             None => {
-                tracing::warn!(
-                    market_id = %linkage.market_id,
-                    "resolved active Crypto linkage has no live-event source binding"
-                );
+                return Err(QuantError::config(format!(
+                    "active Crypto linkage {} has no live-event source binding",
+                    linkage.market_id
+                )));
             }
             Some(_) => {
                 return Err(QuantError::config(format!(
@@ -215,30 +215,36 @@ impl CryptoLiveIngestWorker {
         market: BinanceMarketSegment,
         source: Option<Arc<BinanceAggTradeSource>>,
         shutdown: CancellationToken,
-    ) {
-        let mut tasks = BTreeMap::<DomainInstrumentKey, SourceTask>::new();
+    ) -> QuantResult<()> {
+        let mut tasks = BTreeMap::<DomainInstrumentKey, CancellationToken>::new();
+        let mut joins = JoinSet::new();
         let mut interval = tokio::time::interval(DISCOVERY_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => break,
+                joined = joins.join_next(), if !joins.is_empty() => {
+                    observe_source_task(
+                        "Binance live source task",
+                        joined.ok_or(InfraError::ChannelClosed {
+                            name: "crypto_binance_source_tasks",
+                        })?,
+                        &mut tasks,
+                        false,
+                    )?;
+                }
                 _ = interval.tick() => {}
             }
-            let desired = match self.discover().await {
-                Ok(bindings) => match market {
-                    BinanceMarketSegment::Spot => bindings.binance,
-                    BinanceMarketSegment::UsdmFutures => bindings.binance_usdm_futures,
-                },
-                Err(error) => {
-                    tracing::warn!(%error, "Binance live binding discovery failed");
-                    continue;
-                }
+            let bindings = self.discover().await?;
+            let desired = match market {
+                BinanceMarketSegment::Spot => bindings.binance,
+                BinanceMarketSegment::UsdmFutures => bindings.binance_usdm_futures,
             };
-            stop_removed(&mut tasks, desired.keys().collect()).await;
+            stop_removed(&mut tasks, &desired);
             let Some(source) = source.as_ref() else {
                 for instrument in desired.keys() {
-                    self.mark_crypto_unavailable(instrument).await;
+                    self.mark_crypto_unavailable(instrument).await?;
                 }
                 continue;
             };
@@ -251,9 +257,10 @@ impl CryptoLiveIngestWorker {
                 let worker = Arc::clone(&self);
                 let source = Arc::clone(source);
                 let task_instrument = instrument.clone();
+                let completed_instrument = instrument.clone();
                 let source_id = market.trade_source();
-                let handle = tokio::spawn(async move {
-                    worker
+                joins.spawn(async move {
+                    let result = worker
                         .run_binance_symbol(
                             source,
                             source_id,
@@ -262,11 +269,18 @@ impl CryptoLiveIngestWorker {
                             child_cancel,
                         )
                         .await;
+                    (completed_instrument, result)
                 });
-                tasks.insert(instrument, SourceTask { cancel, handle });
+                tasks.insert(instrument, cancel);
             }
         }
-        stop_all(tasks).await;
+        for cancel in tasks.values() {
+            cancel.cancel();
+        }
+        while let Some(joined) = joins.join_next().await {
+            observe_source_task("Binance live source task", joined, &mut tasks, true)?;
+        }
+        Ok(())
     }
 
     async fn run_binance_symbol(
@@ -276,15 +290,21 @@ impl CryptoLiveIngestWorker {
         instrument: DomainInstrumentKey,
         symbol: BinanceSymbol,
         shutdown: CancellationToken,
-    ) {
+    ) -> QuantResult<()> {
+        self.source_supervisor
+            .mark_source_failed(
+                &source_id,
+                &instrument,
+                "Binance source session is establishing continuity".to_owned(),
+            )
+            .await?;
         let mut gap_generation = self
             .projections
             .mark_crypto_source_gap(&source_id, &instrument, Utc::now())
-            .await
-            .unwrap_or(0);
+            .await?;
         loop {
             if shutdown.is_cancelled() {
-                return;
+                return Ok(());
             }
             match self
                 .run_binance_session(
@@ -297,30 +317,18 @@ impl CryptoLiveIngestWorker {
                 )
                 .await
             {
-                Ok(()) => return,
+                Ok(()) => return Ok(()),
                 Err(error) => {
                     tracing::warn!(%instrument, %error, "Binance aggTrade session failed");
-                    if let Err(mark_error) = self
-                        .source_supervisor
+                    self.source_supervisor
                         .mark_source_failed(&source_id, &instrument, error.to_string())
-                        .await
-                    {
-                        tracing::error!(%instrument, %mark_error, "failed to record Binance source failure");
-                    }
+                        .await?;
                     gap_generation = self
                         .projections
-                        .mark_crypto_source_gap(
-                            &source_id,
-                            &instrument,
-                            Utc::now(),
-                        )
-                        .await
-                        .unwrap_or_else(|mark_error| {
-                            tracing::error!(%instrument, %mark_error, "failed to persist Binance source gap");
-                            gap_generation.saturating_add(1)
-                        });
+                        .mark_crypto_source_gap(&source_id, &instrument, Utc::now())
+                        .await?;
                     tokio::select! {
-                        () = shutdown.cancelled() => return,
+                        () = shutdown.cancelled() => return Ok(()),
                         () = tokio::time::sleep(RECONNECT_BACKOFF) => {}
                     }
                 }
@@ -345,40 +353,68 @@ impl CryptoLiveIngestWorker {
         let mut next_clock_check = Instant::now() + StdDuration::from_secs(30);
         let recovery_poll_interval = source.recovery_poll_interval();
         let mut next_recovery = Instant::now() + recovery_poll_interval;
-        loop {
-            if Instant::now() >= next_clock_check {
-                source.validate_system_clock().await?;
-                next_clock_check = Instant::now() + StdDuration::from_secs(30);
-            }
+        let mut pending = VecDeque::<PendingCryptoFact>::new();
+        let result = async {
+            loop {
+            self.refresh_clock(source, &mut next_clock_check, &mut pending)
+                .await?;
             let (report, planned_rotation) = if stream.rotation_due() {
+                self.persistence.drain(&mut pending).await?;
                 match source.stream(symbol).await {
                     Ok(mut replacement) => {
-                        let report = tokio::select! {
-                            () = shutdown.cancelled() => return Ok(()),
-                            result = replacement.next_report() => result?,
+                        let result = tokio::select! {
+                            biased;
+                            acknowledgement = self.persistence.acknowledge_front(&mut pending), if !pending.is_empty() => {
+                                acknowledgement?;
+                                continue;
+                            }
+                            () = shutdown.cancelled() => {
+                                self.persistence.shutdown(&mut pending).await?;
+                                return Ok(());
+                            }
+                            result = replacement.next_report() => result,
                             () = tokio::time::sleep(StdDuration::from_secs(10)) => {
                                 tracing::warn!(%instrument, "Binance overlap rotation produced no first report");
                                 continue;
                             }
                         };
+                        let report = self.require_stream_report(result, &mut pending).await?;
                         stream = replacement;
                         (report, true)
                     }
                     Err(error) => {
                         tracing::warn!(%instrument, %error, "Binance overlap rotation connection failed");
-                        let report = tokio::select! {
-                            () = shutdown.cancelled() => return Ok(()),
-                            result = stream.next_report() => result?,
+                        let result = tokio::select! {
+                            biased;
+                            acknowledgement = self.persistence.acknowledge_front(&mut pending), if !pending.is_empty() => {
+                                acknowledgement?;
+                                continue;
+                            }
+                            () = shutdown.cancelled() => {
+                                self.persistence.shutdown(&mut pending).await?;
+                                return Ok(());
+                            }
+                            result = stream.next_report() => result,
                             () = tokio::time::sleep(StdDuration::from_secs(1)) => continue,
                         };
+                        let report = self.require_stream_report(result, &mut pending).await?;
                         (report, false)
                     }
                 }
             } else {
-                let report = tokio::select! {
-                    () = shutdown.cancelled() => return Ok(()),
-                    result = stream.next_report() => result?,
+                let result = tokio::select! {
+                    biased;
+                    acknowledgement = self.persistence.acknowledge_front(&mut pending), if !pending.is_empty() => {
+                        acknowledgement?;
+                        continue;
+                    }
+                    () = shutdown.cancelled() => {
+                        self.persistence.shutdown(&mut pending).await?;
+                        return Ok(());
+                    }
+                    result = stream.next_report() => result,
                     () = tokio::time::sleep_until(next_recovery) => {
+                        self.persistence.drain(&mut pending).await?;
                         expected = self
                             .recover_binance_frontier(
                                 source,
@@ -393,15 +429,32 @@ impl CryptoLiveIngestWorker {
                         continue;
                     },
                 };
+                let report = self.require_stream_report(result, &mut pending).await?;
                 (report, false)
             };
             next_recovery = Instant::now() + recovery_poll_interval;
             if let Some(next_id) = expected {
                 if report.source_sequence < next_id {
+                    if next_id.checked_sub(1) == Some(report.source_sequence) {
+                        self.persistence
+                            .enqueue_ordered(report, gap_generation, &mut pending)
+                            .await?;
+                    }
                     continue;
                 }
                 if report.source_sequence > next_id {
+                    self.persistence.drain(&mut pending).await?;
                     if !planned_rotation {
+                        self.source_supervisor
+                            .mark_source_failed(
+                                source_id,
+                                instrument,
+                                format!(
+                                    "Binance sequence gap: expected {next_id}, received {}",
+                                    report.source_sequence
+                                ),
+                            )
+                            .await?;
                         gap_generation = self
                             .projections
                             .mark_crypto_source_gap(source_id, instrument, Utc::now())
@@ -420,10 +473,44 @@ impl CryptoLiveIngestWorker {
                 }
             }
             if expected.is_none_or(|next_id| report.source_sequence >= next_id) {
-                self.persist_crypto(report.clone(), gap_generation).await?;
+                self.persistence
+                    .enqueue_ordered(report.clone(), gap_generation, &mut pending)
+                    .await?;
                 expected = Some(next_sequence(report.source_sequence)?);
             }
+            }
         }
+        .await;
+        drop(pending);
+        result
+    }
+
+    async fn require_stream_report(
+        &self,
+        result: QuantResult<CryptoPriceReport>,
+        pending: &mut VecDeque<PendingCryptoFact>,
+    ) -> QuantResult<CryptoPriceReport> {
+        match result {
+            Ok(report) => Ok(report),
+            Err(error) => {
+                self.persistence.drain(pending).await?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn refresh_clock(
+        &self,
+        source: &BinanceAggTradeSource,
+        next_clock_check: &mut Instant,
+        pending: &mut VecDeque<PendingCryptoFact>,
+    ) -> QuantResult<()> {
+        if Instant::now() >= *next_clock_check {
+            self.persistence.drain(pending).await?;
+            source.validate_system_clock().await?;
+            *next_clock_check = Instant::now() + StdDuration::from_secs(30);
+        }
+        Ok(())
     }
 
     async fn resume_binance_sequence(
@@ -525,7 +612,9 @@ impl CryptoLiveIngestWorker {
             )));
         }
         let next = next_sequence(report.source_sequence)?;
-        self.persist_crypto(report, gap_generation).await?;
+        self.persistence
+            .persist_batch(vec![report], gap_generation)
+            .await?;
         Ok(Some(next))
     }
 
@@ -558,7 +647,9 @@ impl CryptoLiveIngestWorker {
                     from_id = next_sequence(from_id)?;
                     pending.push(report);
                 }
-                self.persist_crypto_batch(pending, gap_generation).await?;
+                self.persistence
+                    .persist_batch(pending, gap_generation)
+                    .await?;
             }
             date = date
                 .succ_opt()
@@ -586,7 +677,9 @@ impl CryptoLiveIngestWorker {
             let mut pending = Vec::with_capacity(page_len);
             for report in reports {
                 if stop_before.is_some_and(|limit| report.source_sequence >= limit) {
-                    self.persist_crypto_batch(pending, gap_generation).await?;
+                    self.persistence
+                        .persist_batch(pending, gap_generation)
+                        .await?;
                     return Ok(from_id);
                 }
                 if report.source_sequence != from_id {
@@ -598,7 +691,9 @@ impl CryptoLiveIngestWorker {
                 pending.push(report);
                 from_id = next_sequence(from_id)?;
             }
-            self.persist_crypto_batch(pending, gap_generation).await?;
+            self.persistence
+                .persist_batch(pending, gap_generation)
+                .await?;
             if page_len < usize::from(BINANCE_PAGE_SIZE) {
                 return Ok(from_id);
             }
@@ -606,27 +701,35 @@ impl CryptoLiveIngestWorker {
     }
 
     #[cfg(feature = "domain-chainlink")]
-    async fn run_chainlink_supervisor(self: Arc<Self>, shutdown: CancellationToken) {
-        let mut tasks = BTreeMap::<DomainInstrumentKey, SourceTask>::new();
+    async fn run_chainlink_supervisor(
+        self: Arc<Self>,
+        shutdown: CancellationToken,
+    ) -> QuantResult<()> {
+        let mut tasks = BTreeMap::<DomainInstrumentKey, CancellationToken>::new();
+        let mut joins = JoinSet::new();
         let mut interval = tokio::time::interval(DISCOVERY_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => break,
+                joined = joins.join_next(), if !joins.is_empty() => {
+                    observe_source_task(
+                        "Chainlink live source task",
+                        joined.ok_or(InfraError::ChannelClosed {
+                            name: "crypto_chainlink_source_tasks",
+                        })?,
+                        &mut tasks,
+                        false,
+                    )?;
+                }
                 _ = interval.tick() => {}
             }
-            let desired = match self.discover().await {
-                Ok(bindings) => bindings.chainlink,
-                Err(error) => {
-                    tracing::warn!(%error, "Chainlink live binding discovery failed");
-                    continue;
-                }
-            };
-            stop_removed(&mut tasks, desired.keys().collect()).await;
+            let desired = self.discover().await?.chainlink;
+            stop_removed(&mut tasks, &desired);
             let Some(source) = self.chainlink.as_ref() else {
                 for instrument in desired.keys() {
-                    self.mark_crypto_unavailable(instrument).await;
+                    self.mark_crypto_unavailable(instrument).await?;
                 }
                 continue;
             };
@@ -635,7 +738,7 @@ impl CryptoLiveIngestWorker {
                     continue;
                 }
                 if !source.instruments().contains(&instrument) {
-                    self.mark_crypto_unavailable(&instrument).await;
+                    self.mark_crypto_unavailable(&instrument).await?;
                     tracing::error!(%instrument, "active Chainlink feed is not configured");
                     continue;
                 }
@@ -644,15 +747,23 @@ impl CryptoLiveIngestWorker {
                 let worker = Arc::clone(&self);
                 let source = Arc::clone(source);
                 let task_instrument = instrument.clone();
-                let handle = tokio::spawn(async move {
-                    worker
+                let completed_instrument = instrument.clone();
+                joins.spawn(async move {
+                    let result = worker
                         .run_chainlink_feed(source, task_instrument, feed, child_cancel)
                         .await;
+                    (completed_instrument, result)
                 });
-                tasks.insert(instrument, SourceTask { cancel, handle });
+                tasks.insert(instrument, cancel);
             }
         }
-        stop_all(tasks).await;
+        for cancel in tasks.values() {
+            cancel.cancel();
+        }
+        while let Some(joined) = joins.join_next().await {
+            observe_source_task("Chainlink live source task", joined, &mut tasks, true)?;
+        }
+        Ok(())
     }
 
     #[cfg(feature = "domain-chainlink")]
@@ -662,7 +773,14 @@ impl CryptoLiveIngestWorker {
         instrument: DomainInstrumentKey,
         feed: ChainlinkFeedKey,
         shutdown: CancellationToken,
-    ) {
+    ) -> QuantResult<()> {
+        self.source_supervisor
+            .mark_source_failed(
+                &DomainSourceId::chainlink_data_streams(),
+                &instrument,
+                "Chainlink source session is establishing continuity".to_owned(),
+            )
+            .await?;
         let mut gap_generation = self
             .projections
             .mark_crypto_source_gap(
@@ -670,11 +788,10 @@ impl CryptoLiveIngestWorker {
                 &instrument,
                 Utc::now(),
             )
-            .await
-            .unwrap_or(0);
+            .await?;
         loop {
             if shutdown.is_cancelled() {
-                return;
+                return Ok(());
             }
             match self
                 .run_chainlink_session(
@@ -686,20 +803,16 @@ impl CryptoLiveIngestWorker {
                 )
                 .await
             {
-                Ok(()) => return,
+                Ok(()) => return Ok(()),
                 Err(error) => {
                     tracing::warn!(%instrument, %error, "Chainlink Data Streams session failed");
-                    if let Err(mark_error) = self
-                        .source_supervisor
+                    self.source_supervisor
                         .mark_source_failed(
                             &DomainSourceId::chainlink_data_streams(),
                             &instrument,
                             error.to_string(),
                         )
-                        .await
-                    {
-                        tracing::error!(%instrument, %mark_error, "failed to record Chainlink source failure");
-                    }
+                        .await?;
                     gap_generation = self
                         .projections
                         .mark_crypto_source_gap(
@@ -707,10 +820,9 @@ impl CryptoLiveIngestWorker {
                             &instrument,
                             Utc::now(),
                         )
-                        .await
-                        .unwrap_or_else(|_| gap_generation.saturating_add(1));
+                        .await?;
                     tokio::select! {
-                        () = shutdown.cancelled() => return,
+                        () = shutdown.cancelled() => return Ok(()),
                         () = tokio::time::sleep(RECONNECT_BACKOFF) => {}
                     }
                 }
@@ -733,10 +845,9 @@ impl CryptoLiveIngestWorker {
             .find(&DomainSourceId::chainlink_data_streams(), instrument)
             .await?;
         let mut last = match cursor.map(|cursor| cursor.checkpoint_json) {
-            Some(DomainSourceCheckpoint::ChainlinkDataStreams {
-                observations_timestamp,
-                report_hash,
-            }) => Some((observations_timestamp, report_hash)),
+            Some(checkpoint @ DomainSourceCheckpoint::ChainlinkDataStreams { .. }) => {
+                Some(checkpoint)
+            }
             Some(_) => {
                 return Err(QuantError::config(
                     "Chainlink cursor contains a different source checkpoint type",
@@ -744,8 +855,12 @@ impl CryptoLiveIngestWorker {
             }
             None => None,
         };
-        if let Some((timestamp, _)) = &last {
-            let start = u128::try_from(timestamp.timestamp()).map_err(|error| {
+        if let Some(DomainSourceCheckpoint::ChainlinkDataStreams {
+            observations_timestamp,
+            ..
+        }) = &last
+        {
+            let start = u128::try_from(observations_timestamp.timestamp()).map_err(|error| {
                 QuantError::config(format!("negative Chainlink checkpoint timestamp: {error}"))
             })?;
             last = catch_up_chainlink_pages(
@@ -753,7 +868,7 @@ impl CryptoLiveIngestWorker {
                 source.rest_page_limit(),
                 last,
                 |page_start| source.reports_page(feed, page_start, Utc::now()),
-                |report| self.persist_crypto(report, gap_generation),
+                |reports| self.persistence.persist_batch(reports, gap_generation),
             )
             .await?;
         }
@@ -764,133 +879,111 @@ impl CryptoLiveIngestWorker {
         let mut clock_check = tokio::time::interval(StdDuration::from_secs(30));
         clock_check.set_missed_tick_behavior(MissedTickBehavior::Skip);
         clock_check.tick().await;
-        loop {
-            let report = tokio::select! {
+        let mut pending = VecDeque::<PendingCryptoFact>::new();
+        let result = async {
+            loop {
+            let result = tokio::select! {
+                biased;
+                acknowledgement = self.persistence.acknowledge_front(&mut pending), if !pending.is_empty() => {
+                    acknowledgement?;
+                    continue;
+                }
                 () = shutdown.cancelled() => {
-                    stream.close().await.map_err(|error| {
+                    let drain_result = self.persistence.shutdown(&mut pending).await;
+                    let close_result = stream.close().await.map_err(|error| {
                         QuantError::config(format!("Chainlink stream close failed: {error}"))
-                    })?;
+                    });
+                    drain_result?;
+                    close_result?;
                     return Ok(());
                 }
                 _ = clock_check.tick() => {
+                    self.persistence.drain(&mut pending).await?;
                     source.validate_system_clock().await?;
                     continue;
                 }
-                report = source.next_report(&mut stream, Utc::now()) => report?,
+                report = source.next_report(&mut stream, Utc::now()) => report,
             };
-            if should_process_crypto(&report, last.as_ref()) {
-                self.persist_crypto(report.clone(), gap_generation).await?;
-                last = Some((report.event_time, report.report_hash));
+            let report = match result {
+                Ok(report) => report,
+                Err(error) => {
+                    self.persistence.drain(&mut pending).await?;
+                    return Err(error);
+                }
+            };
+            if should_process_crypto(&report, last.as_ref())? {
+                self.persistence
+                    .enqueue_ordered(report.clone(), gap_generation, &mut pending)
+                    .await?;
+                last = Some(
+                    report
+                        .checkpoint()
+                        .map_err(|error| QuantError::config(error.to_string()))?,
+                );
+            }
             }
         }
+        .await;
+        drop(pending);
+        result
     }
 
-    async fn persist_crypto(
-        &self,
-        report: CryptoPriceReport,
-        gap_generation: u64,
-    ) -> QuantResult<()> {
-        let source_id = report.source_id.clone();
-        let instrument_key = report.instrument_key.clone();
-        self.crypto_writer
-            .write_batch(vec![CryptoPriceReportRow::from(&report)])
-            .await?;
-        let checkpoint = if report.source_id == DomainSourceId::binance_agg_trade()
-            || report.source_id == DomainSourceId::binance_futures_trade()
-        {
-            DomainSourceCheckpoint::BinanceAggTrade {
-                aggregate_trade_id: report.source_sequence,
-                event_time: report.event_time,
-            }
-        } else if report.source_id == DomainSourceId::chainlink_data_streams() {
-            DomainSourceCheckpoint::ChainlinkDataStreams {
-                observations_timestamp: report.observations_timestamp.ok_or_else(|| {
-                    QuantError::config("Chainlink report lacks observations timestamp")
-                })?,
-                report_hash: report.report_hash,
-            }
-        } else {
+    async fn mark_crypto_unavailable(&self, instrument: &DomainInstrumentKey) -> QuantResult<()> {
+        let Some(source_id) = instrument.source_id() else {
             return Err(QuantError::config(format!(
-                "unsupported crypto report source {}",
-                report.source_id
+                "Crypto instrument `{instrument}` has no source identity"
             )));
         };
-        self.projections
-            .apply_crypto_report(report, checkpoint, gap_generation, true)
-            .await?;
         self.source_supervisor
-            .mark_source_recovered(&source_id, &instrument_key)
-            .await?;
-        Ok(())
-    }
-
-    async fn persist_crypto_batch(
-        &self,
-        reports: Vec<CryptoPriceReport>,
-        gap_generation: u64,
-    ) -> QuantResult<()> {
-        let Some(last) = reports.last().cloned() else {
-            return Ok(());
-        };
-        let source_id = last.source_id.clone();
-        let instrument_key = last.instrument_key.clone();
-        self.crypto_writer
-            .write_batch(
-                reports
-                    .into_iter()
-                    .map(|report| CryptoPriceReportRow::from(&report))
-                    .collect(),
+            .mark_source_failed(
+                &source_id,
+                instrument,
+                "configured Crypto source is unavailable".to_owned(),
             )
             .await?;
-        let checkpoint = DomainSourceCheckpoint::BinanceAggTrade {
-            aggregate_trade_id: last.source_sequence,
-            event_time: last.event_time,
-        };
         self.projections
-            .apply_crypto_report(last, checkpoint, gap_generation, true)
-            .await?;
-        self.source_supervisor
-            .mark_source_recovered(&source_id, &instrument_key)
+            .mark_crypto_source_gap(&source_id, instrument, Utc::now())
             .await?;
         Ok(())
-    }
-
-    async fn mark_crypto_unavailable(&self, instrument: &DomainInstrumentKey) {
-        let Some(source_id) = instrument.source_id() else {
-            return;
-        };
-        if let Err(error) = self
-            .projections
-            .mark_crypto_source_gap(&source_id, instrument, Utc::now())
-            .await
-        {
-            tracing::error!(%instrument, %error, "failed to mark crypto source unavailable");
-        }
     }
 }
 
 #[cfg(feature = "domain-chainlink")]
 fn should_process_crypto(
     report: &CryptoPriceReport,
-    last: Option<&(DateTime<Utc>, ContentHash)>,
-) -> bool {
-    last.is_none_or(|(time, hash)| {
-        report.event_time > *time || (report.event_time == *time && report.report_hash != *hash)
-    })
+    last: Option<&DomainSourceCheckpoint>,
+) -> QuantResult<bool> {
+    let Some(last) = last else {
+        return Ok(true);
+    };
+    let incoming = report
+        .checkpoint()
+        .map_err(|error| QuantError::config(error.to_string()))?;
+    match last
+        .compare_crypto(&incoming)
+        .map_err(|error| QuantError::config(error.to_string()))?
+    {
+        Ordering::Greater => Ok(true),
+        Ordering::Less => Ok(false),
+        Ordering::Equal if last.crypto_report_hash() == Some(report.report_hash) => Ok(false),
+        Ordering::Equal => Err(QuantError::config(
+            "Chainlink source equivocated at one observations timestamp",
+        )),
+    }
 }
 
 #[cfg(feature = "domain-chainlink")]
 async fn catch_up_chainlink_pages<Fetch, FetchFuture, Persist, PersistFuture>(
     mut start: u128,
     page_limit: usize,
-    mut last: Option<(DateTime<Utc>, ContentHash)>,
+    mut last: Option<DomainSourceCheckpoint>,
     mut fetch: Fetch,
     mut persist: Persist,
-) -> QuantResult<Option<(DateTime<Utc>, ContentHash)>>
+) -> QuantResult<Option<DomainSourceCheckpoint>>
 where
     Fetch: FnMut(u128) -> FetchFuture,
     FetchFuture: Future<Output = QuantResult<Vec<CryptoPriceReport>>>,
-    Persist: FnMut(CryptoPriceReport) -> PersistFuture,
+    Persist: FnMut(Vec<CryptoPriceReport>) -> PersistFuture,
     PersistFuture: Future<Output = QuantResult<()>>,
 {
     if page_limit == 0 {
@@ -902,13 +995,17 @@ where
         let reports = fetch(start).await?;
         let page_len = reports.len();
         let last_sequence = reports.last().map(|report| report.source_sequence);
+        let mut pending = Vec::with_capacity(page_len);
         for report in reports {
-            if should_process_crypto(&report, last.as_ref()) {
-                let checkpoint = (report.event_time, report.report_hash);
-                persist(report).await?;
+            if should_process_crypto(&report, last.as_ref())? {
+                let checkpoint = report
+                    .checkpoint()
+                    .map_err(|error| QuantError::config(error.to_string()))?;
+                pending.push(report);
                 last = Some(checkpoint);
             }
         }
+        persist(pending).await?;
         if page_len < page_limit {
             return Ok(last);
         }
@@ -927,32 +1024,40 @@ fn next_sequence(value: u64) -> QuantResult<u64> {
         .ok_or_else(|| QuantError::config("source sequence overflow"))
 }
 
-async fn stop_removed(
-    tasks: &mut BTreeMap<DomainInstrumentKey, SourceTask>,
-    desired: BTreeSet<&DomainInstrumentKey>,
+fn stop_removed<V>(
+    tasks: &mut BTreeMap<DomainInstrumentKey, CancellationToken>,
+    desired: &BTreeMap<DomainInstrumentKey, V>,
 ) {
     let removed = tasks
         .keys()
-        .filter(|key| !desired.contains(key))
+        .filter(|key| !desired.contains_key(*key))
         .cloned()
         .collect::<Vec<_>>();
     for key in removed {
-        if let Some(task) = tasks.remove(&key) {
-            task.cancel.cancel();
-            if let Err(error) = task.handle.await {
-                tracing::warn!(%key, %error, "domain source task join failed");
-            }
+        if let Some(cancel) = tasks.remove(&key) {
+            cancel.cancel();
         }
     }
 }
 
-async fn stop_all(tasks: BTreeMap<DomainInstrumentKey, SourceTask>) {
-    for (_, task) in tasks {
-        task.cancel.cancel();
-        if let Err(error) = task.handle.await {
-            tracing::warn!(%error, "domain source task join failed");
+fn observe_source_task(
+    name: &'static str,
+    joined: Result<(DomainInstrumentKey, QuantResult<()>), JoinError>,
+    tasks: &mut BTreeMap<DomainInstrumentKey, CancellationToken>,
+    stopping: bool,
+) -> QuantResult<()> {
+    let (instrument, result) = joined.map_err(|error| InfraError::BlockingTaskJoin {
+        detail: format!("{name} failed: {error}"),
+    })?;
+    let planned = tasks.remove(&instrument).is_none() || stopping;
+    result?;
+    if !planned {
+        return Err(InfraError::ChannelClosed {
+            name: "crypto_live_source_task",
         }
+        .into());
     }
+    Ok(())
 }
 
 #[cfg(all(test, feature = "domain-chainlink"))]
@@ -962,7 +1067,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use chrono::{Duration, Utc};
+    use chrono::DateTime;
     use quant_pivot_error::QuantError;
     use quant_pivot_models::{
         domain::data_plane::CryptoPriceReport,
@@ -972,16 +1077,23 @@ mod tests {
 
     use super::{catch_up_chainlink_pages, should_process_crypto};
 
+    const CHAINLINK_BASE_SECONDS: u64 = 1_700_000_000;
+
     fn hash(seed: char) -> ContentHash {
         ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 
-    fn report(sequence: u64, seconds: i64, seed: char) -> CryptoPriceReport {
-        let event_time = Utc::now() + Duration::seconds(seconds);
+    fn report(offset_seconds: u64, seed: char) -> CryptoPriceReport {
+        let source_sequence = CHAINLINK_BASE_SECONDS
+            .checked_add(offset_seconds)
+            .expect("source sequence");
+        let event_time =
+            DateTime::from_timestamp(i64::try_from(source_sequence).expect("timestamp"), 0)
+                .expect("event time");
         CryptoPriceReport {
             source_id: DomainSourceId::chainlink_data_streams(),
             instrument_key: DomainInstrumentKey::new("CHAINLINK_DATA_STREAMS:BTC-USD"),
-            source_sequence: sequence,
+            source_sequence,
             price: Usd::new(dec!(100)),
             quantity: None,
             event_time,
@@ -996,27 +1108,28 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_only_never_dedupes() {
-        let first = report(1, 0, 'a');
+    fn same_timestamp_equivocates() {
+        let first = report(0, 'a');
         let correction = CryptoPriceReport {
             report_hash: hash('b'),
             ..first.clone()
         };
-        let checkpoint = (first.event_time, first.report_hash);
-        assert!(!should_process_crypto(&first, Some(&checkpoint)));
-        assert!(should_process_crypto(&correction, Some(&checkpoint)));
+        let checkpoint = first.checkpoint().expect("checkpoint");
+        assert!(!should_process_crypto(&first, Some(&checkpoint)).expect("exact replay"));
+        assert!(should_process_crypto(&correction, Some(&checkpoint)).is_err());
     }
 
     #[tokio::test]
     async fn chainlink_reads_before_stopping() {
+        let page_start = u128::from(CHAINLINK_BASE_SECONDS);
         let pages = Arc::new(Mutex::new(BTreeMap::from([
-            (0_u128, vec![report(1, 0, 'a'), report(2, 1, 'b')]),
-            (3_u128, vec![report(3, 2, 'c')]),
+            (page_start, vec![report(0, 'a'), report(1, 'b')]),
+            (page_start + 2, vec![report(2, 'c')]),
         ])));
         let starts = Arc::new(Mutex::new(Vec::new()));
         let persisted = Arc::new(Mutex::new(Vec::new()));
         let result = catch_up_chainlink_pages(
-            0,
+            page_start,
             2,
             None,
             {
@@ -1039,10 +1152,13 @@ mod tests {
             },
             {
                 let persisted = Arc::clone(&persisted);
-                move |report| {
+                move |reports| {
                     let persisted = Arc::clone(&persisted);
                     async move {
-                        persisted.lock().expect("lock").push(report.source_sequence);
+                        persisted
+                            .lock()
+                            .expect("lock")
+                            .extend(reports.into_iter().map(|report| report.source_sequence));
                         Ok::<(), QuantError>(())
                     }
                 }
@@ -1050,8 +1166,24 @@ mod tests {
         )
         .await
         .expect("gap recovery");
-        assert_eq!(*starts.lock().expect("lock"), vec![0, 3]);
-        assert_eq!(*persisted.lock().expect("lock"), vec![1, 2, 3]);
-        assert_eq!(result.expect("checkpoint").1, hash('c'));
+        assert_eq!(
+            *starts.lock().expect("lock"),
+            vec![page_start, page_start + 2]
+        );
+        assert_eq!(
+            *persisted.lock().expect("lock"),
+            vec![
+                CHAINLINK_BASE_SECONDS,
+                CHAINLINK_BASE_SECONDS + 1,
+                CHAINLINK_BASE_SECONDS + 2,
+            ]
+        );
+        assert_eq!(
+            result
+                .expect("checkpoint")
+                .crypto_report_hash()
+                .expect("report hash"),
+            hash('c')
+        );
     }
 }

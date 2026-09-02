@@ -3,7 +3,6 @@
 use std::{collections::BTreeMap, str::FromStr, sync::Arc};
 
 use chrono::{DateTime, Utc};
-use clickhouse::query::Query;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
@@ -20,7 +19,7 @@ use quant_pivot_models::{
     enums::quant::{FeatureCellState, FeatureParityEventStatus, FeatureParityStage},
     types::{FeatureParityDetail, FeatureVectorId, ModelRunId},
 };
-use quant_pivot_storage::clickhouse::ClickHousePool;
+use quant_pivot_storage::clickhouse::{ClickHousePool, GovernedQuery};
 
 use crate::{
     clickhouse::{
@@ -55,7 +54,7 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
         let filters = EventFilters::from_query(&query);
         let count = bind_filters(
             FEATURE_PARITY_PAGE.query(
-                self.pool.client(),
+                self.pool.as_ref(),
                 "SELECT count() FROM quant_feature_parity_event FINAL \
                  WHERE (? = '' OR parity_run_id = ?) \
                  AND (? = '' OR status = ?) \
@@ -75,7 +74,7 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
 
         let rows = bind_filters(
             FEATURE_PARITY_PAGE.query(
-                self.pool.client(),
+                self.pool.as_ref(),
                 "SELECT ?fields FROM quant_feature_parity_event FINAL \
                  WHERE (? = '' OR parity_run_id = ?) \
                  AND (? = '' OR status = ?) \
@@ -112,7 +111,7 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
 
         let states = FEATURE_PARITY_SUMMARY
             .query(
-                self.pool.client(),
+                self.pool.as_ref(),
                 "SELECT toString(cell_state) AS key, count() AS count \
                  FROM quant_feature_event \
                  WHERE event_time >= now64(3) - INTERVAL 24 HOUR \
@@ -122,7 +121,7 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
             .await?;
         let reasons = FEATURE_PARITY_SUMMARY
             .query(
-                self.pool.client(),
+                self.pool.as_ref(),
                 "SELECT assumeNotNull(reason) AS key, count() AS count \
                  FROM quant_feature_event \
                  WHERE event_time >= now64(3) - INTERVAL 24 HOUR \
@@ -174,7 +173,7 @@ impl ServingEvidenceRepository for ChFeatureParityEventRepository {
         )? {
             let page = SERVING_COMPLETIONS_FOR_RUNS
                 .query(
-                    self.pool.client(),
+                    self.pool.as_ref(),
                     "SELECT ?fields FROM quant_serving_evidence_completion \
                      WHERE model_run_id IN ? \
                      ORDER BY model_run_id, ingestion_time",
@@ -208,7 +207,7 @@ impl ServingEvidenceRepository for ChFeatureParityEventRepository {
         )? {
             let page = MODEL_INPUTS_FOR_RUNS
                 .query(
-                    self.pool.client(),
+                    self.pool.as_ref(),
                     "SELECT ?fields FROM quant_model_input_event \
                      WHERE model_run_id IN ? \
                      ORDER BY model_run_id, market_id, encoded_column, raw_input_name, ingestion_time",
@@ -242,7 +241,7 @@ impl ServingEvidenceRepository for ChFeatureParityEventRepository {
         )? {
             let page = FEATURE_CELLS_FOR_VECTORS
                 .query(
-                    self.pool.client(),
+                    self.pool.as_ref(),
                     "SELECT ?fields FROM quant_feature_event \
                      WHERE feature_vector_id IN ? \
                      ORDER BY feature_vector_id, feature_name, ingestion_time",
@@ -311,7 +310,7 @@ impl EventFilters {
     }
 }
 
-fn bind_filters(query: Query, filters: &EventFilters) -> Query {
+fn bind_filters(query: GovernedQuery, filters: &EventFilters) -> GovernedQuery {
     query
         .bind(&filters.parity_run_id)
         .bind(&filters.parity_run_id)

@@ -49,7 +49,7 @@ pg_enum! {
 
 pg_enum! {
     type_name = "qp_settlement_authorization_state",
-    /// Semi-auto batch authorization lifecycle, independent from ERC-1155 approval.
+    /// Operator-approval batch authorization lifecycle, independent from ERC-1155 approval.
     pub enum SettlementAuthorizationState {
         NotRequired => "not_required",
         Pending => "pending",
@@ -98,6 +98,7 @@ pg_enum! {
 pg_enum! {
     type_name = "qp_settlement_submission_kind",
     /// Transport and identity domain of a chain submission.
+    @derive(schemars::JsonSchema)
     pub enum SettlementSubmissionKind {
         DirectEoa => "direct_eoa",
         Relayer => "relayer",

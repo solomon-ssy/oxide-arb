@@ -1,29 +1,33 @@
-//! Durable per-exchange account pause submission contracts.
+//! Durable per-exchange account pause-state operation contracts.
 
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    entities::quant_account_pause_submission,
-    enums::{execution::AccountPauseSubmissionState, settlement::SettlementSubmissionKind},
+    entities::quant_account_pause_operation,
+    enums::{
+        execution::{AccountPauseOperationKind, AccountPauseOperationState},
+        settlement::SettlementSubmissionKind,
+    },
     types::{
-        AccountPauseSubmissionId, AccountRecoveryIncidentId, ContentHash, EvmAddress, EvmBlockHash,
+        AccountPauseOperationId, AccountRecoveryIncidentId, ContentHash, EvmAddress, EvmBlockHash,
         EvmCalldataHash, EvmTransactionHash, EvmUint256, RelayerTransactionId,
     },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel)]
-#[sea_orm(entity = "quant_account_pause_submission::Entity")]
-pub struct AccountPauseSubmissionInfo {
-    pub account_pause_submission_id: AccountPauseSubmissionId,
+#[sea_orm(entity = "quant_account_pause_operation::Entity")]
+pub struct AccountPauseOperationInfo {
+    pub account_pause_operation_id: AccountPauseOperationId,
     pub recovery_incident_id: AccountRecoveryIncidentId,
     pub exchange_address: EvmAddress,
-    pub state: AccountPauseSubmissionState,
-    pub kind: SettlementSubmissionKind,
+    pub operation_kind: AccountPauseOperationKind,
+    pub state: AccountPauseOperationState,
+    pub submission_kind: SettlementSubmissionKind,
     pub requested_block: i64,
-    pub interval_blocks: i64,
-    pub effective_block: i64,
+    pub interval_blocks: Option<i64>,
+    pub effective_block: Option<i64>,
     pub prepared_block_number: i64,
     pub prepared_block_hash: EvmBlockHash,
     pub prepared_nonce: EvmUint256,
@@ -46,14 +50,15 @@ pub struct AccountPauseSubmissionInfo {
 }
 
 info_from_model!(
-    AccountPauseSubmissionInfo,
-    quant_account_pause_submission::Model,
+    AccountPauseOperationInfo,
+    quant_account_pause_operation::Model,
     {
-        account_pause_submission_id,
+        account_pause_operation_id,
         recovery_incident_id,
         exchange_address,
+        operation_kind,
         state,
-        kind,
+        submission_kind,
         requested_block,
         interval_blocks,
         effective_block,
@@ -80,16 +85,17 @@ info_from_model!(
 );
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "quant_account_pause_submission::ActiveModel")]
-pub struct NewAccountPauseSubmission {
-    pub account_pause_submission_id: AccountPauseSubmissionId,
+#[sea_orm(active_model = "quant_account_pause_operation::ActiveModel")]
+pub struct NewAccountPauseOperation {
+    pub account_pause_operation_id: AccountPauseOperationId,
     pub recovery_incident_id: AccountRecoveryIncidentId,
     pub exchange_address: EvmAddress,
-    pub state: AccountPauseSubmissionState,
-    pub kind: SettlementSubmissionKind,
+    pub operation_kind: AccountPauseOperationKind,
+    pub state: AccountPauseOperationState,
+    pub submission_kind: SettlementSubmissionKind,
     pub requested_block: i64,
-    pub interval_blocks: i64,
-    pub effective_block: i64,
+    pub interval_blocks: Option<i64>,
+    pub effective_block: Option<i64>,
     pub prepared_block_number: i64,
     pub prepared_block_hash: EvmBlockHash,
     pub prepared_nonce: EvmUint256,

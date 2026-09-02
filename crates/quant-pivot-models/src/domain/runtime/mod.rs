@@ -3,7 +3,7 @@
 pub mod core_event;
 
 pub use core_event::{
-    CoreEvent, CoreEventPublisher, DropObserver, EntryConditionLifecycleEvent,
+    CoreEvent, CoreEventDropReason, CoreEventPublisher, DropObserver, EntryConditionLifecycleEvent,
     ExecutionOrderEventKind, ExecutionOrderLifecycleEvent, IntentEventKind, IntentLifecycleEvent,
     MaterializationRunEvent, MaterializationRunKind, MaterializationRunStatus,
     ReconciliationLifecycleEvent, ReportEventKind, ReportLifecycleEvent, ReportRunLifecycleEvent,

@@ -47,7 +47,7 @@ use quant_pivot_research::execution_semantics::{
 };
 use rust_decimal::Decimal;
 
-use super::{ReconcileFacts, VenuePresence, VenueReconciliationReader};
+use super::{ReconcileFacts, ShareSettlementBasis, VenuePresence, VenueReconciliationReader};
 use crate::ingest::book_store::BookStore;
 
 /// Evidence chain + structured facts produced for one reconcilable order.
@@ -68,6 +68,7 @@ pub trait EvidenceCollector: Send + Sync {
         &self,
         order: &ExecutionOrderInfo,
         identity_refs: &ExecutionOrderIdentityRefs,
+        share_basis: ShareSettlementBasis,
         now: DateTime<Utc>,
         stale_after: Duration,
     ) -> QuantResult<CollectedReconciliation>;
@@ -96,6 +97,21 @@ struct MatchTermsContext {
     fee_schedule: Option<PitFeeSchedule>,
     rebate_evidence: MatchMakerRebateEvidence,
     resolved: Option<PitMarketExecutionEconomics>,
+}
+
+struct TradeEvidenceInput<'a> {
+    order: &'a ExecutionOrderInfo,
+    trades: &'a BTreeMap<VenueTradeId, ClobTrade>,
+    settled_events: &'a [ExchangeEventRow],
+    exact_order_id: Option<&'a OrderId>,
+    missing_trade_count: usize,
+    now: DateTime<Utc>,
+}
+
+struct CollectedTradeEvidence {
+    evidence: Vec<ReconciliationEvidence>,
+    filled_shares: Shares,
+    avg_price: Option<Price>,
 }
 
 impl VenueEvidenceCollector {
@@ -144,6 +160,121 @@ impl VenueEvidenceCollector {
             price: None,
             fee_evidence: None,
         }
+    }
+
+    async fn token_balance_evidence(
+        &self,
+        token_id: &TokenId,
+        share_basis: ShareSettlementBasis,
+        now: DateTime<Utc>,
+    ) -> (Option<Shares>, ReconciliationEvidence) {
+        let (balance, detail) = match self.reader.token_balance(token_id).await {
+            Ok(balance) => (
+                Some(balance),
+                format!(
+                    "token_balance={balance} (absolute diagnostic); share_basis={share_basis:?}"
+                ),
+            ),
+            Err(error) => (
+                None,
+                format!(
+                    "token_balance=unavailable ({error}); diagnostic only; share_basis={share_basis:?}"
+                ),
+            ),
+        };
+        let evidence = ReconciliationEvidence {
+            kind: ReconciliationEvidenceKind::TokenBalanceDelta,
+            observed_at: now,
+            detail,
+            venue_ref: Some(token_id.to_string()),
+            shares: balance,
+            price: None,
+            fee_evidence: None,
+        };
+        (balance, evidence)
+    }
+
+    async fn collect_trade_evidence(
+        &self,
+        input: TradeEvidenceInput<'_>,
+    ) -> QuantResult<CollectedTradeEvidence> {
+        let mut evidence = Vec::with_capacity(input.trades.len().max(1));
+        let mut filled_shares = Shares::ZERO;
+        let mut filled_cost = Usd::ZERO;
+        for trade in input.trades.values() {
+            let confirmed = trade_is_final_fill(trade.status);
+            if confirmed {
+                filled_shares += trade.size;
+                filled_cost += trade.size * trade.price;
+            }
+            evidence.push(ReconciliationEvidence {
+                kind: ReconciliationEvidenceKind::ClobTrades,
+                observed_at: input.now,
+                detail: format!(
+                    "trade_id={}; status={:?}; role={:?}; matched_at={}; transaction_hash={}",
+                    trade.trade_id,
+                    trade.status,
+                    trade.trader_side,
+                    trade.matched_at,
+                    trade
+                        .transaction_hash
+                        .as_ref()
+                        .map_or("none", |hash| hash.as_str())
+                ),
+                venue_ref: Some(trade.order_id.to_string()),
+                shares: confirmed.then_some(trade.size),
+                price: confirmed.then_some(trade.price),
+                fee_evidence: if confirmed {
+                    Some(
+                        authenticated_fee_evidence(
+                            self.catalog_ledger.as_ref(),
+                            self.clob_market_info.as_ref(),
+                            input.order,
+                            trade,
+                            input.now,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                },
+            });
+            if confirmed
+                && let Some(settled) = on_chain_fee_evidence(
+                    input.order,
+                    trade,
+                    input.settled_events,
+                    &self.wallet,
+                    input.now,
+                )?
+            {
+                evidence.push(settled);
+            }
+        }
+        let avg_price = if filled_shares.is_positive() {
+            Some(Price::new(filled_cost.inner() / filled_shares.inner()))
+        } else {
+            None
+        };
+        if input.trades.is_empty() {
+            evidence.push(ReconciliationEvidence {
+                kind: ReconciliationEvidenceKind::ClobTrades,
+                observed_at: input.now,
+                detail: format!(
+                    "exact_trades=0; missing_trade_ids={}; filled_shares=0",
+                    input.missing_trade_count
+                ),
+                venue_ref: input.exact_order_id.map(ToString::to_string),
+                shares: Some(Shares::ZERO),
+                price: None,
+                fee_evidence: None,
+            });
+        }
+        Ok(CollectedTradeEvidence {
+            evidence,
+            filled_shares,
+            avg_price,
+        })
     }
 
     async fn resolve_identities(
@@ -698,6 +829,7 @@ impl EvidenceCollector for VenueEvidenceCollector {
         &self,
         order: &ExecutionOrderInfo,
         identity_refs: &ExecutionOrderIdentityRefs,
+        share_basis: ShareSettlementBasis,
         now: DateTime<Utc>,
         stale_after: Duration,
     ) -> QuantResult<CollectedReconciliation> {
@@ -738,83 +870,27 @@ impl EvidenceCollector for VenueEvidenceCollector {
 
         // 2 — only CONFIRMED trades are realized fill truth. MATCHED/MINED/
         // RETRYING keep the order pending; FAILED contributes no fill.
-        let mut filled_shares = Shares::ZERO;
-        let mut filled_cost = Usd::ZERO;
-        for trade in trades_by_id.values() {
-            let confirmed = trade_is_final_fill(trade.status);
-            if confirmed {
-                filled_shares += trade.size;
-                filled_cost += trade.size * trade.price;
-            }
-            evidence.push(ReconciliationEvidence {
-                kind: ReconciliationEvidenceKind::ClobTrades,
-                observed_at: now,
-                detail: format!(
-                    "trade_id={}; status={:?}; role={:?}; matched_at={}; transaction_hash={}",
-                    trade.trade_id,
-                    trade.status,
-                    trade.trader_side,
-                    trade.matched_at,
-                    trade
-                        .transaction_hash
-                        .as_ref()
-                        .map_or("none", |hash| hash.as_str())
-                ),
-                venue_ref: Some(trade.order_id.to_string()),
-                shares: confirmed.then_some(trade.size),
-                price: confirmed.then_some(trade.price),
-                fee_evidence: if confirmed {
-                    Some(
-                        authenticated_fee_evidence(
-                            self.catalog_ledger.as_ref(),
-                            self.clob_market_info.as_ref(),
-                            order,
-                            trade,
-                            now,
-                        )
-                        .await?,
-                    )
-                } else {
-                    None
-                },
-            });
-            if confirmed
-                && let Some(settled) =
-                    on_chain_fee_evidence(order, trade, &settled_events, &self.wallet, now)?
-            {
-                evidence.push(settled);
-            }
-        }
-        let avg_price = if filled_shares.is_positive() {
-            Some(Price::new(filled_cost.inner() / filled_shares.inner()))
-        } else {
-            None
-        };
-        if trades_by_id.is_empty() {
-            evidence.push(ReconciliationEvidence {
-                kind: ReconciliationEvidenceKind::ClobTrades,
-                observed_at: now,
-                detail: format!(
-                    "exact_trades=0; missing_trade_ids={missing_trade_count}; filled_shares=0"
-                ),
-                venue_ref: exact_order_id.as_ref().map(ToString::to_string),
-                shares: Some(Shares::ZERO),
-                price: None,
-                fee_evidence: None,
-            });
-        }
+        let trade_evidence = self
+            .collect_trade_evidence(TradeEvidenceInput {
+                order,
+                trades: &trades_by_id,
+                settled_events: &settled_events,
+                exact_order_id: exact_order_id.as_ref(),
+                missing_trade_count,
+                now,
+            })
+            .await?;
+        let filled_shares = trade_evidence.filled_shares;
+        let avg_price = trade_evidence.avg_price;
+        evidence.extend(trade_evidence.evidence);
 
-        // 3 — Token balance: absolute corroboration that shares were received.
-        let token_balance = self.reader.token_balance(token_id).await?;
-        evidence.push(ReconciliationEvidence {
-            kind: ReconciliationEvidenceKind::TokenBalanceDelta,
-            observed_at: now,
-            detail: format!("token_balance={token_balance} (absolute)"),
-            venue_ref: Some(token_id.to_string()),
-            shares: Some(token_balance),
-            price: None,
-            fee_evidence: None,
-        });
+        // 3 — Account-wide token balance is diagnostic only. Exact Confirmed
+        // trades and optional finalized OrderFilled facts prove receipt/debit;
+        // fungible balance can change through other legitimate orders.
+        let (token_balance, token_balance_evidence) = self
+            .token_balance_evidence(token_id, share_basis, now)
+            .await;
+        evidence.push(token_balance_evidence);
 
         // 4 — Account balance: absolute corroboration that collateral was spent.
         let collateral = self.reader.collateral_balance().await?;
@@ -847,7 +923,8 @@ impl EvidenceCollector for VenueEvidenceCollector {
                 presence,
                 filled_shares,
                 avg_price,
-                token_balance,
+                share_basis,
+                observed_token_balance: token_balance,
                 past_stale_deadline,
                 gtd_expired,
             },

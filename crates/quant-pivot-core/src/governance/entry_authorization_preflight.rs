@@ -14,18 +14,18 @@ use quant_pivot_models::{
     domain::{
         governance::{AuthorizationPreflightCheck, AuthorizationPreflightReport},
         ports::DataQualityPort,
-        quant::RepresentedRouteSet,
+        quant::{RepresentedRouteSet, RouteEconomicHealthIdentity},
     },
     enums::{
         execution::KillSwitchState,
-        quant::{EntryAuthorizationPolicy, ExecutionWalletKind},
+        quant::{EntryAuthorizationPolicy, ExecutionWalletKind, RouteEconomicHealthState},
     },
     runtime_config::DecisionPolicySnapshot,
     types::ModelVersionId,
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ModelRegistryRepository, ReconciliationRepository,
-    ShadowComparisonRepository,
+    RouteEconomicHealthRepository, ShadowComparisonRepository,
 };
 use rust_decimal::Decimal;
 
@@ -59,6 +59,7 @@ pub struct AuthorizationPreflightDeps {
     pub data_quality: Arc<dyn DataQualityPort>,
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     pub shadow_comparison: Arc<dyn ShadowComparisonRepository>,
+    pub economic_health: Arc<dyn RouteEconomicHealthRepository>,
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub runtime_controls: RuntimeControlsHandle,
@@ -108,9 +109,77 @@ impl AuthorizationPreflight for DefaultAuthorizationPreflight {
             checks.push(self.check_kill_switch_closed());
             checks.push(Self::check_capital_budget(&config));
             checks.push(self.check_exit_monitor(now));
+            checks.push(self.check_economic_health(&config, now).await?);
         }
 
         Ok(AuthorizationPreflightReport::new(target, checks))
+    }
+}
+
+impl DefaultAuthorizationPreflight {
+    async fn check_economic_health(
+        &self,
+        config: &DecisionPolicySnapshot,
+        now: DateTime<Utc>,
+    ) -> QuantResult<AuthorizationPreflightCheck> {
+        let mut failures = Vec::new();
+        for (route, binding) in &config.model_routing.model.buy_routes {
+            let Some(model) = self
+                .deps
+                .model_registry
+                .find_model_version(&binding.champion.model_version_id)
+                .await?
+            else {
+                failures.push(format!("{}:model_missing", route.as_str()));
+                continue;
+            };
+            let Some(trade_policy_artifact_id) = model.trade_policy_artifact_id else {
+                failures.push(format!("{}:policy_missing", route.as_str()));
+                continue;
+            };
+            let profile = model
+                .profile_ref
+                .resolve_builtin_research_profile()
+                .map_err(QuantError::config)?;
+            let identity = RouteEconomicHealthIdentity {
+                route: *route,
+                research_profile_artifact_id: model.profile_ref.artifact_id(),
+                model_version_id: model.model_version_id,
+                trade_policy_artifact_id,
+            };
+            let identity_hash = identity.content_hash().map_err(QuantError::config)?;
+            let health = self
+                .deps
+                .economic_health
+                .latest(&identity_hash, &identity.research_profile_artifact_id, now)
+                .await?;
+            let freshness = Duration::seconds(
+                i64::try_from(profile.spec.feedback_policy.feedback_cadence_secs).map_err(
+                    |error| QuantError::config(format!("economic health freshness: {error}")),
+                )?,
+            );
+            match health {
+                Some(health)
+                    if health.state == RouteEconomicHealthState::Healthy
+                        && now - health.assessed_through <= freshness => {}
+                Some(health) => failures.push(format!(
+                    "{}:{}:stale={}",
+                    route.as_str(),
+                    health.state.as_str(),
+                    now - health.assessed_through > freshness
+                )),
+                None => failures.push(format!("{}:missing", route.as_str())),
+            }
+        }
+        Ok(AuthorizationPreflightCheck::hard(
+            "route_economic_health_fresh",
+            failures.is_empty() && !config.model_routing.model.buy_routes.is_empty(),
+            if failures.is_empty() {
+                "all active Buy Routes have fresh Healthy economic evidence".to_owned()
+            } else {
+                failures.join(",")
+            },
+        ))
     }
 }
 

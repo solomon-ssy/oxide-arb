@@ -588,6 +588,7 @@ impl DescriptorCollector {
                 OperationsPolicy,
                 "/entry_condition/lease_duration_secs"
                 | "/entry_condition/lease_renew_interval_secs"
+                | "/outcome_reconciliation/economic_source_lateness_secs"
                 | "/outcome_reconciliation/sweep_secs",
             )
             | (ExecutionAuthorizationPolicy, "/operator_approval_ttl_secs") => Some(Seconds),

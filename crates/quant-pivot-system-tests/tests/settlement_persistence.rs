@@ -130,7 +130,7 @@ use quant_pivot_system_tests::{
         catalog_fixtures::{make_event, make_market},
         execution_pg_seed::{
             ENTRY_FILLED_SHARES, enable_test_admission, fill_entry_lot, partial_exit_lot,
-            seed_approved_intent, seed_settlement_report_fixture,
+            seed_approved_intent, seed_intent_account_fees, seed_settlement_report_fixture,
         },
     },
 };
@@ -317,7 +317,7 @@ async fn settlement_discovery_scenario() {
         observed_at,
         discovered,
         original_digest,
-    } = prepare_discovery_scenario(&db).await;
+    } = Box::pin(prepare_discovery_scenario(&db)).await;
     assert_execution_scope_quiescence(
         &db,
         repository.as_ref(),
@@ -608,7 +608,7 @@ async fn settlement_orchestration_scenario() {
 
     let operator_policy = Box::pin(service.run_once(now))
         .await
-        .expect("report-only pass is read-only");
+        .expect("disabled-settlement-policy pass is read-only");
     assert!(matches!(
         operator_policy,
         SettlementPassOutcome::NewSubmissionBlocked { .. }
@@ -624,7 +624,7 @@ async fn settlement_orchestration_scenario() {
     let authorization_started_at = now + TimeDelta::seconds(6);
     let pending = Box::pin(service.run_once(authorization_started_at))
         .await
-        .expect("semi-auto stages exact authorization without signing");
+        .expect("operator-approval policy stages exact authorization without signing");
     let SettlementPassOutcome::AuthorizationPending { digest, .. } = pending else {
         panic!("expected authorization challenge");
     };
@@ -1127,6 +1127,7 @@ async fn prepare_confirmation_fixture_shape(
         )
         .await;
     }
+    seed_intent_account_fees(db, &intent_id).await;
     let observed_at = db.statement_time().await;
     let (raw_balance, redeem_shares, payout_usd) = match shape {
         ConfirmationFixtureShape::ResolutionOnly => (

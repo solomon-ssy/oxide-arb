@@ -1,6 +1,9 @@
 //! Durable recommendation-level entry-condition evaluation worker.
 
-use std::{future::pending, slice, sync::Arc, time::Duration as StdDuration};
+use std::{
+    cmp::Ordering, collections::BTreeMap, future::pending, slice, sync::Arc,
+    time::Duration as StdDuration,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -10,8 +13,13 @@ use quant_pivot_error::{
     storage::{StorageError, entity::QUANT_FACTOR},
 };
 use quant_pivot_models::{
+    clickhouse::CryptoPriceReportRow,
     domain::{
-        quant::{ApplyEntryConditionEvaluation, EntryConditionInstanceInfo, MarketLinkageInfo},
+        data_plane::{CryptoCheckpointKey, CryptoPriceReport},
+        quant::{
+            ApplyEntryConditionEvaluation, CryptoPriceProjectionInfo, EntryConditionInstanceInfo,
+            MarketLinkageInfo,
+        },
         runtime::{CoreEvent, CoreEventPublisher, EntryConditionLifecycleEvent},
     },
     enums::domain::LinkageStatus,
@@ -22,16 +30,16 @@ use quant_pivot_models::{
         CryptoSubjectPredicateEntered, EntryConditionArtifactV1, EntryConditionBinding,
         EntryConditionInputSet, EntryConditionSourceBinding, EntryConditionV1,
         ExecutablePriceInput, FactorCondition, FactorSnapshotInput, MarketEventCondition, MarketId,
-        ModelVersionId, TokenId, Usd, WeatherDailyTemperatureInput, WeatherTemperatureStatistic,
+        ModelVersionId, TokenId, WeatherDailyTemperatureInput, WeatherTemperatureStatistic,
         WorkerId,
     },
 };
 use quant_pivot_repository::traits::{
-    EntryConditionRepository, FactorRepository, MarketLinkageRepository, MarketSelectionRepository,
-    ModelRegistryRepository, PolicyRepository, QuantFactReadRepository, RecommendationRepository,
+    CryptoReportFrontierQuery, CryptoReportsAvailableQuery, EntryConditionRepository,
+    FactorRepository, MarketLinkageRepository, MarketSelectionRepository, ModelRegistryRepository,
+    PolicyRepository, QuantFactReadRepository, RecommendationRepository,
 };
 use quant_pivot_storage::postgres::PostgresNotificationListener;
-use rust_decimal::Decimal;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -82,6 +90,91 @@ pub struct LiveEntryConditionInputDeps {
 }
 
 impl LiveEntryConditionInputProvider {
+    fn committed_crypto_row(
+        row: &CryptoPriceReportRow,
+        projection: &CryptoPriceProjectionInfo,
+        gap_generation: u64,
+        seen: &mut BTreeMap<CryptoCheckpointKey, ContentHash>,
+    ) -> QuantResult<Option<CryptoPriceReportInput>> {
+        if row.source_id != projection.source_id || row.instrument_key != projection.instrument_key
+        {
+            return Err(StorageError::invariant_violation(
+                Some("quant_crypto_price_report"),
+                "Crypto fact escaped its committed source/instrument binding",
+            )
+            .into());
+        }
+        if row.gap_generation != gap_generation {
+            return Ok(None);
+        }
+        let report = CryptoPriceReport::try_from_clickhouse_row(row).map_err(|error| {
+            StorageError::invariant_violation(
+                Some("quant_crypto_price_report"),
+                format!("persisted Crypto report failed structural validation: {error}"),
+            )
+        })?;
+        let checkpoint = report.checkpoint().map_err(|error| {
+            StorageError::invariant_violation(
+                Some("quant_crypto_price_report"),
+                format!("persisted Crypto report has no valid checkpoint: {error}"),
+            )
+        })?;
+        match projection
+            .committed_checkpoint
+            .compare_crypto(&checkpoint)
+            .map_err(|error| {
+                StorageError::invariant_violation(
+                    Some("quant_crypto_price_report"),
+                    format!("Crypto fact checkpoint type diverged: {error}"),
+                )
+            })? {
+            Ordering::Greater => return Ok(None),
+            Ordering::Equal => {
+                if report.report_hash != projection.report_hash {
+                    return Err(StorageError::state_conflict(
+                        "quant_crypto_price_report",
+                        Some(projection.instrument_key.to_string()),
+                        "Crypto source equivocated at the committed checkpoint",
+                    )
+                    .into());
+                }
+                let checkpoint_hash =
+                    CanonicalDigest::content_hash_json(&checkpoint).map_err(QuantError::from)?;
+                if checkpoint_hash != projection.committed_checkpoint_hash {
+                    return Err(StorageError::invariant_violation(
+                        Some("quant_crypto_price_report"),
+                        "equal Crypto checkpoint differs from the committed checkpoint hash",
+                    )
+                    .into());
+                }
+            }
+            Ordering::Less => {}
+        }
+        let order_key = checkpoint.crypto_order_key().map_err(|error| {
+            StorageError::invariant_violation(
+                Some("quant_crypto_price_report"),
+                format!("Crypto fact has no source-native order key: {error}"),
+            )
+        })?;
+        if let Some(existing_hash) = seen.insert(order_key, report.report_hash)
+            && existing_hash != report.report_hash
+        {
+            return Err(StorageError::state_conflict(
+                "quant_crypto_price_report",
+                Some(projection.instrument_key.to_string()),
+                "Crypto source equivocated within the committed generation",
+            )
+            .into());
+        }
+        Ok(Some(CryptoPriceReportInput {
+            source_sequence: report.source_sequence,
+            price: report.price,
+            event_at: report.event_time,
+            available_at: report.available_at,
+            report_hash: report.report_hash,
+        }))
+    }
+
     #[must_use]
     pub fn new(deps: LiveEntryConditionInputDeps) -> Self {
         Self {
@@ -177,7 +270,7 @@ impl LiveEntryConditionInputProvider {
             || current_runtime_config.as_ref().is_none_or(|config| {
                 config.decision_policy_snapshot_id != expected.decision_policy_snapshot_id
             })
-            || !runtime_model_is_active(&self.runtime_config, &expected.model_version_id)
+            || !model_is_active(&self.runtime_config, &expected.model_version_id)
         {
             Some(ConditionUnavailableReason::BindingDrift)
         } else if factors.len() != expected.factor_bindings.len()
@@ -309,9 +402,45 @@ impl LiveEntryConditionInputProvider {
             else {
                 continue;
             };
-            let Ok(gap_generation) = u64::try_from(projection.gap_generation) else {
-                continue;
-            };
+            let gap_generation = u64::try_from(projection.gap_generation).map_err(|error| {
+                StorageError::invariant_violation(
+                    Some("quant_crypto_price_projection"),
+                    format!("stored crypto gap generation is invalid: {error}"),
+                )
+            })?;
+            let committed_checkpoint_hash =
+                CanonicalDigest::content_hash_json(&projection.committed_checkpoint)
+                    .map_err(QuantError::from)?;
+            if committed_checkpoint_hash != projection.committed_checkpoint_hash {
+                return Err(StorageError::invariant_violation(
+                    Some("quant_crypto_price_projection"),
+                    "committed Crypto checkpoint hash differs from its content",
+                )
+                .into());
+            }
+            projection
+                .committed_checkpoint
+                .validate_crypto_head(
+                    &projection.source_id,
+                    projection.source_sequence,
+                    projection.event_time,
+                    projection.report_hash,
+                )
+                .map_err(|error| {
+                    StorageError::invariant_violation(
+                        Some("quant_crypto_price_projection"),
+                        format!("committed Crypto projection frontier is invalid: {error}"),
+                    )
+                })?;
+            let (committed_source_sequence, committed_published_at_ms) = projection
+                .committed_checkpoint
+                .crypto_query_frontier()
+                .map_err(|error| {
+                    StorageError::invariant_violation(
+                        Some("quant_crypto_price_projection"),
+                        format!("committed Crypto query frontier is invalid: {error}"),
+                    )
+                })?;
             let prior = instance
                 .fold_state_json
                 .crypto
@@ -329,38 +458,42 @@ impl LiveEntryConditionInputProvider {
                 })?;
             let mut rows = self
                 .facts
-                .crypto_reports_between(
-                    vec![condition.source.instrument_key.clone()],
-                    from,
-                    to,
-                    evaluated_at.timestamp_millis(),
-                )
+                .crypto_reports_between(CryptoReportsAvailableQuery {
+                    source_id: condition.source.source_id.clone(),
+                    instrument_key: condition.source.instrument_key.clone(),
+                    gap_generation,
+                    committed_source_sequence,
+                    committed_published_at_ms,
+                    available_from_ms: from,
+                    available_to_ms: to,
+                    decision_at_ms: evaluated_at.timestamp_millis(),
+                })
                 .await?;
-            rows.retain(|row| {
-                row.source_id == condition.source.source_id
-                    && row.instrument_key == condition.source.instrument_key
-            });
-            if prior.is_none()
-                && let Some(baseline) = self
-                    .facts
-                    .crypto_price_report_at(
-                        &condition.source.source_id,
-                        &condition.source.instrument_key,
-                        instance.created_at.timestamp_millis(),
-                        instance.created_at.timestamp_millis(),
-                    )
-                    .await?
-            {
-                rows.push(baseline);
+            if prior.is_none() {
+                rows.extend(
+                    self.facts
+                        .crypto_price_reports_at(CryptoReportFrontierQuery {
+                            source_id: condition.source.source_id.clone(),
+                            instrument_key: condition.source.instrument_key.clone(),
+                            gap_generation,
+                            committed_source_sequence,
+                            committed_published_at_ms,
+                            source_timestamp_ms: instance.created_at.timestamp_millis(),
+                            decision_at_ms: instance.created_at.timestamp_millis(),
+                        })
+                        .await?,
+                );
             }
             rows.sort_by(|left, right| {
                 (
+                    left.gap_generation,
                     left.available_at,
                     left.event_time,
                     left.source_sequence,
                     &left.report_hash,
                 )
                     .cmp(&(
+                        right.gap_generation,
                         right.available_at,
                         right.event_time,
                         right.source_sequence,
@@ -368,20 +501,24 @@ impl LiveEntryConditionInputProvider {
                     ))
             });
             rows.dedup_by(|left, right| {
-                left.source_sequence == right.source_sequence
+                left.gap_generation == right.gap_generation
+                    && left.source_sequence == right.source_sequence
                     && left.report_hash == right.report_hash
             });
+            let mut seen_checkpoints = BTreeMap::new();
             let reports = rows
                 .into_iter()
-                .filter_map(|row| {
-                    Some(CryptoPriceReportInput {
-                        source_sequence: row.source_sequence,
-                        price: Usd::new(Decimal::from(row.price)),
-                        event_at: DateTime::from_timestamp_millis(row.event_time)?,
-                        available_at: DateTime::from_timestamp_millis(row.available_at)?,
-                        report_hash: row.report_hash,
-                    })
+                .map(|row| {
+                    Self::committed_crypto_row(
+                        &row,
+                        &projection,
+                        gap_generation,
+                        &mut seen_checkpoints,
+                    )
                 })
+                .collect::<QuantResult<Vec<_>>>()?
+                .into_iter()
+                .flatten()
                 .collect();
             inputs.push(CryptoPriceInput {
                 source: condition.source,
@@ -412,12 +549,18 @@ impl LiveEntryConditionInputProvider {
             else {
                 continue;
             };
-            let (Ok(revision), Ok(gap_generation)) = (
-                u64::try_from(projection.revision),
-                u64::try_from(projection.gap_generation),
-            ) else {
-                continue;
-            };
+            let revision = u64::try_from(projection.revision).map_err(|error| {
+                StorageError::invariant_violation(
+                    Some("quant_weather_daily_temperature_projection"),
+                    format!("stored weather projection revision is invalid: {error}"),
+                )
+            })?;
+            let gap_generation = u64::try_from(projection.gap_generation).map_err(|error| {
+                StorageError::invariant_violation(
+                    Some("quant_weather_daily_temperature_projection"),
+                    format!("stored weather gap generation is invalid: {error}"),
+                )
+            })?;
             inputs.push(WeatherDailyTemperatureInput {
                 source: EntryConditionSourceBinding {
                     source_id: projection.source_id,
@@ -481,10 +624,7 @@ struct ResolvedBinding {
     unavailable_reason: Option<ConditionUnavailableReason>,
 }
 
-fn runtime_model_is_active(
-    runtime_config: &DecisionPolicyStore,
-    expected: &ModelVersionId,
-) -> bool {
+fn model_is_active(runtime_config: &DecisionPolicyStore, expected: &ModelVersionId) -> bool {
     let config = runtime_config.load();
     config
         .model_routing
@@ -931,4 +1071,172 @@ fn chrono_duration_millis(value: u64, field: &str) -> QuantResult<Duration> {
     let value = i64::try_from(value)
         .map_err(|error| QuantError::config(format!("{field} does not fit i64: {error}")))?;
     Ok(Duration::milliseconds(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_models::{
+        clickhouse::{ChDecimal64, ChSchemaVersion, CryptoPriceReportRow},
+        domain::{data_plane::DomainSourceCheckpoint, quant::CryptoPriceProjectionInfo},
+        hashing::CanonicalDigest,
+        types::{ContentHash, DomainInstrumentKey, DomainSourceId, Usd},
+    };
+    use rust_decimal_macros::dec;
+
+    use super::LiveEntryConditionInputProvider;
+
+    #[test]
+    fn committed_prefix_filters_orphans() {
+        let projection = projection();
+        let mut seen = BTreeMap::new();
+        let prior = row(1, 1, 'a');
+        let committed = row(2, 2, 'b');
+        let ack_only = row(2, 3, 'c');
+        let future_generation = row(3, 4, 'd');
+
+        assert!(
+            LiveEntryConditionInputProvider::committed_crypto_row(
+                &prior,
+                &projection,
+                2,
+                &mut seen,
+            )
+            .expect("prior generation")
+            .is_none()
+        );
+        assert!(
+            LiveEntryConditionInputProvider::committed_crypto_row(
+                &committed,
+                &projection,
+                2,
+                &mut seen,
+            )
+            .expect("committed row")
+            .is_some()
+        );
+        assert!(
+            LiveEntryConditionInputProvider::committed_crypto_row(
+                &ack_only,
+                &projection,
+                2,
+                &mut seen,
+            )
+            .expect("ACK-only row")
+            .is_none()
+        );
+        assert!(
+            LiveEntryConditionInputProvider::committed_crypto_row(
+                &future_generation,
+                &projection,
+                2,
+                &mut seen,
+            )
+            .expect("future generation")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn equal_checkpoint_equivocates() {
+        let projection = projection();
+        let mut seen = BTreeMap::new();
+        let first = row(2, 1, 'a');
+        let equivocation = row(2, 1, 'e');
+        assert!(
+            LiveEntryConditionInputProvider::committed_crypto_row(
+                &first,
+                &projection,
+                2,
+                &mut seen,
+            )
+            .expect("first checkpoint")
+            .is_some()
+        );
+        assert!(
+            LiveEntryConditionInputProvider::committed_crypto_row(
+                &equivocation,
+                &projection,
+                2,
+                &mut seen,
+            )
+            .is_err()
+        );
+        let mut frontier_seen = BTreeMap::new();
+        assert!(
+            LiveEntryConditionInputProvider::committed_crypto_row(
+                &row(2, 2, 'f'),
+                &projection,
+                2,
+                &mut frontier_seen,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn invalid_crypto_time_fails() {
+        let projection = projection();
+        let mut invalid = row(2, 1, 'a');
+        invalid.event_time = i64::MAX;
+        let mut seen = BTreeMap::new();
+        assert!(
+            LiveEntryConditionInputProvider::committed_crypto_row(
+                &invalid,
+                &projection,
+                2,
+                &mut seen,
+            )
+            .is_err()
+        );
+    }
+
+    fn projection() -> CryptoPriceProjectionInfo {
+        let event_time = Utc.timestamp_millis_opt(2_000).single().expect("time");
+        let committed_checkpoint = DomainSourceCheckpoint::BinanceAggTrade {
+            aggregate_trade_id: 2,
+            event_time,
+        };
+        CryptoPriceProjectionInfo {
+            source_id: DomainSourceId::binance_agg_trade(),
+            instrument_key: DomainInstrumentKey::new("BINANCE_AGG_TRADE:BTCUSDT"),
+            previous_price: Some(Usd::new(dec!(49_999))),
+            current_price: Usd::new(dec!(50_000)),
+            source_sequence: 2,
+            event_time,
+            available_at: event_time,
+            report_hash: hash('b'),
+            gap_generation: 2,
+            source_healthy: true,
+            committed_checkpoint_hash: CanonicalDigest::content_hash_json(&committed_checkpoint)
+                .expect("checkpoint hash"),
+            committed_checkpoint,
+        }
+    }
+
+    fn row(gap_generation: u64, source_sequence: u64, seed: char) -> CryptoPriceReportRow {
+        CryptoPriceReportRow {
+            source_id: DomainSourceId::binance_agg_trade(),
+            instrument_key: DomainInstrumentKey::new("BINANCE_AGG_TRADE:BTCUSDT"),
+            gap_generation,
+            source_sequence,
+            price: ChDecimal64::from(dec!(50_000)),
+            quantity: None,
+            event_time: i64::try_from(source_sequence).expect("sequence") * 1_000,
+            published_at: i64::try_from(source_sequence).expect("sequence") * 1_000,
+            available_at: i64::try_from(source_sequence).expect("sequence") * 1_000,
+            valid_from: None,
+            observations_timestamp: None,
+            expires_at: None,
+            report_hash: hash(seed),
+            raw_report: seed.to_string(),
+            schema_version: ChSchemaVersion::FIRST,
+        }
+    }
+
+    fn hash(seed: char) -> ContentHash {
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    }
 }

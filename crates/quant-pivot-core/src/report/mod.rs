@@ -10,9 +10,10 @@ mod lifecycle;
 mod publisher;
 mod readiness;
 mod types;
+pub mod universe;
 
 pub use builder::{DefaultReportBuilder, ReportBuilder, ReportBuilderDeps};
-pub use composer::{DefaultRecommendationComposer, RecommendationComposer};
+pub use composer::{ComposeReportInput, DefaultRecommendationComposer, RecommendationComposer};
 pub use coordinator::{ReportCoordinator, ReportCoordinatorConfig};
 pub use fact_delivery::{ReportFactDeliveryDeps, ReportFactDeliveryWorker};
 pub use lifecycle::{

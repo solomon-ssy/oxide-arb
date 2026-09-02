@@ -23,14 +23,17 @@ use quant_pivot_models::{
     },
     config::FeatureParityComputeConfig,
     domain::{
-        data_plane::{DecisionBoundary, DecisionClock, DecisionSource, ExchangeHistoryFrontier},
+        data_plane::{
+            DecisionBoundary, DecisionClock, DecisionSource, ExchangeHistoryFrontier,
+            HistorySealChunkRef, HistoryServingHeadSeal,
+        },
         quant::{
             FactorValueInfo, FeatureParityRunInfo, FeatureVectorInfo, FrozenFeatureParitySubject,
             FrozenFeatureParitySubjectId, MarketSelectionInfo, MarketSelectionMemberInfo,
             ModelRunInfo, ModelRunParityEvidence, ModelVersionInfo, RecommendationReportInfo,
             ReportDataQualitySnapshotInfo, ReportRouteRunInfo, ReportRunInfo, RepresentedRouteSet,
-            parity_candidate_membership_hash, parity_selection_hash, report_parity_evidence_hash,
-            report_parity_generation_hash,
+            RouteHistoryLineage, RouteModelLineage, parity_candidate_membership_hash,
+            parity_selection_hash, report_parity_evidence_hash, report_parity_generation_hash,
         },
     },
     enums::{
@@ -44,9 +47,10 @@ use quant_pivot_models::{
     runtime_config::{BuyModelRoute, DecisionPolicySnapshot},
     types::{
         ContentHash, DecisionCaptureEvidence, DecisionPolicySnapshotId, FeatureParityDetailSource,
-        FeatureVectorId, FinalizedExecutionEvidence, MarketId, MarketSelectionId, ModelRunId,
-        ModelVersionId, RecommendationReportId, SelectionExclusionSummary, SelectorHashEvidence,
-        SelectorParityEvidence, Usd, factor::FactorServingPlane, stable_name::FeatureName,
+        FeatureVectorId, FinalizedExecutionEvidence, HistoryServingHeadSealId, MarketId,
+        MarketSelectionId, ModelRunId, ModelVersionId, RecommendationReportId,
+        SelectionExclusionSummary, SelectorHashEvidence, SelectorParityEvidence, Usd,
+        factor::FactorServingPlane, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -69,7 +73,7 @@ use quant_pivot_research::{
     },
     selection::{
         ConfiguredMarketSelector, MarketSelectionBuildRequest, MarketSelectionSnapshot,
-        MarketSelector, ModelFeatureRequirements, SelectedMarket,
+        MarketSelector, ModelFeatureRequirements, RouteAvailabilityContract, SelectedMarket,
     },
 };
 use serde::Serialize;
@@ -80,16 +84,19 @@ use crate::{
     observability::serving_evidence::{ModelInputEvidenceBatch, verify_completion},
     pit::platform::ch_historical::DurablePitSource,
     prefetch::{
-        historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec},
-        market_candidates::{DecisionSnapshotSource, MarketCandidateProvider},
+        historical_window::{
+            HistoricalWindowLoader, ReplaySample, WindowSpec, historical_window_from_prefetched,
+        },
+        market_candidates::MarketCandidateProvider,
     },
     projection::inference_batch::build_runtime_input,
+    report::universe::{ReportUniverseContract, ReportUniverseRoute},
     service::{
         bias_table_fit::resolve_frozen_bias_table,
         feature_parity_executor::{
             FeatureParityCandidate, FeatureParityComparison, FeatureParityEvidence,
-            FeatureParityReplayAttempt, FeatureParityReplaySource, FeatureParitySubject,
-            PendingFeatureParityComparison,
+            FeatureParityInputWitness, FeatureParityReplayAttempt, FeatureParityReplaySource,
+            FeatureParitySubject, PendingFeatureParityComparison,
         },
         historical_replay::{
             CrossSectionRequest, ReplayCaptureKey, ReplayConfig, ReplayCrossSection,
@@ -98,6 +105,7 @@ use crate::{
         model_serving_generation::{
             ModelServingGenerationRequest, ModelServingGenerationStore, ModelServingRouteSnapshot,
         },
+        report_boundary::ReportBoundaryEvidence,
     },
 };
 /// Process-lifetime dependencies of the production parity source.
@@ -127,8 +135,51 @@ pub struct DurableFeatureParityDeps {
 #[derive(Clone)]
 pub struct DurableFeatureParitySource {
     deps: DurableFeatureParityDeps,
-    compute_memory: OfflineMemory,
-    compute_slots: Arc<Semaphore>,
+    compute_boundary: ParityComputeBoundary,
+}
+
+#[derive(Clone)]
+struct ParityComputeBoundary {
+    executor: Arc<ComputeExecutor>,
+    memory: OfflineMemory,
+    slots: Arc<Semaphore>,
+}
+
+impl ParityComputeBoundary {
+    fn new(executor: Arc<ComputeExecutor>, memory: OfflineMemory, concurrency: usize) -> Self {
+        Self {
+            executor,
+            memory,
+            slots: Arc::new(Semaphore::new(concurrency)),
+        }
+    }
+
+    async fn run<T, F>(&self, cancel: &CancellationToken, work: F) -> QuantResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QuantResult<T> + Send + 'static,
+    {
+        let permit = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Err(ResearchError::Cancelled {
+                    detail: "cancelled while waiting for feature parity compute capacity".to_owned(),
+                }
+                .into());
+            }
+            permit = Arc::clone(&self.slots).acquire_owned() => {
+                permit.map_err(|_| InfraError::ComputeExecution {
+                    detail: "feature parity compute semaphore closed".to_owned(),
+                })?
+            }
+        };
+        self.executor
+            .run_offline_cancellable(self.memory, cancel, move || {
+                let _permit = permit;
+                work()
+            })
+            .await
+    }
 }
 
 struct DurableReplayEvidence {
@@ -138,6 +189,7 @@ struct DurableReplayEvidence {
     info_by_id: HashMap<FeatureVectorId, FeatureVectorInfo>,
 }
 
+#[derive(Clone)]
 struct ReplayRunContext {
     model_version_id: ModelVersionId,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
@@ -145,21 +197,95 @@ struct ReplayRunContext {
     config: DecisionPolicySnapshot,
     boundary: DecisionBoundary,
     report_id: Option<RecommendationReportId>,
+    history: Option<RouteHistoryLineage>,
     represented_routes: Option<RepresentedRouteSet>,
+    report_selector: Option<ReportSelectorBinding>,
     selection: MarketSelectionInfo,
     members: Vec<MarketSelectionMemberInfo>,
     samples: Vec<ReplaySample>,
     finalized_execution_evidences: HashMap<MarketId, FinalizedExecutionEvidence>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReplayHistoryMode {
+    NotRequired,
+    RuntimeDisabled,
+    RuntimeEnabled {
+        accepted_through_block: u64,
+        accepted_through_at: DateTime<Utc>,
+    },
+    Materialized {
+        available_by: DateTime<Utc>,
+    },
+}
+
+struct ReplayHistoryWindow {
+    chunks: Vec<HistorySealChunkRef>,
+    load_execution_history: bool,
+    materialized_available_by: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone)]
 struct ReportReplayContext {
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     snapshot_hash: ContentHash,
     config: DecisionPolicySnapshot,
     boundary: DecisionBoundary,
     represented_routes: RepresentedRouteSet,
+    selector_binding: ReportSelectorBinding,
     selection: MarketSelectionInfo,
     members: Vec<MarketSelectionMemberInfo>,
+}
+
+#[derive(Clone)]
+enum ReportSelectorBinding {
+    Runtime {
+        serving_head_seal_id: HistoryServingHeadSealId,
+        serving_head_seal_hash: ContentHash,
+        universe_plan_hash: ContentHash,
+    },
+    Materialized,
+}
+
+impl ReportSelectorBinding {
+    const fn new(history: &RouteHistoryLineage, universe_plan_hash: ContentHash) -> Self {
+        match history {
+            RouteHistoryLineage::Runtime {
+                serving_head_seal_id,
+                serving_head_seal_hash,
+            } => Self::Runtime {
+                serving_head_seal_id: *serving_head_seal_id,
+                serving_head_seal_hash: *serving_head_seal_hash,
+                universe_plan_hash,
+            },
+            RouteHistoryLineage::Materialized { .. } => Self::Materialized,
+        }
+    }
+
+    fn verify_universe(
+        &self,
+        contract: ReportUniverseContract,
+    ) -> QuantResult<ReplaySelectionContract> {
+        if !matches!(
+            self,
+            Self::Runtime { universe_plan_hash, .. }
+                if *universe_plan_hash == contract.availability.universe_plan_hash
+        ) {
+            return Err(determinism(
+                "report selector universe differs from its frozen all-active-route lineage"
+                    .to_owned(),
+            ));
+        }
+        Ok(ReplaySelectionContract {
+            model_requirements: contract.requirements,
+            route_availability: Some(contract.availability),
+        })
+    }
+}
+
+struct ReplaySelectionContract {
+    model_requirements: ModelFeatureRequirements,
+    route_availability: Option<RouteAvailabilityContract>,
 }
 
 struct MaterializedRunReplay {
@@ -176,7 +302,6 @@ struct MaterializedSelectionReplay {
     factor_engine: FactorEngine,
     bias_table_hash: Option<ContentHash>,
     selection: MarketSelectionSnapshot,
-    snapshot_source: Arc<DecisionSnapshotSource>,
     replay_config: ReplayConfig,
     required_features: Vec<FeatureName>,
     serving: ModelServingRouteSnapshot,
@@ -193,6 +318,27 @@ struct ModelRouteReplayRequest<'a> {
     factor_engine: &'a FactorEngine,
     bias_table_hash: Option<ContentHash>,
     serving: &'a ModelServingRouteSnapshot,
+    cancel: &'a CancellationToken,
+}
+
+struct ReplayRunInput<'a> {
+    candidate: &'a FeatureParityCandidate,
+    run: &'a ModelRunInfo,
+    completion: &'a QuantServingEvidenceCompletionRow,
+    online_inputs: &'a [QuantModelInputEventRow],
+    online_features: &'a HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
+    feature_infos: &'a HashMap<FeatureVectorId, FeatureVectorInfo>,
+    cancel: &'a CancellationToken,
+}
+
+struct FinalRunComparisonInput {
+    candidate: FeatureParityCandidate,
+    run: ModelRunInfo,
+    context: ReplayRunContext,
+    online_inputs: Vec<QuantModelInputEventRow>,
+    replay: ReplayedModelOutput,
+    online_factors: Box<[FactorValueInfo]>,
+    comparisons: Vec<FeatureParityComparison>,
 }
 
 struct ModelRouteInputs {
@@ -250,17 +396,88 @@ impl DurableFeatureParitySource {
                 detail: format!("feature parity working-set bytes do not fit usize: {error}"),
             }
         })?;
+        let compute_boundary = ParityComputeBoundary::new(
+            Arc::clone(&deps.compute),
+            OfflineMemory::try_bytes(working_set)?,
+            budget.max_concurrency,
+        );
         Ok(Self {
-            compute_memory: OfflineMemory::try_bytes(working_set)?,
-            compute_slots: Arc::new(Semaphore::new(budget.max_concurrency)),
             deps,
+            compute_boundary,
         })
+    }
+
+    fn require_active(cancel: &CancellationToken) -> QuantResult<()> {
+        if cancel.is_cancelled() {
+            return Err(ResearchError::Cancelled {
+                detail: "feature parity replay cancelled inside a compute kernel".to_owned(),
+            }
+            .into());
+        }
+        Ok(())
     }
 }
 
 #[async_trait]
 impl FeatureParityReplaySource for DurableFeatureParitySource {
     async fn list_candidates(
+        &self,
+        run: &FeatureParityRunInfo,
+        cancel: &CancellationToken,
+    ) -> QuantResult<Vec<FeatureParityCandidate>> {
+        let bounded_cancel = cancel.child_token();
+        let discovery = async {
+            let candidates = self.candidate_pool(run).await?;
+            self.qualify_candidates(run, candidates, &bounded_cancel)
+                .await
+        };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                bounded_cancel.cancel();
+                Err(ResearchError::Cancelled {
+                    detail: "feature parity discovery cancelled".to_owned(),
+                }.into())
+            }
+            result = tokio::time::timeout(
+                Duration::from_secs(self.deps.compute_budget.deadline_secs), Box::pin(discovery),
+            ) => result.unwrap_or_else(|_| {
+                bounded_cancel.cancel();
+                Err(ResearchError::ComputeDeadlineExceeded {
+                    operation: "feature_parity_discovery",
+                    deadline_secs: self.deps.compute_budget.deadline_secs,
+                }.into())
+            }),
+        }
+    }
+
+    async fn replay(
+        &self,
+        _parity_run: &FeatureParityRunInfo,
+        candidates: &[FeatureParityCandidate],
+        cancel: &CancellationToken,
+    ) -> QuantResult<FeatureParityReplayAttempt> {
+        validate_witness_states(candidates)?;
+        let bounded_cancel = cancel.child_token();
+        let replay = Box::pin(self.replay_pages(candidates, &bounded_cancel));
+        Box::pin(tokio::time::timeout(
+            Duration::from_secs(self.deps.compute_budget.deadline_secs),
+            replay,
+        ))
+        .await
+        .unwrap_or_else(|_| {
+            bounded_cancel.cancel();
+            Err(ResearchError::ComputeDeadlineExceeded {
+                operation: "feature_parity_replay",
+                deadline_secs: self.deps.compute_budget.deadline_secs,
+            }
+            .into())
+        })
+    }
+}
+
+impl DurableFeatureParitySource {
+    async fn candidate_pool(
         &self,
         run: &FeatureParityRunInfo,
     ) -> QuantResult<Vec<FeatureParityCandidate>> {
@@ -288,78 +505,135 @@ impl FeatureParityReplaySource for DurableFeatureParitySource {
         Ok(candidates)
     }
 
-    async fn replay(
+    async fn qualify_candidates(
         &self,
-        parity_run: &FeatureParityRunInfo,
-        candidates: &[FeatureParityCandidate],
+        run: &FeatureParityRunInfo,
+        mut candidates: Vec<FeatureParityCandidate>,
         cancel: &CancellationToken,
-    ) -> QuantResult<FeatureParityReplayAttempt> {
-        let bounded_cancel = cancel.child_token();
-        let replay = self.replay_governed(parity_run, candidates, &bounded_cancel);
-        tokio::time::timeout(
-            Duration::from_secs(self.deps.compute_budget.deadline_secs),
-            replay,
-        )
-        .await
-        .unwrap_or_else(|_| {
-            bounded_cancel.cancel();
-            Err(ResearchError::ComputeDeadlineExceeded {
-                operation: "feature_parity_replay",
-                deadline_secs: self.deps.compute_budget.deadline_secs,
+    ) -> QuantResult<Vec<FeatureParityCandidate>> {
+        let page_size = usize::try_from(self.deps.compute_budget.page_size).map_err(|error| {
+            InfraError::Misconfigured {
+                detail: format!("feature parity page size does not fit usize: {error}"),
             }
-            .into())
-        })
-    }
-}
-
-impl DurableFeatureParitySource {
-    async fn replay_governed(
-        &self,
-        parity_run: &FeatureParityRunInfo,
-        candidates: &[FeatureParityCandidate],
-        cancel: &CancellationToken,
-    ) -> QuantResult<FeatureParityReplayAttempt> {
-        let permit = tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                return Err(ResearchError::Cancelled {
-                    detail: "cancelled while waiting for feature parity compute capacity"
-                        .to_owned(),
+        })?;
+        let mut indices_by_model = HashMap::<ModelRunId, Vec<usize>>::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            if let FeatureParitySubject::ModelRun(id) = &candidate.subject {
+                indices_by_model.entry(*id).or_default().push(index);
+            }
+        }
+        let mut model_runs = indices_by_model.keys().copied().collect::<Vec<_>>();
+        model_runs.sort_unstable_by_key(|id| id.as_uuid());
+        for page in model_runs.chunks(page_size) {
+            Self::require_active(cancel)?;
+            let evidence = self.load_replay_evidence(page, cancel).await?;
+            for model_run_id in page {
+                let indices = indices_by_model.get(model_run_id).ok_or_else(|| {
+                    determinism(format!(
+                        "model {model_run_id} lost its qualification indices"
+                    ))
+                })?;
+                let witness = {
+                    let candidate = indices.first().and_then(|index| candidates.get(*index))
+                        .ok_or_else(|| determinism(format!(
+                            "model {model_run_id} lost its frozen candidates during qualification"
+                        )))?;
+                    self.model_input_witnesses(run, candidate, model_run_id, &evidence, cancel)
+                        .await?
+                };
+                for index in indices {
+                    let candidate = candidates.get_mut(*index).ok_or_else(|| {
+                        determinism(format!(
+                            "model {model_run_id} has an invalid qualification index"
+                        ))
+                    })?;
+                    candidate.input_witness = match &witness {
+                        None => FeatureParityInputWitness::PendingServingEvidence,
+                        Some(bindings) => candidate
+                            .market_id
+                            .as_ref()
+                            .and_then(|market| bindings.get(market))
+                            .map_or(FeatureParityInputWitness::SelectionOnly, |vector_id| {
+                                FeatureParityInputWitness::VerifiedModelInput {
+                                    feature_vector_id: *vector_id,
+                                }
+                            }),
+                    };
                 }
-                .into());
             }
-            permit = Arc::clone(&self.compute_slots).acquire_owned() => {
-                permit.map_err(|_| InfraError::ComputeExecution {
-                    detail: "feature parity compute semaphore closed".to_owned(),
-                })?
-            }
-        };
-        let source = self.clone();
-        let parity_run = parity_run.clone();
-        let candidates = candidates.to_vec();
-        let work_cancel = cancel.clone();
-        let runtime = Handle::current();
-        self.deps
-            .compute
-            .run_offline_cancellable(self.compute_memory, cancel, move || {
-                let _permit = permit;
-                runtime.block_on(async move {
-                    tokio::select! {
-                        biased;
-                        () = work_cancel.cancelled() => Err(ResearchError::Cancelled {
-                            detail: format!(
-                                "feature parity replay {} cancelled inside governed compute",
-                                parity_run.run_id
-                            ),
-                        }
-                        .into()),
-                        result = source.replay_pages(&candidates, &work_cancel) => result,
-                    }
-                })
-            })
-            .await
+        }
+        Self::require_active(cancel)?;
+        Ok(candidates)
     }
 
+    async fn model_input_witnesses(
+        &self,
+        parity_run: &FeatureParityRunInfo,
+        candidate: &FeatureParityCandidate,
+        model_run_id: &ModelRunId,
+        evidence: &DurableReplayEvidence,
+        cancel: &CancellationToken,
+    ) -> QuantResult<Option<HashMap<MarketId, FeatureVectorId>>> {
+        let Some(completion) = evidence.completion_by_run.get(model_run_id) else {
+            return Ok(None);
+        };
+        Self::require_active(cancel)?;
+        let run = self
+            .deps
+            .model_runs
+            .find_by_id(model_run_id)
+            .await?
+            .ok_or_else(|| StorageError::not_found("quant_model_run", model_run_id))?;
+        validate_candidate_run(&run, parity_run)?;
+        let inputs = validate_run_completion(
+            model_run_id,
+            candidate,
+            completion,
+            &evidence.inputs_by_run,
+            &evidence.features_by_vector,
+        )?;
+        let vector_ids = completion_vector_ids(completion)?;
+        let features = vector_ids
+            .iter()
+            .map(|id| {
+                evidence
+                    .features_by_vector
+                    .get(id)
+                    .cloned()
+                    .map(|rows| (*id, rows))
+                    .ok_or_else(|| {
+                        determinism(format!(
+                            "model {model_run_id} has no committed feature vector {id}"
+                        ))
+                    })
+            })
+            .collect::<QuantResult<HashMap<_, _>>>()?;
+        let infos = vector_ids
+            .iter()
+            .map(|id| {
+                evidence
+                    .info_by_id
+                    .get(id)
+                    .cloned()
+                    .map(|info| (*id, info))
+                    .ok_or_else(|| {
+                        determinism(format!(
+                            "model {model_run_id} has no Postgres feature vector {id}"
+                        ))
+                    })
+            })
+            .collect::<QuantResult<HashMap<_, _>>>()?;
+        let context = self
+            .prepare_replay_run(candidate, &run, completion, inputs, &features, &infos)
+            .await?;
+        let all_vectors = feature_vector_binding(&features)?;
+        let route = route_for_model(&context.config, context.model_version_id)?;
+        let route_vectors = online_route_binding(&all_vectors, &features, &context.members, route)?;
+        let bindings = verified_input_bindings(&run, inputs)?;
+        validate_input_population(&bindings, &route_vectors)?;
+        Self::require_active(cancel)?;
+        Ok(Some(bindings))
+    }
     async fn replay_pages(
         &self,
         candidates: &[FeatureParityCandidate],
@@ -378,10 +652,17 @@ impl DurableFeatureParitySource {
                 }
                 .into());
             }
-            let run_ids = unique_run_ids(page);
-            let evidence = self.load_replay_evidence(&run_ids).await?;
-            let mut attempt = self.replay_candidate_groups(page, &evidence).await?;
-            let report_attempt = self.replay_report_candidate_groups(page).await?;
+            let (ready, pending) = partition_witness_candidates(page)?;
+            combined.pending.extend(pending);
+            if ready.is_empty() {
+                continue;
+            }
+            let run_ids = unique_run_ids(&ready);
+            let evidence = self.load_replay_evidence(&run_ids, cancel).await?;
+            let mut attempt = self
+                .replay_candidate_groups(&ready, &evidence, cancel)
+                .await?;
+            let report_attempt = self.replay_report_candidate_groups(&ready, cancel).await?;
             attempt.comparisons.extend(report_attempt.comparisons);
             attempt.pending.extend(report_attempt.pending);
             combined.comparisons.extend(attempt.comparisons);
@@ -436,6 +717,7 @@ impl DurableFeatureParitySource {
                     subject: owner,
                     market_id: None,
                     decision_at,
+                    input_witness: FeatureParityInputWitness::SelectionOnly,
                 });
                 continue;
             }
@@ -445,6 +727,7 @@ impl DurableFeatureParitySource {
                     subject: owner.clone(),
                     market_id: Some(candidate.market_id),
                     decision_at,
+                    input_witness: FeatureParityInputWitness::SelectionOnly,
                 });
             }
         }
@@ -673,7 +956,11 @@ impl DurableFeatureParitySource {
                     .await?
                     .ok_or_else(|| StorageError::not_found("recommendation_report", report_id))?;
                 validate_report_subject(&report, run)?;
-                let route_runs = self.deps.reports.list_route_runs(report_id).await?;
+                let route_runs = self
+                    .deps
+                    .reports
+                    .find_route_runs(&[report.report_run_id])
+                    .await?;
                 let mut model_runs = Vec::new();
                 for route_run in route_runs {
                     let Some(model_run_id) = route_run.model_run_id.as_ref() else {
@@ -742,6 +1029,7 @@ impl DurableFeatureParitySource {
                 subject: FeatureParitySubject::ModelRun(row.model_run_id),
                 market_id: Some(market_id),
                 decision_at: row.window_start,
+                input_witness: FeatureParityInputWitness::SelectionOnly,
             }));
         }
         Ok(candidates)
@@ -768,6 +1056,7 @@ impl DurableFeatureParitySource {
                     subject,
                     market_id: None,
                     decision_at: report.decision_at,
+                    input_witness: FeatureParityInputWitness::SelectionOnly,
                 });
                 continue;
             }
@@ -780,6 +1069,7 @@ impl DurableFeatureParitySource {
                     subject: subject.clone(),
                     market_id: Some(member.market_id),
                     decision_at: report.decision_at,
+                    input_witness: FeatureParityInputWitness::SelectionOnly,
                 });
             }
         }
@@ -806,54 +1096,69 @@ impl DurableFeatureParitySource {
     async fn load_replay_evidence(
         &self,
         run_ids: &[ModelRunId],
+        cancel: &CancellationToken,
     ) -> QuantResult<DurableReplayEvidence> {
-        let completions = dedupe_completions(
-            self.deps
-                .serving_evidence
-                .completions_for_runs(run_ids)
-                .await?,
-        )?;
-        let completion_by_run = completions
-            .into_iter()
-            .map(|row| (row.model_run_id, row))
-            .collect::<HashMap<_, _>>();
-        let online_inputs = dedupe_model_input_rows(
-            self.deps
-                .serving_evidence
-                .model_inputs_for_runs(run_ids)
-                .await?,
-        )?;
-        let feature_ids = completion_by_run
-            .values()
-            .map(completion_vector_ids)
-            .collect::<QuantResult<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let online_features = dedupe_feature_rows(
-            self.deps
-                .serving_evidence
-                .feature_cells_for_vectors(&feature_ids)
-                .await?,
-        )?;
+        let completion_rows = self
+            .deps
+            .serving_evidence
+            .completions_for_runs(run_ids)
+            .await?;
+        let input_rows = self
+            .deps
+            .serving_evidence
+            .model_inputs_for_runs(run_ids)
+            .await?;
+        let prepare_cancel = cancel.clone();
+        let (completion_by_run, online_inputs, feature_ids) = self
+            .compute_boundary
+            .run(cancel, move || {
+                Self::require_active(&prepare_cancel)?;
+                let completion_by_run = dedupe_completions(completion_rows)?
+                    .into_iter()
+                    .map(|row| (row.model_run_id, row))
+                    .collect::<HashMap<_, _>>();
+                let online_inputs = dedupe_model_input_rows(input_rows)?;
+                let feature_ids = completion_by_run
+                    .values()
+                    .map(completion_vector_ids)
+                    .collect::<QuantResult<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                Ok((completion_by_run, online_inputs, feature_ids))
+            })
+            .await?;
+        let feature_rows = self
+            .deps
+            .serving_evidence
+            .feature_cells_for_vectors(&feature_ids)
+            .await?;
         let feature_infos = self.deps.feature_vectors.find_by_ids(&feature_ids).await?;
-        Ok(DurableReplayEvidence {
-            completion_by_run,
-            inputs_by_run: group_model_inputs(online_inputs),
-            features_by_vector: group_feature_rows(online_features),
-            info_by_id: feature_infos
-                .into_iter()
-                .map(|info| (info.feature_vector_id, info))
-                .collect(),
-        })
+        let finish_cancel = cancel.clone();
+        self.compute_boundary
+            .run(cancel, move || {
+                Self::require_active(&finish_cancel)?;
+                let online_features = dedupe_feature_rows(feature_rows)?;
+                Ok(DurableReplayEvidence {
+                    completion_by_run,
+                    inputs_by_run: group_model_inputs(online_inputs),
+                    features_by_vector: group_feature_rows(online_features),
+                    info_by_id: feature_infos
+                        .into_iter()
+                        .map(|info| (info.feature_vector_id, info))
+                        .collect(),
+                })
+            })
+            .await
     }
 
     async fn replay_candidate_groups(
         &self,
         candidates: &[FeatureParityCandidate],
         evidence: &DurableReplayEvidence,
+        cancel: &CancellationToken,
     ) -> QuantResult<FeatureParityReplayAttempt> {
         let mut attempt = FeatureParityReplayAttempt::default();
         for (run_id, run_candidates) in group_candidates_by_run(candidates) {
@@ -871,10 +1176,9 @@ impl DurableFeatureParitySource {
                 )));
             }
             let Some(completion) = evidence.completion_by_run.get(&run_id) else {
-                attempt
-                    .pending
-                    .extend(pending_completion(&run_id, &run_candidates));
-                continue;
+                return Err(determinism(format!(
+                    "qualified model {run_id} lost its committed serving completion"
+                )));
             };
             let run_inputs = validate_run_completion(
                 &run_id,
@@ -883,6 +1187,7 @@ impl DurableFeatureParitySource {
                 &evidence.inputs_by_run,
                 &evidence.features_by_vector,
             )?;
+            validate_replay_witnesses(&run, &run_candidates, run_inputs)?;
             let vector_ids = completion_vector_ids(completion)?;
             let run_features = vector_ids
                 .iter()
@@ -914,16 +1219,16 @@ impl DurableFeatureParitySource {
                         })
                 })
                 .collect::<QuantResult<HashMap<_, _>>>()?;
-            let comparisons = self
-                .replay_run(
-                    candidate,
-                    &run,
-                    completion,
-                    run_inputs,
-                    &run_features,
-                    &run_infos,
-                )
-                .await?;
+            let comparisons = Box::pin(self.replay_run(ReplayRunInput {
+                candidate,
+                run: &run,
+                completion,
+                online_inputs: run_inputs,
+                online_features: &run_features,
+                feature_infos: &run_infos,
+                cancel,
+            }))
+            .await?;
             attempt.comparisons.extend(select_comparisons(
                 &run_id.to_string(),
                 &run_candidates,
@@ -936,6 +1241,7 @@ impl DurableFeatureParitySource {
     async fn replay_report_candidate_groups(
         &self,
         candidates: &[FeatureParityCandidate],
+        cancel: &CancellationToken,
     ) -> QuantResult<FeatureParityReplayAttempt> {
         let mut attempt = FeatureParityReplayAttempt::default();
         for (report_id, report_candidates) in group_candidates_by_report(candidates) {
@@ -946,6 +1252,7 @@ impl DurableFeatureParitySource {
                 .compare_report_selection(
                     representative_candidate(&report_id.to_string(), &report_candidates)?,
                     &prepared,
+                    cancel,
                 )
                 .await?;
             attempt.comparisons.extend(select_comparisons(
@@ -1013,8 +1320,28 @@ impl DurableFeatureParitySource {
                 )
             })?;
         let snapshot_hash = config_info.snapshot_hash;
+        let route_runs = self
+            .deps
+            .reports
+            .find_route_runs(&[report.report_run_id])
+            .await?;
+        let evidence =
+            ReportBoundaryEvidence::try_new(&report, &report_run, &config_info, &dq, &route_runs)?;
+        let vectors = self
+            .deps
+            .feature_vectors
+            .find_by_ids(evidence.feature_ids())
+            .await?;
+        let expected_boundary = evidence
+            .restore(
+                &vectors,
+                self.deps.exchange_history.as_ref(),
+                self.deps.fact_read.as_ref(),
+            )
+            .await?;
+        let selector_binding =
+            ReportSelectorBinding::new(evidence.history(), evidence.universe_plan_hash());
         let config = config_info.snapshot;
-        let expected_boundary = report_decision_boundary(&report, &report_run, &config)?;
         validate_report_selection_binding(&report, &selection)?;
         Ok(Box::new(PreparedReportReplay {
             report_id: *report_id,
@@ -1024,6 +1351,7 @@ impl DurableFeatureParitySource {
                 config,
                 boundary: expected_boundary,
                 represented_routes: report.represented_routes_json,
+                selector_binding,
                 selection,
                 members,
             },
@@ -1060,22 +1388,30 @@ impl DurableFeatureParitySource {
         &self,
         candidate: &FeatureParityCandidate,
         prepared: &PreparedReportReplay,
+        cancel: &CancellationToken,
     ) -> QuantResult<Vec<FeatureParityComparison>> {
-        let context = &prepared.context;
-        let subject = ComparisonSubject {
-            report: Some(&prepared.report_id),
-            model_run: None,
-            model_version: None,
-        };
-        let replay = self.materialize_report_selection(context).await?;
-        selection_comparisons(
-            candidate,
-            subject,
-            &context.selection,
-            &context.members,
-            &replay,
-            &context.boundary,
-        )
+        let context = prepared.context.clone();
+        let report_id = prepared.report_id;
+        let candidate = candidate.clone();
+        let replay = Box::pin(self.materialize_report_selection(&context, cancel)).await?;
+        let kernel_cancel = cancel.clone();
+        self.compute_boundary
+            .run(cancel, move || {
+                Self::require_active(&kernel_cancel)?;
+                selection_comparisons(
+                    &candidate,
+                    ComparisonSubject {
+                        report: Some(&report_id),
+                        model_run: None,
+                        model_version: None,
+                    },
+                    &context.selection,
+                    &context.members,
+                    &replay,
+                    &context.boundary,
+                )
+            })
+            .await
     }
 
     async fn prepare_replay_run(
@@ -1106,7 +1442,9 @@ impl DurableFeatureParitySource {
             })?;
         let snapshot_hash = config_info.snapshot_hash;
         let config = config_info.snapshot;
-        let boundary = boundary_from_online(completion, online_inputs, online_features)?;
+        let route = route_for_model(&config, model_version_id)?;
+        let boundary =
+            boundary_from_online(completion, online_inputs, online_features, feature_infos)?;
         if boundary.decision_at() != candidate.decision_at {
             return Err(determinism(format!(
                 "serving evidence boundary {} does not match candidate {}",
@@ -1114,12 +1452,18 @@ impl DurableFeatureParitySource {
                 candidate.decision_at
             )));
         }
-        let (report_id, represented_routes) = if let Some(route_run) = self
-            .deps
-            .reports
-            .find_model_route_run(&run.model_run_id)
-            .await?
+        let (report_id, represented_routes, history, report_selector) = if let Some(route_run) =
+            self.deps
+                .reports
+                .find_model_route_run(&run.model_run_id)
+                .await?
         {
+            if route_run.route != route {
+                return Err(determinism(format!(
+                    "report Route {:?} differs from model {model_version_id} frozen Route {route:?}",
+                    route_run.route
+                )));
+            }
             let report = self
                 .deps
                 .reports
@@ -1131,13 +1475,18 @@ impl DurableFeatureParitySource {
                         route_run.report_run_id,
                     )
                 })?;
-            validate_route_run_binding(&report, &route_run, run)?;
+            let lineage = validate_route_run_binding(&report, &route_run, run)?;
             (
                 Some(report.recommendation_report_id),
                 Some(report.represented_routes_json),
+                Some(lineage.history.clone()),
+                Some(ReportSelectorBinding::new(
+                    &lineage.history,
+                    lineage.report_universe_plan_hash,
+                )),
             )
         } else {
-            (None, None)
+            (None, None, None, None)
         };
 
         let selection = self
@@ -1158,6 +1507,7 @@ impl DurableFeatureParitySource {
         let samples = replay_feature_population(
             &selection_id,
             &boundary,
+            route,
             &members,
             online_features,
             feature_infos,
@@ -1171,7 +1521,9 @@ impl DurableFeatureParitySource {
             config,
             boundary,
             report_id,
+            history,
             represented_routes,
+            report_selector,
             selection,
             members,
             samples,
@@ -1179,14 +1531,187 @@ impl DurableFeatureParitySource {
         })
     }
 
+    fn replay_history_mode(
+        builder_requires_history: bool,
+        evidences: &HashMap<MarketId, FinalizedExecutionEvidence>,
+    ) -> QuantResult<ReplayHistoryMode> {
+        let mut mode = None;
+        for evidence in evidences.values() {
+            let current = match evidence {
+                FinalizedExecutionEvidence::NotRequired if !builder_requires_history => {
+                    ReplayHistoryMode::NotRequired
+                }
+                FinalizedExecutionEvidence::Runtime {
+                    history_enabled: false,
+                    accepted_through_block: None,
+                    accepted_through_at: None,
+                } if builder_requires_history => ReplayHistoryMode::RuntimeDisabled,
+                FinalizedExecutionEvidence::Runtime {
+                    history_enabled: true,
+                    accepted_through_block: Some(accepted_through_block),
+                    accepted_through_at: Some(accepted_through_at),
+                } if builder_requires_history => ReplayHistoryMode::RuntimeEnabled {
+                    accepted_through_block: *accepted_through_block,
+                    accepted_through_at: *accepted_through_at,
+                },
+                FinalizedExecutionEvidence::Materialized { available_by }
+                    if builder_requires_history =>
+                {
+                    ReplayHistoryMode::Materialized {
+                        available_by: *available_by,
+                    }
+                }
+                _ => {
+                    return Err(determinism(
+                        "feature parity builder and finalized-history evidence disagree".to_owned(),
+                    ));
+                }
+            };
+            if mode.as_ref().is_some_and(|mode| mode != &current) {
+                return Err(determinism(
+                    "feature parity run contains mixed finalized-history evidence".to_owned(),
+                ));
+            }
+            mode = Some(current);
+        }
+        mode.ok_or_else(|| determinism("feature parity run has no history evidence".to_owned()))
+    }
+
+    async fn replay_history_window(
+        &self,
+        context: &ReplayRunContext,
+        builder_requires_history: bool,
+    ) -> QuantResult<ReplayHistoryWindow> {
+        match Self::replay_history_mode(
+            builder_requires_history,
+            &context.finalized_execution_evidences,
+        )? {
+            ReplayHistoryMode::NotRequired | ReplayHistoryMode::RuntimeDisabled => {
+                Ok(ReplayHistoryWindow {
+                    chunks: Vec::new(),
+                    load_execution_history: false,
+                    materialized_available_by: None,
+                })
+            }
+            ReplayHistoryMode::RuntimeEnabled {
+                accepted_through_block,
+                accepted_through_at,
+            } => {
+                let head = self
+                    .replay_history_head(context, accepted_through_block, accepted_through_at)
+                    .await?;
+                Ok(ReplayHistoryWindow {
+                    chunks: head.chunks,
+                    load_execution_history: true,
+                    materialized_available_by: None,
+                })
+            }
+            ReplayHistoryMode::Materialized { available_by } => {
+                let Some(RouteHistoryLineage::Materialized {
+                    available_by: bound_available_by,
+                    chunks,
+                }) = context.history.as_ref()
+                else {
+                    return Err(determinism(
+                        "materialized feature parity has no exact Route history lineage".to_owned(),
+                    ));
+                };
+                if *bound_available_by != available_by || chunks.is_empty() {
+                    return Err(determinism(
+                        "materialized feature parity Route lineage differs from frozen evidence"
+                            .to_owned(),
+                    ));
+                }
+                self.deps
+                    .fact_read
+                    .validate_execution_history_chunks(chunks.clone())
+                    .await?;
+                Ok(ReplayHistoryWindow {
+                    chunks: chunks.clone(),
+                    load_execution_history: true,
+                    materialized_available_by: Some(available_by),
+                })
+            }
+        }
+    }
+
+    async fn replay_history_head(
+        &self,
+        context: &ReplayRunContext,
+        expected_block: u64,
+        expected_at: DateTime<Utc>,
+    ) -> QuantResult<HistoryServingHeadSeal> {
+        let decision_at = context.boundary.decision_at();
+        let head = if let Some(history) = context.history.as_ref() {
+            let RouteHistoryLineage::Runtime {
+                serving_head_seal_id,
+                serving_head_seal_hash,
+            } = history
+            else {
+                return Err(determinism(
+                    "runtime feature parity is bound to materialized Route history".to_owned(),
+                ));
+            };
+            let head = self
+                .deps
+                .exchange_history
+                .validate_serving_head(*serving_head_seal_id, *serving_head_seal_hash)
+                .await?;
+            if head.seal.serving_head_seal_id != *serving_head_seal_id
+                || head.seal.seal_hash != *serving_head_seal_hash
+            {
+                return Err(determinism(
+                    "parity repository returned a different Route lineage seal".to_owned(),
+                ));
+            }
+            head
+        } else {
+            let head = self
+                .deps
+                .exchange_history
+                .serving_head_at(ExchangeHistoryFrontier::Activation, decision_at)
+                .await?
+                .ok_or_else(|| {
+                    determinism(
+                        "parity replay has no serving head at its decision boundary".to_owned(),
+                    )
+                })?;
+            self.deps
+                .exchange_history
+                .validate_serving_head(head.seal.serving_head_seal_id, head.seal.seal_hash)
+                .await?
+        };
+        if head.seal.frontier != ExchangeHistoryFrontier::Activation
+            || head.seal.created_at > decision_at
+        {
+            return Err(determinism(format!(
+                "parity serving head {} is not decision-visible Activation history",
+                head.seal.serving_head_seal_id
+            )));
+        }
+        let accepted_block = u64::try_from(head.seal.accepted_through_block).map_err(|error| {
+            determinism(format!(
+                "parity serving head has invalid accepted block: {error}"
+            ))
+        })?;
+        if accepted_block != expected_block || head.seal.effective_through_at != expected_at {
+            return Err(determinism(format!(
+                "parity finalized-execution evidence disagrees with serving head {}",
+                head.seal.serving_head_seal_id
+            )));
+        }
+        Ok(head)
+    }
+
     async fn materialize_run_replay(
         &self,
         subject: &str,
         context: &ReplayRunContext,
+        cancel: &CancellationToken,
     ) -> QuantResult<MaterializedRunReplay> {
         let config = &context.config;
         let boundary = &context.boundary;
-        let selection_replay = self.materialize_selection_replay(context).await?;
+        let selection_replay = Box::pin(self.materialize_selection_replay(context, cancel)).await?;
         let samples = context.samples.clone();
         if samples.is_empty() {
             return Err(determinism(format!(
@@ -1200,41 +1725,34 @@ impl DurableFeatureParitySource {
                 .definition
                 .max_lookback_secs(),
         );
+        let max_book_staleness = Duration::from_millis(
+            config
+                .profile_artifacts
+                .research_method
+                .training
+                .max_book_staleness_ms,
+        );
         let loader = HistoricalWindowLoader::new(
             Arc::clone(&self.deps.fact_read),
             Arc::clone(&self.deps.catalog),
             Arc::clone(&self.deps.clob_market_info),
             Arc::clone(&self.deps.linkages),
             Arc::clone(&self.deps.calibration_artifacts),
-            Duration::from_millis(
-                config
-                    .profile_artifacts
-                    .research_method
-                    .training
-                    .max_book_staleness_ms,
-            ),
+            max_book_staleness,
         );
         let window_end = boundary
             .decision_at()
             .checked_add_signed(ChronoDuration::milliseconds(1))
             .ok_or_else(|| determinism("parity window end is outside chrono range".to_owned()))?;
-        let serving_head = self
-            .deps
-            .exchange_history
-            .serving_head_at(ExchangeHistoryFrontier::Activation, boundary.decision_at())
-            .await?
-            .ok_or_else(|| {
-                determinism("parity replay has no serving head at its decision boundary".to_owned())
-            })?;
-        self.deps
-            .exchange_history
-            .validate_serving_head(
-                serving_head.seal.serving_head_seal_id,
-                serving_head.seal.seal_hash,
-            )
+        let ReplayHistoryWindow {
+            chunks,
+            load_execution_history,
+            materialized_available_by,
+        } = self
+            .replay_history_window(context, selection_replay.builder.needs_execution_history())
             .await?;
-        let window = loader
-            .load(&WindowSpec {
+        let prefetched = loader
+            .prefetch(&WindowSpec {
                 window_start: boundary.decision_at(),
                 window_end,
                 available_by: window_end,
@@ -1244,35 +1762,53 @@ impl DurableFeatureParitySource {
                 max_horizon_secs: 0,
                 domain: config.profile_artifacts.domain.definition.clone(),
                 feature_contract: selection_replay.replay_config.feature_contract,
-                execution_history_chunks: serving_head.chunks,
-                requires_execution_history: true,
+                execution_history_chunks: chunks,
+                requires_execution_history: load_execution_history,
             })
             .await?;
-        let cross = materialize_cross_section(
-            &selection_replay.builder,
-            ReplayFactorMode::FactorNative {
-                engine: &selection_replay.factor_engine,
-            },
-            &selection_replay.replay_config,
-            &CrossSectionRequest {
-                pit: selection_replay.snapshot_source.as_ref(),
-                prefetched: &window.prefetched,
-                finalized_execution_evidence: ReplayExecutionSource::FrozenRuntime(
-                    &context.finalized_execution_evidences,
-                ),
-                decision_at: boundary.decision_at(),
-                group: &samples,
-                required_features: &selection_replay.required_features,
-                category_scope: None,
-                knowledge_lag: boundary.knowledge_lag(),
-            },
-        )
-        .await?
-        .ok_or_else(|| {
-            determinism(format!(
-                "durable replay resolved no catalog rows for {subject}"
-            ))
-        })?;
+        Self::require_active(cancel)?;
+        let finalized_execution_evidences = context.finalized_execution_evidences.clone();
+        let boundary = boundary.clone();
+        let subject = subject.to_owned();
+        let kernel_cancel = cancel.clone();
+        let runtime = Handle::current();
+        let (selection_replay, cross) = self
+            .compute_boundary
+            .run(cancel, move || {
+                Self::require_active(&kernel_cancel)?;
+                let window = historical_window_from_prefetched(prefetched, max_book_staleness)?;
+                let execution_source = materialized_available_by.map_or(
+                    ReplayExecutionSource::FrozenRuntime(&finalized_execution_evidences),
+                    |available_by| ReplayExecutionSource::Materialized { available_by },
+                );
+                let cross = runtime
+                    .block_on(materialize_cross_section(
+                        &selection_replay.builder,
+                        ReplayFactorMode::FactorNative {
+                            engine: &selection_replay.factor_engine,
+                        },
+                        &selection_replay.replay_config,
+                        &CrossSectionRequest {
+                            pit: &window.pit,
+                            prefetched: &window.prefetched,
+                            finalized_execution_evidence: execution_source,
+                            boundary: &boundary,
+                            group: &samples,
+                            required_features: &selection_replay.required_features,
+                            category_scope: selection_replay
+                                .serving
+                                .active_version()
+                                .category_scope,
+                        },
+                    ))?
+                    .ok_or_else(|| {
+                        determinism(format!(
+                            "durable replay resolved no catalog rows for {subject}"
+                        ))
+                    })?;
+                Ok((selection_replay, cross))
+            })
+            .await?;
         Ok(MaterializedRunReplay {
             builder: selection_replay.builder,
             factor_engine: selection_replay.factor_engine,
@@ -1286,6 +1822,7 @@ impl DurableFeatureParitySource {
     async fn materialize_selection_replay(
         &self,
         context: &ReplayRunContext,
+        cancel: &CancellationToken,
     ) -> QuantResult<MaterializedSelectionReplay> {
         let config = &context.config;
         let boundary = &context.boundary;
@@ -1295,63 +1832,29 @@ impl DurableFeatureParitySource {
         )
         .await?;
         let serving = self.replay_serving(context).await?;
-        let feature_contract = serving
-            .active_version()
-            .profile_ref
-            .resolve_builtin_research_profile()
-            .map_err(determinism)?
-            .spec
-            .feature_contract;
-        let replay_config = ReplayConfig {
-            features: config.profile_artifacts.features.definition.clone(),
-            factors: config.profile_artifacts.scoring.definition.clone(),
-            domain: config.profile_artifacts.domain.definition.clone(),
-            data_quality: config.recommendation.data_quality.clone(),
-            liquidity_cap_usd: Usd::new(
-                config
-                    .execution_risk
-                    .portfolio
-                    .exposure_limits
-                    .max_single_recommendation_usd
-                    .value,
-            ),
-            feature_contract,
-            bias_table: bias_table.as_ref().map(Arc::clone),
+        let selector = match (&context.report_selector, &context.represented_routes) {
+            (Some(binding), Some(represented_routes)) => {
+                self.report_selector_contract(
+                    ModelServingGenerationRequest {
+                        decision_policy_snapshot_id: context.decision_policy_snapshot_id,
+                        snapshot_hash: context.snapshot_hash,
+                        snapshot: config,
+                    },
+                    represented_routes,
+                    binding,
+                )
+                .await?
+            }
+            (None, None) => ReplaySelectionContract {
+                model_requirements: serving.model_requirements(),
+                route_availability: None,
+            },
+            _ => {
+                return Err(determinism(
+                    "model replay has incomplete report selector lineage".to_owned(),
+                ));
+            }
         };
-        let builder = ConfiguredFeatureBuilder::new_for_contract(
-            &config.profile_artifacts.features.definition,
-            &config.profile_artifacts.domain.definition,
-            feature_contract,
-        )?;
-        let factor_engine = FactorEngine::for_model_scope(
-            &config.profile_artifacts.scoring.definition,
-            &config.profile_artifacts.features.definition,
-            &config.profile_artifacts.domain.definition,
-            feature_contract,
-            serving.active_version().category_scope,
-            bias_table.clone(),
-        );
-        let bias_table_hash = bias_table.as_ref().map(|table| table.content_hash);
-        let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
-        let factor_plane = factor_engine.serving_plane()?;
-        verify_replay_contract(
-            serving.active_version(),
-            feature_schema_hash,
-            factor_plane,
-            bias_table_hash,
-        )?;
-        let model_requirements = if let Some(represented_routes) = &context.represented_routes {
-            self.route_requirements(
-                context.decision_policy_snapshot_id,
-                context.snapshot_hash,
-                config,
-                represented_routes,
-            )
-            .await?
-        } else {
-            serving.model_requirements()
-        };
-        let required_features = model_requirements.union_all();
         let durable_pit = Arc::new(DurablePitSource::new(
             Arc::clone(&self.deps.fact_read),
             Arc::clone(&self.deps.catalog),
@@ -1365,43 +1868,102 @@ impl DurableFeatureParitySource {
         let candidate_batch = candidate_provider
             .candidates(boundary, &config.profile_artifacts.domain.definition)
             .await?;
-        let selection = ConfiguredMarketSelector::new()
-            .build_snapshot(
-                MarketSelectionBuildRequest {
-                    decision_at: boundary.decision_at(),
-                    decision_policy_snapshot_id: context.decision_policy_snapshot_id,
-                    selection: config.recommendation.selection.clone(),
-                    data_quality: config.recommendation.data_quality.clone(),
+        Self::require_active(cancel)?;
+        let config = config.clone();
+        let boundary = boundary.clone();
+        let decision_policy_snapshot_id = context.decision_policy_snapshot_id;
+        let kernel_cancel = cancel.clone();
+        let runtime = Handle::current();
+        self.compute_boundary
+            .run(cancel, move || {
+                Self::require_active(&kernel_cancel)?;
+                let feature_contract = serving
+                    .active_version()
+                    .profile_ref
+                    .resolve_builtin_research_profile()
+                    .map_err(determinism)?
+                    .spec
+                    .feature_contract;
+                let replay_config = ReplayConfig {
                     features: config.profile_artifacts.features.definition.clone(),
-                    model_requirements,
-                    knowledge_lag_secs: boundary.knowledge_lag_secs(),
-                    route_availability: None,
-                },
-                candidate_batch.candidates,
-            )
-            .await?;
-        Ok(MaterializedSelectionReplay {
-            builder,
-            factor_engine,
-            bias_table_hash,
-            selection,
-            snapshot_source: candidate_batch.snapshot_source,
-            replay_config,
-            required_features,
-            serving,
-        })
+                    factors: config.profile_artifacts.scoring.definition.clone(),
+                    domain: config.profile_artifacts.domain.definition.clone(),
+                    data_quality: config.recommendation.data_quality.clone(),
+                    liquidity_cap_usd: Usd::new(
+                        config
+                            .execution_risk
+                            .portfolio
+                            .exposure_limits
+                            .max_single_recommendation_usd
+                            .value,
+                    ),
+                    feature_contract,
+                    bias_table: bias_table.as_ref().map(Arc::clone),
+                };
+                let builder = ConfiguredFeatureBuilder::new_for_contract(
+                    &config.profile_artifacts.features.definition,
+                    &config.profile_artifacts.domain.definition,
+                    feature_contract,
+                )?;
+                let factor_engine = FactorEngine::for_model_scope(
+                    &config.profile_artifacts.scoring.definition,
+                    &config.profile_artifacts.features.definition,
+                    &config.profile_artifacts.domain.definition,
+                    feature_contract,
+                    serving.active_version().category_scope,
+                    bias_table.clone(),
+                );
+                let bias_table_hash = bias_table.as_ref().map(|table| table.content_hash);
+                let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
+                let factor_plane = factor_engine.serving_plane()?;
+                verify_replay_contract(
+                    serving.active_version(),
+                    feature_schema_hash,
+                    factor_plane,
+                    bias_table_hash,
+                )?;
+                let required_features = serving.model_requirements().union_all();
+                let selection =
+                    runtime.block_on(ConfiguredMarketSelector::new().build_snapshot(
+                        MarketSelectionBuildRequest {
+                            decision_at: boundary.decision_at(),
+                            decision_policy_snapshot_id,
+                            selection: config.recommendation.selection.clone(),
+                            data_quality: config.recommendation.data_quality.clone(),
+                            features: config.profile_artifacts.features.definition.clone(),
+                            model_requirements: selector.model_requirements,
+                            knowledge_lag_secs: boundary.knowledge_lag_secs(),
+                            route_availability: selector.route_availability,
+                        },
+                        candidate_batch.candidates,
+                    ))?;
+                Ok(MaterializedSelectionReplay {
+                    builder,
+                    factor_engine,
+                    bias_table_hash,
+                    selection,
+                    replay_config,
+                    required_features,
+                    serving,
+                })
+            })
+            .await
     }
 
     async fn materialize_report_selection(
         &self,
         context: &ReportReplayContext,
+        cancel: &CancellationToken,
     ) -> QuantResult<MarketSelectionSnapshot> {
-        let model_requirements = self
-            .route_requirements(
-                context.decision_policy_snapshot_id,
-                context.snapshot_hash,
-                &context.config,
+        let selector = self
+            .report_selector_contract(
+                ModelServingGenerationRequest {
+                    decision_policy_snapshot_id: context.decision_policy_snapshot_id,
+                    snapshot_hash: context.snapshot_hash,
+                    snapshot: &context.config,
+                },
                 &context.represented_routes,
+                &context.selector_binding,
             )
             .await?;
         let durable_pit = Arc::new(DurablePitSource::new(
@@ -1420,47 +1982,84 @@ impl DurableFeatureParitySource {
                 &context.config.profile_artifacts.domain.definition,
             )
             .await?;
-        ConfiguredMarketSelector::new()
-            .build_snapshot(
-                MarketSelectionBuildRequest {
-                    decision_at: context.boundary.decision_at(),
-                    decision_policy_snapshot_id: context.decision_policy_snapshot_id,
-                    selection: context.config.recommendation.selection.clone(),
-                    data_quality: context.config.recommendation.data_quality.clone(),
-                    features: context.config.profile_artifacts.features.definition.clone(),
-                    model_requirements,
-                    knowledge_lag_secs: context.boundary.knowledge_lag_secs(),
-                    route_availability: None,
-                },
-                candidates.candidates,
-            )
+        Self::require_active(cancel)?;
+        let context = context.clone();
+        let kernel_cancel = cancel.clone();
+        let runtime = Handle::current();
+        self.compute_boundary
+            .run(cancel, move || {
+                Self::require_active(&kernel_cancel)?;
+                runtime.block_on(ConfiguredMarketSelector::new().build_snapshot(
+                    MarketSelectionBuildRequest {
+                        decision_at: context.boundary.decision_at(),
+                        decision_policy_snapshot_id: context.decision_policy_snapshot_id,
+                        selection: context.config.recommendation.selection.clone(),
+                        data_quality: context.config.recommendation.data_quality.clone(),
+                        features: context.config.profile_artifacts.features.definition.clone(),
+                        model_requirements: selector.model_requirements,
+                        knowledge_lag_secs: context.boundary.knowledge_lag_secs(),
+                        route_availability: selector.route_availability,
+                    },
+                    candidates.candidates,
+                ))
+            })
             .await
     }
 
-    async fn route_requirements(
+    async fn report_selector_contract(
         &self,
-        decision_policy_snapshot_id: DecisionPolicySnapshotId,
-        snapshot_hash: ContentHash,
-        config: &DecisionPolicySnapshot,
+        request: ModelServingGenerationRequest<'_>,
         represented_routes: &RepresentedRouteSet,
-    ) -> QuantResult<ModelFeatureRequirements> {
+        binding: &ReportSelectorBinding,
+    ) -> QuantResult<ReplaySelectionContract> {
+        if let ReportSelectorBinding::Runtime {
+            serving_head_seal_id,
+            serving_head_seal_hash,
+            ..
+        } = binding
+        {
+            let serving_routes = self
+                .deps
+                .serving_generations
+                .resolve_available_routes(request)
+                .await?;
+            for serving in &serving_routes {
+                serving.validate_active()?;
+            }
+            let contract = ReportUniverseContract::try_new(
+                request.decision_policy_snapshot_id,
+                request.snapshot_hash,
+                serving_routes
+                    .iter()
+                    .map(ReportUniverseRoute::from)
+                    .collect(),
+                *serving_head_seal_id,
+                *serving_head_seal_hash,
+            )?;
+            if represented_routes
+                .routes
+                .iter()
+                .any(|route| !contract.availability.active_routes.contains(route))
+            {
+                return Err(determinism(
+                    "report represented Routes escaped its frozen selector universe".to_owned(),
+                ));
+            }
+            return binding.verify_universe(contract);
+        }
         let mut model_requirements = ModelFeatureRequirements::default();
         let serving_routes = self
             .deps
             .serving_generations
-            .resolve_routes(
-                ModelServingGenerationRequest {
-                    decision_policy_snapshot_id,
-                    snapshot_hash,
-                    snapshot: config,
-                },
-                represented_routes,
-            )
+            .resolve_routes(request, represented_routes)
             .await?;
         for serving in serving_routes {
             model_requirements.merge(serving.model_requirements());
         }
-        Ok(model_requirements)
+        Ok(ReplaySelectionContract {
+            model_requirements,
+            route_availability: None,
+        })
     }
 
     async fn replay_serving(
@@ -1491,13 +2090,17 @@ impl DurableFeatureParitySource {
 
     async fn replay_run(
         &self,
-        candidate: &FeatureParityCandidate,
-        run: &ModelRunInfo,
-        completion: &QuantServingEvidenceCompletionRow,
-        online_inputs: &[QuantModelInputEventRow],
-        online_features: &HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
-        feature_infos: &HashMap<FeatureVectorId, FeatureVectorInfo>,
+        input: ReplayRunInput<'_>,
     ) -> QuantResult<Vec<FeatureParityComparison>> {
+        let ReplayRunInput {
+            candidate,
+            run,
+            completion,
+            online_inputs,
+            online_features,
+            feature_infos,
+            cancel,
+        } = input;
         let context = self
             .prepare_replay_run(
                 candidate,
@@ -1508,108 +2111,168 @@ impl DurableFeatureParitySource {
                 feature_infos,
             )
             .await?;
-        let replay = self
-            .materialize_run_replay(&format!("serving run {}", run.model_run_id), &context)
+        let replay = Box::pin(self.materialize_run_replay(
+            &format!("serving run {}", run.model_run_id),
+            &context,
+            cancel,
+        ))
+        .await?;
+
+        let kernel_candidate = candidate.clone();
+        let kernel_run = run.clone();
+        let kernel_context = context.clone();
+        let kernel_inputs = online_inputs.to_vec();
+        let kernel_features = online_features.clone();
+        let kernel_infos = feature_infos.clone();
+        let kernel_cancel = cancel.clone();
+        let (replay, comparisons, admission_matches, route_vector_binding) = self
+            .compute_boundary
+            .run(cancel, move || {
+                Self::require_active(&kernel_cancel)?;
+                let comparison_subject = ComparisonSubject {
+                    report: kernel_context.report_id.as_ref(),
+                    model_run: Some(&kernel_run.model_run_id),
+                    model_version: Some(&kernel_context.model_version_id),
+                };
+                let model_vector_binding = vector_binding(&kernel_inputs)?;
+                let all_vector_binding = feature_vector_binding(&kernel_features)?;
+                let route_vector_binding = online_route_binding(
+                    &all_vector_binding,
+                    &kernel_features,
+                    &kernel_context.members,
+                    replay.serving.route(),
+                )?;
+                validate_input_population(&model_vector_binding, &route_vector_binding)?;
+                let replay_by_market = replay.cross_section.replay_vectors_by_market();
+                let mut comparisons = selection_comparisons(
+                    &kernel_candidate,
+                    comparison_subject,
+                    &kernel_context.selection,
+                    &kernel_context.members,
+                    &replay.selection,
+                    &kernel_context.boundary,
+                )?;
+                comparisons.extend(snapshot_and_feature_comparisons(
+                    &kernel_candidate,
+                    comparison_subject,
+                    FeatureComparisonInputs {
+                        online_features: &kernel_features,
+                        feature_infos: &kernel_infos,
+                        replay_by_market: &replay_by_market,
+                        replay_captures: &replay.cross_section.captures,
+                        vector_binding: &all_vector_binding,
+                        boundary: &kernel_context.boundary,
+                        decision_policy_snapshot_id: &kernel_run.decision_policy_snapshot_id,
+                        schema: replay.builder.schema(),
+                    },
+                )?);
+                let admission_matches = route_admission_matches(
+                    &route_vector_binding,
+                    &replay.cross_section,
+                    replay.serving.route(),
+                );
+                comparisons.push(data_quality_comparison(
+                    &kernel_candidate,
+                    comparison_subject,
+                    &kernel_features,
+                    &replay_by_market,
+                    &kernel_context.boundary,
+                )?);
+                Ok((replay, comparisons, admission_matches, route_vector_binding))
+            })
             .await?;
-
-        let model_vector_binding = vector_binding(online_inputs)?;
-        let all_vector_binding = feature_vector_binding(online_features)?;
-        let route_vector_binding = online_route_binding(
-            &all_vector_binding,
-            online_features,
-            &context.members,
-            replay.serving.route(),
-        )?;
-        validate_input_population(&model_vector_binding, &route_vector_binding)?;
-        let replay_by_market = replay.cross_section.replay_vectors_by_market();
-        let comparison_subject = ComparisonSubject {
-            report: context.report_id.as_ref(),
-            model_run: Some(&run.model_run_id),
-            model_version: Some(&context.model_version_id),
-        };
-        let mut comparisons = Vec::new();
-        comparisons.extend(selection_comparisons(
-            candidate,
-            comparison_subject,
-            &context.selection,
-            &context.members,
-            &replay.selection,
-            &context.boundary,
-        )?);
-        comparisons.extend(snapshot_and_feature_comparisons(
-            candidate,
-            comparison_subject,
-            FeatureComparisonInputs {
-                online_features,
-                feature_infos,
-                replay_by_market: &replay_by_market,
-                replay_captures: &replay.cross_section.captures,
-                vector_binding: &all_vector_binding,
-                boundary: &context.boundary,
-                decision_policy_snapshot_id: &run.decision_policy_snapshot_id,
-                schema: replay.builder.schema(),
-            },
-        )?);
-
-        let admission_matches = route_admission_matches(
-            &route_vector_binding,
-            &replay.cross_section,
-            replay.serving.route(),
-        );
-        comparisons.push(data_quality_comparison(
-            candidate,
-            comparison_subject,
-            online_features,
-            &replay_by_market,
-            &context.boundary,
-        )?);
         if !admission_matches {
             return Ok(comparisons);
         }
 
+        let runtime = Handle::current();
+        let runtime_run = run.clone();
+        let runtime_context = context.clone();
+        let runtime_inputs = online_inputs.to_vec();
+        let runtime_cancel = cancel.clone();
         let replay_outputs = self
-            .replay_model_routes(ModelRouteReplayRequest {
-                run,
-                config: &context.config,
-                boundary: &context.boundary,
-                online_inputs,
-                markets: &replay.cross_section.markets,
-                vectors: &replay.cross_section.vectors,
-                vector_binding: &route_vector_binding,
-                factor_engine: &replay.factor_engine,
-                bias_table_hash: replay.bias_table_hash,
-                serving: &replay.serving,
+            .compute_boundary
+            .run(cancel, move || {
+                Self::require_active(&runtime_cancel)?;
+                runtime.block_on(Self::replay_model_routes(ModelRouteReplayRequest {
+                    run: &runtime_run,
+                    config: &runtime_context.config,
+                    boundary: &runtime_context.boundary,
+                    online_inputs: &runtime_inputs,
+                    markets: &replay.cross_section.markets,
+                    vectors: &replay.cross_section.vectors,
+                    vector_binding: &route_vector_binding,
+                    factor_engine: &replay.factor_engine,
+                    bias_table_hash: replay.bias_table_hash,
+                    serving: &replay.serving,
+                    cancel: &runtime_cancel,
+                }))
             })
             .await?;
-        comparisons.extend(model_input_comparisons(
-            candidate,
-            &run.model_run_id,
-            context.report_id.as_ref(),
-            online_inputs,
-            &replay_outputs.input_rows,
-        )?);
-        comparisons.extend(
-            self.factor_comparisons(
-                candidate,
-                run,
-                context.report_id.as_ref(),
-                &replay_outputs.factor_outcomes,
-                &context.boundary,
-            )
-            .await?,
-        );
-        comparisons.push(prediction_comparison(
+        let online_factors = self
+            .deps
+            .factors
+            .list_values_for_run(&run.model_run_id)
+            .await?
+            .into_boxed_slice();
+        let final_candidate = candidate.clone();
+        let final_run = run.clone();
+        let final_context = context;
+        let final_inputs = online_inputs.to_vec();
+        let final_cancel = cancel.clone();
+        Box::pin(self.compute_boundary.run(cancel, move || {
+            Self::require_active(&final_cancel)?;
+            Self::finish_run_comparisons(FinalRunComparisonInput {
+                candidate: final_candidate,
+                run: final_run,
+                context: final_context,
+                online_inputs: final_inputs,
+                replay: replay_outputs,
+                online_factors,
+                comparisons,
+            })
+        }))
+        .await
+    }
+
+    fn finish_run_comparisons(
+        input: FinalRunComparisonInput,
+    ) -> QuantResult<Vec<FeatureParityComparison>> {
+        let FinalRunComparisonInput {
             candidate,
             run,
+            context,
+            online_inputs,
+            replay,
+            online_factors,
+            mut comparisons,
+        } = input;
+        comparisons.extend(model_input_comparisons(
+            &candidate,
+            &run.model_run_id,
+            context.report_id.as_ref(),
+            &online_inputs,
+            &replay.input_rows,
+        )?);
+        comparisons.extend(Self::factor_comparisons(
+            &candidate,
+            &run,
+            context.report_id.as_ref(),
+            &replay.factor_outcomes,
+            &context.boundary,
+            online_factors,
+        )?);
+        comparisons.push(prediction_comparison(
+            &candidate,
+            &run,
             context.report_id,
-            &replay_outputs.runtime_output,
+            &replay.runtime_output,
             &context.boundary,
         )?);
         Ok(comparisons)
     }
 
     async fn replay_model_routes(
-        &self,
         request: ModelRouteReplayRequest<'_>,
     ) -> QuantResult<ReplayedModelOutput> {
         let feature_contract = request
@@ -1637,6 +2300,7 @@ impl DurableFeatureParitySource {
             .collect::<HashMap<_, _>>();
         let version_id = request.serving.champion_model_version_id();
         for row in request.online_inputs {
+            Self::require_active(request.cancel)?;
             if row.model_version_id != version_id {
                 return Err(determinism(format!(
                     "online input model {} differs from pinned exact route model {version_id}",
@@ -1697,19 +2361,14 @@ impl DurableFeatureParitySource {
         )
     }
 
-    async fn factor_comparisons(
-        &self,
+    fn factor_comparisons(
         candidate: &FeatureParityCandidate,
         run: &ModelRunInfo,
         report_id: Option<&RecommendationReportId>,
         replay_outcomes: &[MarketFactorOutcome],
         boundary: &DecisionBoundary,
+        online: Box<[FactorValueInfo]>,
     ) -> QuantResult<Vec<FeatureParityComparison>> {
-        let online = self
-            .deps
-            .factors
-            .list_values_for_run(&run.model_run_id)
-            .await?;
         if online.is_empty() && replay_outcomes.is_empty() {
             return Ok(vec![comparison(ComparisonInput {
                 candidate,
@@ -1726,8 +2385,9 @@ impl DurableFeatureParitySource {
             })]);
         }
         let mut online_projection = online
-            .iter()
-            .map(FactorProjection::from_online)
+            .into_vec()
+            .into_iter()
+            .map(|row| FactorProjection::from_online(&row))
             .collect::<Vec<_>>();
         online_projection.sort();
         let mut replay_projection = replay_outcomes
@@ -2316,6 +2976,7 @@ fn route_admission_matches(
 fn replay_feature_population(
     selection_id: &MarketSelectionId,
     boundary: &DecisionBoundary,
+    route: BuyModelRoute,
     members: &[MarketSelectionMemberInfo],
     online_features: &HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
     feature_infos: &HashMap<FeatureVectorId, FeatureVectorInfo>,
@@ -2358,6 +3019,12 @@ fn replay_feature_population(
                 first.market_id
             ))
         })?;
+        if BuyModelRoute::from(member.category) != route {
+            return Err(determinism(format!(
+                "feature vector {vector_id} market {} is outside frozen Route {route:?}",
+                first.market_id
+            )));
+        }
         let valid_binding = member.primary_token_id == *token_id
             && persisted.market_id == first.market_id
             && persisted.token_id.as_ref() == Some(token_id)
@@ -2376,13 +3043,19 @@ fn replay_feature_population(
             )));
         }
     }
-    if samples_by_market.len() != member_by_market.len() {
+    let expected_count = members
+        .iter()
+        .filter(|member| BuyModelRoute::from(member.category) == route)
+        .count();
+    if samples_by_market.len() != expected_count {
         return Err(determinism(format!(
-            "selection {selection_id} members do not match its committed feature-vector population"
+            "selection {selection_id} Route {route:?} expects {expected_count} feature vectors, but its committed population has {}",
+            samples_by_market.len()
         )));
     }
     members
         .iter()
+        .filter(|member| BuyModelRoute::from(member.category) == route)
         .map(|member| {
             samples_by_market.remove(&member.market_id).ok_or_else(|| {
                 determinism(format!(
@@ -2871,107 +3544,114 @@ fn boundary_from_online(
     completion: &QuantServingEvidenceCompletionRow,
     inputs: &[QuantModelInputEventRow],
     features: &HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
+    feature_infos: &HashMap<FeatureVectorId, FeatureVectorInfo>,
 ) -> QuantResult<DecisionBoundary> {
-    let decision_at = required_millis(completion.decision_at, "serving completion decision_at")?;
-    let knowledge_cutoff = required_millis(
-        completion.knowledge_cutoff,
-        "serving completion knowledge_cutoff",
-    )?;
-    let lag_ms = decision_at
-        .signed_duration_since(knowledge_cutoff)
-        .num_milliseconds();
-    if lag_ms < 0 || lag_ms % 1_000 != 0 {
-        return Err(determinism(format!(
-            "model input boundary has invalid whole-second lag {lag_ms}ms"
-        )));
-    }
-    let lag_secs = u64::try_from(lag_ms / 1_000)
-        .map_err(|error| determinism(format!("knowledge lag conversion failed: {error}")))?;
-    let mut boundary = DecisionClock::new(lag_secs).boundary(decision_at)?;
-    let first_vector_id = completion_vector_ids(completion)?
-        .into_iter()
-        .next()
+    let vector_ids = completion_vector_ids(completion)?;
+    let first_vector_id = vector_ids
+        .first()
         .ok_or_else(|| determinism("serving completion has no feature vectors".to_owned()))?;
-    let feature = features
-        .get(&first_vector_id)
+    let first = feature_infos.get(first_vector_id).ok_or_else(|| {
+        determinism(format!(
+            "no persisted feature boundary for vector {first_vector_id}"
+        ))
+    })?;
+    let boundary = &first.decision_boundary;
+    boundary.validate()?;
+
+    // The typed PG boundary owns the exact clock. CH scalar columns are
+    // millisecond projections; JSON cutoffs retain the original precision.
+    let registered = DecisionClock::new(boundary.knowledge_lag_secs()).serving_boundary(
+        boundary.decision_at(),
+        0,
+        0,
+    )?;
+    if boundary
+        .per_source_cutoffs()
+        .keys()
+        .ne(registered.per_source_cutoffs().keys())
+    {
+        return Err(determinism(
+            "persisted serving boundary has an incomplete source population".to_owned(),
+        ));
+    }
+    let decision_at_ms = boundary.decision_at().timestamp_millis();
+    let knowledge_cutoff_ms = boundary.knowledge_cutoff().timestamp_millis();
+    if completion.decision_at != decision_at_ms
+        || completion.knowledge_cutoff != knowledge_cutoff_ms
+    {
+        return Err(determinism(
+            "serving completion clock differs from its exact Postgres boundary".to_owned(),
+        ));
+    }
+    if features.len() != vector_ids.len() || feature_infos.len() != vector_ids.len() {
+        return Err(determinism(
+            "serving completion has an inconsistent feature boundary population".to_owned(),
+        ));
+    }
+    let first_row = features
+        .get(first_vector_id)
         .and_then(|rows| rows.first())
         .ok_or_else(|| determinism(format!("no feature boundary for vector {first_vector_id}")))?;
+    let expected_source_cutoffs = &first_row.per_source_cutoffs_json;
     let cutoffs: BTreeMap<DecisionSource, DateTime<Utc>> =
-        serde_json::from_str(&feature.per_source_cutoffs_json).map_err(|error| {
+        serde_json::from_str(expected_source_cutoffs).map_err(|error| {
             ResearchError::Determinism {
                 detail: format!("invalid serving per-source cutoffs: {error}"),
             }
         })?;
-    for (source, cutoff) in cutoffs {
-        let source_lag_ms = decision_at.signed_duration_since(cutoff).num_milliseconds();
-        if source_lag_ms < 0 || source_lag_ms % 1_000 != 0 {
+    if &cutoffs != boundary.per_source_cutoffs() {
+        return Err(determinism(format!(
+            "feature vector {first_vector_id} source cutoffs differ from its exact Postgres boundary"
+        )));
+    }
+
+    let mut seen = HashSet::with_capacity(vector_ids.len());
+    for vector_id in vector_ids {
+        if !seen.insert(vector_id) {
+            return Err(determinism(
+                "serving completion repeats a feature boundary".to_owned(),
+            ));
+        }
+        let info = feature_infos.get(&vector_id).ok_or_else(|| {
+            determinism(format!(
+                "no persisted feature boundary for vector {vector_id}"
+            ))
+        })?;
+        info.decision_boundary.validate()?;
+        if info.feature_vector_id != vector_id
+            || info.decision_at != boundary.decision_at()
+            || &info.decision_boundary != boundary
+            || &info.decision_capture.snapshot.boundary != boundary
+        {
             return Err(determinism(format!(
-                "source {source:?} cutoff has invalid lag {source_lag_ms}ms"
+                "Postgres feature vector {vector_id} contains a different exact decision boundary"
             )));
         }
-        let source_lag_secs = u64::try_from(source_lag_ms / 1_000)
-            .map_err(|error| determinism(format!("source cutoff conversion failed: {error}")))?;
-        boundary = boundary.with_source_cutoff(source, source_lag_secs)?;
+        let rows = features
+            .get(&vector_id)
+            .filter(|rows| !rows.is_empty())
+            .ok_or_else(|| determinism(format!("no feature boundary for vector {vector_id}")))?;
+        for row in rows {
+            if row.feature_vector_id != vector_id
+                || row.decision_at != decision_at_ms
+                || row.knowledge_cutoff != knowledge_cutoff_ms
+                || &row.per_source_cutoffs_json != expected_source_cutoffs
+            {
+                return Err(determinism(format!(
+                    "feature vector {vector_id} source cutoffs or projected clock differ from its exact Postgres boundary"
+                )));
+            }
+        }
     }
     for row in inputs {
-        if row.decision_at != completion.decision_at
-            || row.knowledge_cutoff != completion.knowledge_cutoff
-        {
+        if row.decision_at != decision_at_ms || row.knowledge_cutoff != knowledge_cutoff_ms {
             return Err(determinism(format!(
                 "model input run {} contains multiple decision boundaries",
                 completion.model_run_id
             )));
         }
     }
-    let expected_source_cutoffs = &feature.per_source_cutoffs_json;
-    for rows in features.values() {
-        for row in rows {
-            if row.decision_at != completion.decision_at
-                || row.knowledge_cutoff != completion.knowledge_cutoff
-                || &row.per_source_cutoffs_json != expected_source_cutoffs
-            {
-                return Err(determinism(format!(
-                    "feature vector {} contains a boundary inconsistent with model run {}",
-                    row.feature_vector_id, completion.model_run_id
-                )));
-            }
-        }
-    }
-    Ok(boundary)
-}
-
-pub(crate) fn report_decision_boundary(
-    report: &RecommendationReportInfo,
-    run: &ReportRunInfo,
-    config: &DecisionPolicySnapshot,
-) -> QuantResult<DecisionBoundary> {
-    let persisted_lag = run.knowledge_lag_secs.ok_or_else(|| {
-        determinism(format!(
-            "report run {} has no frozen knowledge lag",
-            run.report_run_id
-        ))
-    })?;
-    let knowledge_lag_secs = u64::try_from(persisted_lag).map_err(|error| {
-        determinism(format!(
-            "report run {} has invalid knowledge lag {}: {error}",
-            run.report_run_id, persisted_lag
-        ))
-    })?;
-    DecisionClock::new(knowledge_lag_secs).serving_boundary(
-        report.decision_at,
-        config
-            .profile_artifacts
-            .domain
-            .definition
-            .crypto
-            .availability_lag_secs,
-        config
-            .profile_artifacts
-            .domain
-            .definition
-            .weather
-            .availability_lag_secs,
-    )
+    Ok(boundary.clone())
 }
 
 fn vector_binding(
@@ -3222,14 +3902,24 @@ fn validate_candidate_run(
     Ok(())
 }
 
-fn validate_route_run_binding(
+fn validate_route_run_binding<'a>(
     report: &RecommendationReportInfo,
-    route_run: &ReportRouteRunInfo,
+    route_run: &'a ReportRouteRunInfo,
     run: &ModelRunInfo,
-) -> QuantResult<()> {
+) -> QuantResult<&'a RouteModelLineage> {
+    let lineage = route_run.lineage_json.as_ref().ok_or_else(|| {
+        determinism(format!(
+            "report {} Route {:?} has no frozen model lineage",
+            report.recommendation_report_id, route_run.route
+        ))
+    })?;
     if route_run.report_run_id != report.report_run_id
         || route_run.model_run_id.as_ref() != Some(&run.model_run_id)
         || route_run.model_version_id != run.model_version_id
+        || lineage.model_run_id.as_ref() != Some(&run.model_run_id)
+        || Some(lineage.model_version_id) != run.model_version_id
+        || route_run.model_run_id != lineage.model_run_id
+        || route_run.model_version_id != Some(lineage.model_version_id)
         || run.window_start != report.decision_at
         || run.decision_policy_snapshot_id != report.decision_policy_snapshot_id
         || run.market_selection_id.as_ref() != Some(&report.market_selection_id)
@@ -3239,7 +3929,7 @@ fn validate_route_run_binding(
             report.recommendation_report_id, route_run.route, run.model_run_id
         )));
     }
-    Ok(())
+    Ok(lineage)
 }
 
 fn validate_report_subject(
@@ -3295,14 +3985,8 @@ fn validate_quality_evidence(
     let mut vector_ids = HashSet::new();
     let mut token_ids = HashSet::new();
     for record in &dq.tokens_json.0 {
-        let feature_vector_id = record.feature_vector_id.as_ref().ok_or_else(|| {
-            determinism(format!(
-                "global report {} contains unbound DQ evidence for market {}",
-                report.recommendation_report_id, record.market_id
-            ))
-        })?;
         if !member_markets.contains(&record.market_id)
-            || !vector_ids.insert(*feature_vector_id)
+            || !vector_ids.insert(record.feature_vector_id)
             || !token_ids.insert(record.token_id.clone())
         {
             return Err(determinism(format!(
@@ -3373,6 +4057,89 @@ fn representative_candidate<'a>(
         .ok_or_else(|| determinism(format!("{subject} has no parity candidates")))
 }
 
+fn verified_input_bindings(
+    run: &ModelRunInfo,
+    inputs: &[QuantModelInputEventRow],
+) -> QuantResult<HashMap<MarketId, FeatureVectorId>> {
+    let version = run.model_version_id.ok_or_else(|| {
+        determinism(format!(
+            "model {} has no frozen version for input witnesses",
+            run.model_run_id
+        ))
+    })?;
+    for input in inputs {
+        if input.model_run_id != run.model_run_id || input.model_version_id != version {
+            return Err(determinism(format!(
+                "model {} input witness changed its run/version binding",
+                run.model_run_id
+            )));
+        }
+        ContentHash::parse(&input.transform_hash).map_err(|error| {
+            determinism(format!(
+                "model {} input witness has an invalid transform: {error}",
+                run.model_run_id
+            ))
+        })?;
+    }
+    vector_binding(inputs)
+}
+
+fn validate_replay_witnesses(
+    run: &ModelRunInfo,
+    candidates: &[&FeatureParityCandidate],
+    inputs: &[QuantModelInputEventRow],
+) -> QuantResult<()> {
+    let bindings = verified_input_bindings(run, inputs)?;
+    for candidate in candidates {
+        let observed = candidate
+            .market_id
+            .as_ref()
+            .and_then(|market| bindings.get(market));
+        let valid = match candidate.input_witness {
+            FeatureParityInputWitness::VerifiedModelInput { feature_vector_id } => {
+                observed == Some(&feature_vector_id)
+            }
+            FeatureParityInputWitness::SelectionOnly => observed.is_none(),
+            FeatureParityInputWitness::PendingServingEvidence => false,
+        };
+        if candidate.subject != FeatureParitySubject::ModelRun(run.model_run_id) || !valid {
+            return Err(determinism(format!(
+                "model {} candidate {} input witness differs from its committed binding",
+                run.model_run_id, candidate.sampling_key,
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_witness_states(candidates: &[FeatureParityCandidate]) -> QuantResult<()> {
+    let mut states = HashMap::<ModelRunId, bool>::new();
+    for candidate in candidates {
+        match &candidate.subject {
+            FeatureParitySubject::RecommendationReport(_) => {
+                if candidate.input_witness != FeatureParityInputWitness::SelectionOnly {
+                    return Err(determinism(
+                        "report selection cannot claim a model-input witness".to_owned(),
+                    ));
+                }
+            }
+            FeatureParitySubject::ModelRun(id) => {
+                let pending =
+                    candidate.input_witness == FeatureParityInputWitness::PendingServingEvidence;
+                if states
+                    .insert(*id, pending)
+                    .is_some_and(|previous| previous != pending)
+                {
+                    return Err(determinism(format!(
+                        "model {id} mixes pending and committed input qualifications"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn pending_completion(
     run_id: &ModelRunId,
     candidates: &[&FeatureParityCandidate],
@@ -3389,6 +4156,37 @@ fn pending_completion(
             )
         })
         .collect()
+}
+
+fn partition_witness_candidates(
+    candidates: &[FeatureParityCandidate],
+) -> QuantResult<(
+    Vec<FeatureParityCandidate>,
+    Vec<PendingFeatureParityComparison>,
+)> {
+    let mut ready = Vec::with_capacity(candidates.len());
+    let mut pending = Vec::new();
+    for candidate in candidates {
+        match (&candidate.subject, candidate.input_witness) {
+            (
+                FeatureParitySubject::ModelRun(run_id),
+                FeatureParityInputWitness::PendingServingEvidence,
+            ) => {
+                // The discovery snapshot stays pending even if the writer becomes
+                // visible before replay starts. The next attempt re-qualifies it.
+                pending.extend(pending_completion(run_id, &[candidate]));
+            }
+            (FeatureParitySubject::RecommendationReport(_), witness)
+                if witness != FeatureParityInputWitness::SelectionOnly =>
+            {
+                return Err(determinism(
+                    "report selection cannot claim a model-input witness".to_owned(),
+                ));
+            }
+            _ => ready.push(candidate.clone()),
+        }
+    }
+    Ok((ready, pending))
 }
 
 fn select_comparisons(
@@ -3493,36 +4291,200 @@ fn determinism(detail: String) -> QuantError {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{collections::HashMap, slice};
-
+mod report_selector_tests {
     use chrono::{DateTime, Utc};
+    use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
     use quant_pivot_models::{
-        clickhouse::{QuantFeatureEventRow, QuantModelInputEventRow},
-        domain::data_plane::DecisionClock,
-        domain::quant::{MarketSelectionMemberInfo, ReportDataQualitySnapshotInfo},
+        domain::{data_plane::DecisionClock, quant::MarketSelectionInfo},
+        runtime_config::{BuyModelRoute, DataQualityConfig, FeaturesConfig, SelectionConfig},
+        types::{DecisionPolicySnapshotId, HistoryServingHeadSealId, RecommendationReportId},
+    };
+    use quant_pivot_research::{
+        hashing::ResearchHasher,
+        selection::{
+            ConfiguredMarketSelector, MarketSelectionBuildRequest, MarketSelector,
+            ModelFeatureRequirements, RouteAvailabilityContract,
+        },
+    };
+
+    use super::{
+        ComparisonSubject, FeatureParityCandidate, FeatureParityInputWitness, FeatureParitySubject,
+        ReportSelectorBinding, selection_comparisons,
+    };
+    use crate::report::universe::ReportUniverseContract;
+
+    #[test]
+    fn rejects_changed_universe() -> QuantResult<()> {
+        let hash = ResearchHasher::canonical(&"frozen universe")?;
+        let changed = ResearchHasher::canonical(&"changed universe")?;
+        let binding = ReportSelectorBinding::Runtime {
+            serving_head_seal_id: HistoryServingHeadSealId::from_v7(),
+            serving_head_seal_hash: hash,
+            universe_plan_hash: hash,
+        };
+        for candidate_hash in [hash, changed] {
+            let contract = ReportUniverseContract {
+                availability: RouteAvailabilityContract {
+                    primary_route: BuyModelRoute::Pooled,
+                    active_routes: vec![BuyModelRoute::Pooled, BuyModelRoute::Weather],
+                    universe_plan_hash: candidate_hash,
+                },
+                requirements: ModelFeatureRequirements::default(),
+            };
+            let result = binding.verify_universe(contract);
+            if candidate_hash == hash {
+                assert_eq!(
+                    result?.route_availability.map(|row| row.universe_plan_hash),
+                    Some(hash)
+                );
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(QuantError::Research(ResearchError::Determinism { .. }))
+                ));
+            }
+        }
+        let contract = ReportUniverseContract {
+            availability: RouteAvailabilityContract {
+                primary_route: BuyModelRoute::Pooled,
+                active_routes: vec![BuyModelRoute::Pooled],
+                universe_plan_hash: hash,
+            },
+            requirements: ModelFeatureRequirements::default(),
+        };
+        assert!(
+            ReportSelectorBinding::Materialized
+                .verify_universe(contract)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn typed_selection_comparison() -> QuantResult<()> {
+        let decision_at: DateTime<Utc> =
+            DateTime::from_timestamp(1_800_000_000, 0).expect("decision");
+        let request = MarketSelectionBuildRequest {
+            decision_at,
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            selection: SelectionConfig::default(),
+            data_quality: DataQualityConfig::default(),
+            features: FeaturesConfig::default(),
+            model_requirements: ModelFeatureRequirements::default(),
+            knowledge_lag_secs: 10,
+            route_availability: Some(RouteAvailabilityContract {
+                primary_route: BuyModelRoute::Pooled,
+                active_routes: vec![BuyModelRoute::Pooled, BuyModelRoute::Weather],
+                universe_plan_hash: ResearchHasher::canonical(&"all-active universe")?,
+            }),
+        };
+        let selector = ConfiguredMarketSelector::new();
+        let online = selector.build_snapshot(request.clone(), Vec::new()).await?;
+        let replay = selector.build_snapshot(request.clone(), Vec::new()).await?;
+        let mut omitted = request;
+        omitted.route_availability = None;
+        let broken = selector.build_snapshot(omitted, Vec::new()).await?;
+        let persisted = MarketSelectionInfo {
+            market_selection_id: online.market_selection_id,
+            decision_at,
+            decision_policy_snapshot_id: online.decision_policy_snapshot_id,
+            selector_hash: online.selector_hash,
+            selector_evidence: online.selector_evidence,
+            market_count: 0,
+            exclusion_summary: online.exclusion_summary,
+            created_at: decision_at,
+        };
+        let report_id = RecommendationReportId::from_v7();
+        let candidate = FeatureParityCandidate {
+            sampling_key: format!("report/{report_id}"),
+            subject: FeatureParitySubject::RecommendationReport(report_id),
+            market_id: None,
+            decision_at,
+            input_witness: FeatureParityInputWitness::SelectionOnly,
+        };
+        let boundary = DecisionClock::new(10).serving_boundary(decision_at, 0, 0)?;
+        for (replayed, matches) in [(&replay, true), (&broken, false)] {
+            let comparisons = selection_comparisons(
+                &candidate,
+                ComparisonSubject {
+                    report: Some(&report_id),
+                    model_run: None,
+                    model_version: None,
+                },
+                &persisted,
+                &[],
+                replayed,
+                &boundary,
+            )?;
+            assert_eq!(comparisons.len(), 1);
+            assert_eq!(
+                comparisons[0].online.fingerprint == comparisons[0].replay.fingerprint,
+                matches
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::{BTreeMap, HashMap},
+        hint, slice,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::{Duration as StdDuration, Instant as StdInstant},
+    };
+
+    use chrono::{DateTime, Duration as ChronoDuration, Utc};
+    use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
+    use quant_pivot_error::{QuantError, research::ResearchError};
+    use quant_pivot_models::{
+        clickhouse::{
+            QuantFeatureEventRow, QuantModelInputEventRow, QuantServingEvidenceCompletionRow,
+        },
+        domain::{
+            data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
+            quant::{FeatureVectorInfo, MarketSelectionMemberInfo, ReportDataQualitySnapshotInfo},
+        },
         enums::{
+            catalog::CatalogTimestampQuality,
             clickhouse::{ChFeatureCellState, ChFeatureSourceKind, ChFeatureValueKind},
             common::MarketCategory,
             factor::FactorFamily,
             market::MarketStatus,
-            quant::{RecommendationReportStatus, ReportKind},
+            quant::{OutcomeSide, RecommendationReportStatus, ReportKind},
         },
         runtime_config::{BuyModelRoute, DomainConfig, FactorsConfig, FeaturesConfig},
         types::{
-            DecisionPolicySnapshotId, EventId, FeatureParityDetailSource, FeatureVectorId,
-            MarketSelectionId, ModelVersionId, ReportDataQualityTokens, ResearchFeatureContract,
+            CatalogDecisionRef, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId,
+            ContentHash, DecisionCaptureEvidence, DecisionPolicySnapshotId,
+            DecisionSnapshotEvidence, EventId, FeatureParityDetailSource, FeatureSourceRefs,
+            FeatureVectorId, FeatureVectorPayload, FinalizedExecutionEvidence, MarketSelectionId,
+            ModelVersionId, Probability, RecommendationId, ReportDataQualityTokens,
+            ResearchFeatureContract, SchemaVersion, SelectionMemberEvidence,
             TokenDataQualityRecord, TokenId, Usd,
         },
     };
+    use quant_pivot_research::hashing::ResearchHasher;
     use rust_decimal_macros::dec;
+    use tokio::time::{Instant, sleep, timeout};
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
 
     use super::{
-        DataQualityStatus, FactorEngine, FeatureParityCandidate, FeatureParityComparison,
-        FeatureParityEvidence, FeatureParityStage, FeatureParitySubject, MarketId, ModelRunId,
-        RecommendationReportId, boundary_from_online, feature_vector_binding, online_route_binding,
-        pending_completion, representative_candidate, select_comparisons,
-        validate_input_population, validate_quality_evidence, validate_run_completion,
+        DataQualityStatus, DurableFeatureParitySource, FactorEngine, FeatureParityCandidate,
+        FeatureParityComparison, FeatureParityEvidence, FeatureParityInputWitness,
+        FeatureParityStage, FeatureParitySubject, MarketId, ModelRunId, ModelRunInfo, ModelRunKind,
+        ModelRunStatus, ParityComputeBoundary, RecommendationReportId, ReplayHistoryMode,
+        boundary_from_online, feature_vector_binding, online_route_binding,
+        partition_witness_candidates, pending_completion, replay_feature_population,
+        representative_candidate, select_comparisons, validate_input_population,
+        validate_quality_evidence, validate_replay_witnesses, validate_run_completion,
+        validate_witness_states, verified_input_bindings,
     };
     use crate::{
         observability::serving_evidence::{
@@ -3542,7 +4504,173 @@ mod tests {
             subject: FeatureParitySubject::ModelRun(*run_id),
             market_id: Some(market_id),
             decision_at,
+            input_witness: FeatureParityInputWitness::SelectionOnly,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn boundary_threads_and_cancel() {
+        let io_thread = async {
+            tokio::task::yield_now().await;
+            thread::current().name().unwrap_or_default().to_owned()
+        }
+        .await;
+        assert!(!io_thread.starts_with("quant-offline-"));
+        let boundary = ParityComputeBoundary::new(
+            Arc::new(ComputeExecutor::new().expect("compute executor")),
+            OfflineMemory::try_gib(1).expect("offline memory"),
+            1,
+        );
+        let cancel = CancellationToken::new();
+        let kernel = boundary.clone();
+        let kernel_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            kernel
+                .run(&kernel_cancel, || {
+                    let until = StdInstant::now() + StdDuration::from_millis(100);
+                    while StdInstant::now() < until {
+                        hint::spin_loop();
+                    }
+                    Ok(thread::current().name().unwrap_or_default().to_owned())
+                })
+                .await
+        });
+        let heartbeat = Instant::now();
+        sleep(StdDuration::from_millis(10)).await;
+        assert!(heartbeat.elapsed() < StdDuration::from_millis(80));
+        let kernel_thread = task.await.expect("kernel task").expect("offline kernel");
+        assert!(kernel_thread.starts_with("quant-offline-"));
+
+        let release = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicBool::new(false));
+        let holder_boundary = boundary.clone();
+        let holder_cancel = CancellationToken::new();
+        let holder_release = Arc::clone(&release);
+        let holder_started = Arc::clone(&started);
+        let holder = tokio::spawn(async move {
+            holder_boundary
+                .run(&holder_cancel, move || {
+                    holder_started.store(true, Ordering::Release);
+                    while !holder_release.load(Ordering::Acquire) {
+                        hint::spin_loop();
+                    }
+                    Ok(())
+                })
+                .await
+        });
+        while !started.load(Ordering::Acquire) {
+            sleep(StdDuration::from_millis(1)).await;
+        }
+        let waiting_cancel = CancellationToken::new();
+        let waiting_boundary = boundary.clone();
+        let waiting_token = waiting_cancel.clone();
+        let waiting =
+            tokio::spawn(async move { waiting_boundary.run(&waiting_token, || Ok(())).await });
+        waiting_cancel.cancel();
+        let error = timeout(StdDuration::from_millis(100), waiting)
+            .await
+            .expect("waiting cancellation deadline")
+            .expect("waiting task")
+            .expect_err("waiting kernel must cancel");
+        assert!(matches!(
+            error,
+            QuantError::Research(ResearchError::Cancelled { .. })
+        ));
+        release.store(true, Ordering::Release);
+        holder.await.expect("holder task").expect("holder kernel");
+
+        let running_cancel = CancellationToken::new();
+        let running_boundary = boundary.clone();
+        let running_token = running_cancel.clone();
+        let running_started = Arc::new(AtomicBool::new(false));
+        let kernel_started = Arc::clone(&running_started);
+        let kernel_token = running_cancel.clone();
+        let running = tokio::spawn(async move {
+            running_boundary
+                .run(&running_token, move || {
+                    kernel_started.store(true, Ordering::Release);
+                    while !kernel_token.is_cancelled() {
+                        hint::spin_loop();
+                    }
+                    Err::<(), QuantError>(
+                        ResearchError::Cancelled {
+                            detail: "test kernel observed cancellation".to_owned(),
+                        }
+                        .into(),
+                    )
+                })
+                .await
+        });
+        while !running_started.load(Ordering::Acquire) {
+            sleep(StdDuration::from_millis(1)).await;
+        }
+        running_cancel.cancel();
+        let error = timeout(StdDuration::from_millis(100), running)
+            .await
+            .expect("running cancellation deadline")
+            .expect("running task")
+            .expect_err("running kernel must cancel");
+        assert!(matches!(
+            error,
+            QuantError::Research(ResearchError::Cancelled { .. })
+        ));
+    }
+
+    #[test]
+    fn history_modes_fail_closed() {
+        let market = MarketId::new("history-mode-market");
+        let mut evidence =
+            HashMap::from([(market.clone(), FinalizedExecutionEvidence::NotRequired)]);
+        assert_eq!(
+            DurableFeatureParitySource::replay_history_mode(false, &evidence)
+                .expect("not-required history mode"),
+            ReplayHistoryMode::NotRequired
+        );
+        assert!(DurableFeatureParitySource::replay_history_mode(true, &evidence).is_err());
+
+        evidence.insert(
+            market.clone(),
+            FinalizedExecutionEvidence::runtime(false, None, None),
+        );
+        assert_eq!(
+            DurableFeatureParitySource::replay_history_mode(true, &evidence)
+                .expect("disabled runtime history mode"),
+            ReplayHistoryMode::RuntimeDisabled
+        );
+
+        let accepted_at =
+            DateTime::from_timestamp(1_700_000_000, 0).expect("history-mode acceptance time");
+        evidence.insert(
+            market.clone(),
+            FinalizedExecutionEvidence::runtime(true, Some(42), Some(accepted_at)),
+        );
+        assert_eq!(
+            DurableFeatureParitySource::replay_history_mode(true, &evidence)
+                .expect("enabled runtime history mode"),
+            ReplayHistoryMode::RuntimeEnabled {
+                accepted_through_block: 42,
+                accepted_through_at: accepted_at,
+            }
+        );
+
+        evidence.insert(
+            MarketId::new("history-mode-mismatch"),
+            FinalizedExecutionEvidence::runtime(true, Some(43), Some(accepted_at)),
+        );
+        assert!(DurableFeatureParitySource::replay_history_mode(true, &evidence).is_err());
+
+        evidence.clear();
+        evidence.insert(
+            market,
+            FinalizedExecutionEvidence::materialized(accepted_at),
+        );
+        assert_eq!(
+            DurableFeatureParitySource::replay_history_mode(true, &evidence)
+                .expect("materialized history mode"),
+            ReplayHistoryMode::Materialized {
+                available_by: accepted_at,
+            }
+        );
     }
 
     fn comparison(
@@ -3642,39 +4770,726 @@ mod tests {
         }
     }
 
+    struct OnlineBoundaryFixture {
+        boundary: DecisionBoundary,
+        completion: QuantServingEvidenceCompletionRow,
+        features: HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
+        persisted: HashMap<FeatureVectorId, FeatureVectorInfo>,
+    }
+
+    impl OnlineBoundaryFixture {
+        fn fractional() -> Self {
+            let decision_at = "2026-08-31T15:33:43.931123Z"
+                .parse::<DateTime<Utc>>()
+                .expect("microsecond decision time");
+            let watermark = "2026-08-31T15:33:02.000017Z"
+                .parse::<DateTime<Utc>>()
+                .expect("microsecond finalized watermark");
+            let boundary = DecisionClock::new(2)
+                .serving_boundary(decision_at, 5, 300)
+                .expect("canonical serving boundary")
+                .with_source_watermark(DecisionSource::FinalizedExecution, watermark)
+                .expect("immutable finalized watermark");
+            Self::new(&boundary)
+        }
+
+        fn refresh_completion(&mut self) {
+            let rows = self
+                .features
+                .values()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            let commitment = feature_commitment(&rows).expect("complete feature commitment");
+            self.completion = completion_marker(
+                &self.completion.model_run_id,
+                &self.boundary,
+                &commitment,
+                &[],
+                self.boundary.decision_at().timestamp_millis() + 1,
+            )
+            .expect("refreshed complete serving evidence");
+        }
+
+        fn add_vector(
+            &mut self,
+            market: &str,
+            token: &str,
+            category: MarketCategory,
+        ) -> FeatureVectorId {
+            let first_id = *self.persisted.keys().next().expect("template vector");
+            let vector_id = FeatureVectorId::from_v7();
+            let mut info = self.persisted[&first_id].clone();
+            info.feature_vector_id = vector_id;
+            info.market_id = MarketId::new(market);
+            info.token_id = Some(TokenId::new(token));
+            let capture = &mut info.decision_capture;
+            capture.identity.category = category;
+            capture.snapshot.market_id = info.market_id.clone();
+            capture.snapshot.token_id = TokenId::new(token);
+            capture.snapshot.selection.market_id = info.market_id.clone();
+            capture.snapshot.selection.category = category;
+            capture.snapshot.selection.primary_token_id = TokenId::new(token);
+            capture.snapshot.book_snapshot_ref.token_id = TokenId::new(token);
+            info.decision_capture_hash = ResearchHasher::canonical(capture).expect("capture hash");
+            let mut row = self.features[&first_id][0].clone();
+            row.feature_vector_id = vector_id;
+            row.market_id = info.market_id.clone();
+            row.token_id = info.token_id.clone();
+            row.decision_capture_hash = info.decision_capture_hash.canonical_text().to_string();
+            self.features.insert(vector_id, vec![row]);
+            self.persisted.insert(vector_id, info);
+            self.refresh_completion();
+            vector_id
+        }
+
+        fn new(boundary: &DecisionBoundary) -> Self {
+            let decision_at = boundary.decision_at();
+            let recommendation = report_fixtures::recommendation(
+                RecommendationReportId::from_v7(),
+                RecommendationId::from_v7(),
+                1,
+                "boundary-precision-market",
+                OutcomeSide::Yes,
+                Usd::ZERO,
+            );
+            let digest = ContentHash::from_bytes([1; 32]);
+            let mut book_snapshot_ref = recommendation.evidence_refs.book_snapshot_ref;
+            book_snapshot_ref.token_id = recommendation.token_id.clone();
+            let capture = DecisionCaptureEvidence {
+                snapshot: DecisionSnapshotEvidence {
+                    boundary: boundary.clone(),
+                    market_id: recommendation.market_id.clone(),
+                    event_id: recommendation.event_id.clone(),
+                    token_id: recommendation.token_id.clone(),
+                    catalog: CatalogDecisionRef {
+                        catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),
+                        market_change_id: CatalogMarketChangeId::from_v7(),
+                        event_change_id: CatalogEventChangeId::from_v7(),
+                        market_content_hash: digest,
+                        event_content_hash: digest,
+                        membership_hash: digest,
+                        market_effective_at: boundary.cutoff_for(DecisionSource::Catalog),
+                        market_available_at: decision_at,
+                        event_effective_at: boundary.cutoff_for(DecisionSource::Catalog),
+                        event_available_at: decision_at,
+                        market_timestamp_quality: CatalogTimestampQuality::Source,
+                        event_timestamp_quality: CatalogTimestampQuality::Source,
+                    },
+                    book_snapshot_ref,
+                    book_effective_at: boundary.cutoff_for(DecisionSource::Book),
+                    book_available_at: decision_at,
+                    selection: SelectionMemberEvidence {
+                        market_id: recommendation.market_id.clone(),
+                        event_id: recommendation.event_id.clone(),
+                        category: recommendation.identity.category,
+                        primary_token_id: recommendation.token_id.clone(),
+                        secondary_token_id: None,
+                        liquidity_usd: None,
+                        volume_24h_usd: None,
+                        source_refs: Vec::new(),
+                    },
+                },
+                finalized_execution_evidence: FinalizedExecutionEvidence::runtime(
+                    true,
+                    Some(42),
+                    Some(boundary.cutoff_for(DecisionSource::FinalizedExecution)),
+                ),
+                identity: recommendation.identity,
+                market_context: recommendation.market_context,
+                data_quality: DataQualityStatus::Fresh,
+                liquidity_score: Probability::ZERO,
+            };
+            let vector_id = FeatureVectorId::from_v7();
+            let capture_hash = ResearchHasher::canonical(&capture).expect("capture commitment");
+            let persisted = FeatureVectorInfo {
+                feature_vector_id: vector_id,
+                market_id: recommendation.market_id.clone(),
+                token_id: Some(recommendation.token_id.clone()),
+                decision_at,
+                decision_boundary: boundary.clone(),
+                feature_schema_version: SchemaVersion::FIRST,
+                feature_hash: digest,
+                data_quality: DataQualityStatus::Fresh,
+                staleness_ms: 0,
+                payload: FeatureVectorPayload {
+                    generic: BTreeMap::new(),
+                    domain: None,
+                },
+                source_refs: FeatureSourceRefs::default(),
+                decision_capture: capture,
+                decision_capture_hash: capture_hash,
+                created_at: decision_at,
+            };
+            let mut row = feature_row(
+                &vector_id,
+                &recommendation.market_id,
+                decision_at.timestamp_millis(),
+            );
+            row.token_id = Some(recommendation.token_id);
+            row.knowledge_cutoff = boundary.knowledge_cutoff().timestamp_millis();
+            row.per_source_cutoffs_json = serde_json::to_string(boundary.per_source_cutoffs())
+                .expect("exact source cutoff projection");
+            row.decision_capture_hash = capture_hash.canonical_text().to_string();
+            let rows = vec![row];
+            let evidence = feature_commitment(&rows).expect("feature commitment");
+            let completion = completion_marker(
+                &ModelRunId::from_v7(),
+                boundary,
+                &evidence,
+                &[],
+                decision_at.timestamp_millis() + 1,
+            )
+            .expect("serving completion");
+            Self {
+                boundary: boundary.clone(),
+                completion,
+                features: HashMap::from([(vector_id, rows)]),
+                persisted: HashMap::from([(vector_id, persisted)]),
+            }
+        }
+    }
+
+    struct RoutePopulationFixture {
+        online: OnlineBoundaryFixture,
+        selection_id: MarketSelectionId,
+        members: Vec<MarketSelectionMemberInfo>,
+    }
+
+    impl Default for RoutePopulationFixture {
+        fn default() -> Self {
+            let mut online = OnlineBoundaryFixture::fractional();
+            let first_id = *online.persisted.keys().next().expect("first vector");
+            let first = online
+                .persisted
+                .get_mut(&first_id)
+                .expect("first PG vector");
+            first.decision_capture.identity.category = MarketCategory::Crypto;
+            first.decision_capture.snapshot.selection.category = MarketCategory::Crypto;
+            first.decision_capture_hash =
+                ResearchHasher::canonical(&first.decision_capture).expect("capture hash");
+            online.features.get_mut(&first_id).expect("first CH group")[0].decision_capture_hash =
+                first.decision_capture_hash.canonical_text().to_string();
+            online.add_vector(
+                "route-second-crypto",
+                "second-crypto-token",
+                MarketCategory::Crypto,
+            );
+            let selection_id = MarketSelectionId::from_v7();
+            let mut members = online
+                .persisted
+                .values()
+                .map(|info| MarketSelectionMemberInfo {
+                    market_selection_id: selection_id,
+                    market_id: info.market_id.clone(),
+                    event_id: info.decision_capture.snapshot.event_id.clone(),
+                    category: MarketCategory::Crypto,
+                    status: MarketStatus::Active,
+                    primary_token_id: info.token_id.clone().expect("bound token"),
+                    secondary_token_id: None,
+                    liquidity_usd: None,
+                    volume_24h_usd: None,
+                })
+                .collect::<Vec<_>>();
+            members.sort_by(|left, right| left.market_id.cmp(&right.market_id));
+            members.push(MarketSelectionMemberInfo {
+                market_selection_id: selection_id,
+                market_id: MarketId::new("weather-dependency"),
+                event_id: EventId::new("weather-event"),
+                category: MarketCategory::Weather,
+                status: MarketStatus::Active,
+                primary_token_id: TokenId::new("weather-token"),
+                secondary_token_id: None,
+                liquidity_usd: None,
+                volume_24h_usd: None,
+            });
+            Self {
+                online,
+                selection_id,
+                members,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum PopulationFault {
+        MissingRouteVector,
+        ForeignRouteVector,
+        SameCountReplacement,
+        ForeignMarketVector,
+        DuplicateGlobalMember,
+        ForeignGlobalMember,
+        WrongChToken,
+        WrongPgToken,
+        DuplicateVectorMarket,
+    }
+
+    #[test]
+    fn route_population_is_exact() {
+        let fixture = RoutePopulationFixture::default();
+        let samples = replay_feature_population(
+            &fixture.selection_id,
+            &fixture.online.boundary,
+            BuyModelRoute::Crypto,
+            &fixture.members,
+            &fixture.online.features,
+            &fixture.online.persisted,
+        )
+        .expect("exact Route vector population within global selection");
+        assert_eq!(samples.len(), 2);
+        assert_eq!(
+            fixture.members.len(),
+            3,
+            "global dependency population remains complete"
+        );
+        assert_eq!(
+            samples
+                .iter()
+                .map(|sample| (&sample.market_id, &sample.token_id))
+                .collect::<Vec<_>>(),
+            fixture
+                .members
+                .iter()
+                .take(2)
+                .map(|member| (&member.market_id, &member.primary_token_id))
+                .collect::<Vec<_>>(),
+        );
+
+        let run_id = fixture.online.completion.model_run_id;
+        let at = fixture.online.boundary.decision_at();
+        let candidates = fixture
+            .members
+            .iter()
+            .map(|member| candidate(&run_id, member.market_id.as_str(), at))
+            .collect::<Vec<_>>();
+        let references = candidates.iter().collect::<Vec<_>>();
+        let mut comparisons = fixture
+            .members
+            .iter()
+            .map(|member| {
+                let mut row = comparison(&run_id, Some(member.market_id.clone()), at);
+                row.stage = FeatureParityStage::Selection;
+                row
+            })
+            .collect::<Vec<_>>();
+        comparisons.extend(
+            samples
+                .iter()
+                .map(|sample| comparison(&run_id, Some(sample.market_id.clone()), at)),
+        );
+        let selected = select_comparisons(&run_id.to_string(), &references, &comparisons)
+            .expect("off-Route dependency retains real selection evidence");
+        let foreign = &candidates[2];
+        let foreign_rows = selected
+            .iter()
+            .filter(|row| row.sampling_key == foreign.sampling_key)
+            .collect::<Vec<_>>();
+        assert_eq!(foreign_rows.len(), 1);
+        assert_eq!(foreign_rows[0].stage, FeatureParityStage::Selection);
+        assert_eq!(selected.len(), 5);
+    }
+
+    #[test]
+    fn route_population_fails_closed() {
+        for fault in [
+            PopulationFault::MissingRouteVector,
+            PopulationFault::ForeignRouteVector,
+            PopulationFault::SameCountReplacement,
+            PopulationFault::ForeignMarketVector,
+            PopulationFault::DuplicateGlobalMember,
+            PopulationFault::ForeignGlobalMember,
+            PopulationFault::WrongChToken,
+            PopulationFault::WrongPgToken,
+            PopulationFault::DuplicateVectorMarket,
+        ] {
+            let mut fixture = RoutePopulationFixture::default();
+            let id = *fixture
+                .online
+                .persisted
+                .keys()
+                .next()
+                .expect("existing vector");
+            match fault {
+                PopulationFault::MissingRouteVector | PopulationFault::SameCountReplacement => {
+                    fixture.online.features.remove(&id);
+                    fixture.online.persisted.remove(&id);
+                    if matches!(fault, PopulationFault::SameCountReplacement) {
+                        fixture.online.add_vector(
+                            "weather-dependency",
+                            "weather-token",
+                            MarketCategory::Weather,
+                        );
+                        assert_eq!(fixture.online.persisted.len(), 2);
+                    }
+                }
+                PopulationFault::ForeignRouteVector => {
+                    fixture.online.add_vector(
+                        "weather-dependency",
+                        "weather-token",
+                        MarketCategory::Weather,
+                    );
+                }
+                PopulationFault::ForeignMarketVector => {
+                    fixture.online.add_vector(
+                        "outside-selection",
+                        "outside-token",
+                        MarketCategory::Crypto,
+                    );
+                }
+                PopulationFault::DuplicateGlobalMember => {
+                    fixture.members.push(fixture.members[2].clone());
+                }
+                PopulationFault::ForeignGlobalMember => {
+                    fixture.members[2].market_selection_id = MarketSelectionId::from_v7();
+                }
+                PopulationFault::WrongChToken => {
+                    fixture.online.features.get_mut(&id).expect("CH group")[0].token_id =
+                        Some(TokenId::new("wrong-token"));
+                }
+                PopulationFault::WrongPgToken => {
+                    fixture
+                        .online
+                        .persisted
+                        .get_mut(&id)
+                        .expect("PG row")
+                        .token_id = Some(TokenId::new("wrong-token"));
+                }
+                PopulationFault::DuplicateVectorMarket => {
+                    let info = fixture.online.persisted[&id].clone();
+                    fixture.online.add_vector(
+                        info.market_id.as_str(),
+                        info.token_id.as_ref().expect("token").as_str(),
+                        MarketCategory::Crypto,
+                    );
+                }
+            }
+            let error = replay_feature_population(
+                &fixture.selection_id,
+                &fixture.online.boundary,
+                BuyModelRoute::Crypto,
+                &fixture.members,
+                &fixture.online.features,
+                &fixture.online.persisted,
+            )
+            .expect_err("Route membership corruption must not be repaired by filtering vectors");
+            assert!(
+                matches!(
+                    &error,
+                    QuantError::Research(ResearchError::Determinism { .. })
+                ),
+                "{fault:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn boundary_precision_watermark() {
+        let decision_at = "2026-08-31T15:33:43.931Z"
+            .parse::<DateTime<Utc>>()
+            .expect("R7 decision time");
+        let watermark = "2026-08-31T15:33:02Z"
+            .parse::<DateTime<Utc>>()
+            .expect("R7 finalized execution watermark");
+        let boundary = DecisionClock::new(2)
+            .serving_boundary(decision_at, 5, 300)
+            .expect("canonical serving boundary")
+            .with_source_watermark(DecisionSource::FinalizedExecution, watermark)
+            .expect("exact immutable watermark");
+        let fixture = OnlineBoundaryFixture::new(&boundary);
+        let recovered = boundary_from_online(
+            &fixture.completion,
+            &[],
+            &fixture.features,
+            &fixture.persisted,
+        )
+        .expect("fractional finalized watermark must remain exact");
+        assert_eq!(recovered, boundary);
+        assert_eq!(
+            recovered.cutoff_for(DecisionSource::FinalizedExecution),
+            watermark
+        );
+    }
+
+    #[test]
+    fn boundary_precision_submillis() {
+        let fixture = OnlineBoundaryFixture::fractional();
+        let recovered = boundary_from_online(
+            &fixture.completion,
+            &[],
+            &fixture.features,
+            &fixture.persisted,
+        )
+        .expect("PG and JSON precision must survive the CH projection");
+        assert_eq!(recovered, fixture.boundary);
+        assert_eq!(
+            recovered
+                .cutoff_for(DecisionSource::FinalizedExecution)
+                .timestamp_subsec_nanos(),
+            17_000,
+        );
+        assert_eq!(
+            recovered.decision_at().timestamp_subsec_nanos(),
+            931_123_000
+        );
+    }
+
+    #[test]
+    fn boundary_precision_mixed_pg() {
+        let mut fixture = OnlineBoundaryFixture::fractional();
+        let first_id = *fixture.persisted.keys().next().expect("first vector");
+        let mut second = fixture.persisted[&first_id].clone();
+        // The maximal ID sorts after the first v7 ID, keeping the unmodified
+        // exact boundary as the completion's canonical first vector.
+        let second_id = FeatureVectorId::new(Uuid::from_u128(u128::MAX));
+        let shifted = DecisionClock::new(2)
+            .serving_boundary(
+                fixture.boundary.decision_at() + ChronoDuration::microseconds(1),
+                5,
+                300,
+            )
+            .expect("shifted exact PG clock")
+            .with_source_watermark(
+                DecisionSource::FinalizedExecution,
+                fixture
+                    .boundary
+                    .cutoff_for(DecisionSource::FinalizedExecution),
+            )
+            .expect("unchanged immutable execution watermark");
+        assert_ne!(shifted.decision_at(), fixture.boundary.decision_at());
+        assert_eq!(
+            shifted.decision_at().timestamp_millis(),
+            fixture.boundary.decision_at().timestamp_millis(),
+        );
+        second.feature_vector_id = second_id;
+        second.market_id = MarketId::new("second-boundary-market");
+        second.token_id = Some(TokenId::new("second-boundary-token"));
+        second.decision_at = shifted.decision_at();
+        second.created_at = shifted.decision_at();
+        second.decision_boundary = shifted.clone();
+        let capture = &mut second.decision_capture;
+        capture.snapshot.boundary = shifted.clone();
+        capture.snapshot.market_id = second.market_id.clone();
+        capture.snapshot.selection.market_id = second.market_id.clone();
+        let token = second.token_id.clone().expect("second token");
+        capture.snapshot.token_id = token.clone();
+        capture.snapshot.selection.primary_token_id = token.clone();
+        capture.snapshot.book_snapshot_ref.token_id = token;
+        capture.finalized_execution_evidence = FinalizedExecutionEvidence::runtime(
+            true,
+            Some(42),
+            Some(shifted.cutoff_for(DecisionSource::FinalizedExecution)),
+        );
+        second.decision_capture_hash = ResearchHasher::canonical(capture).expect("second capture");
+        let mut row = fixture.features[&first_id][0].clone();
+        row.feature_vector_id = second_id;
+        row.market_id = second.market_id.clone();
+        row.token_id = second.token_id.clone();
+        row.decision_capture_hash = second.decision_capture_hash.canonical_text().to_string();
+        fixture.persisted.insert(second_id, second);
+        fixture.features.insert(second_id, vec![row]);
+        fixture.refresh_completion();
+        let error = boundary_from_online(
+            &fixture.completion,
+            &[],
+            &fixture.features,
+            &fixture.persisted,
+        )
+        .expect_err("same CH millisecond must not hide different PG microseconds");
+        assert!(matches!(
+            &error,
+            QuantError::Research(ResearchError::Determinism { .. })
+        ));
+        assert!(
+            error.to_string().contains("Postgres feature vector"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn boundary_precision_json_mismatch() {
+        let mut fixture = OnlineBoundaryFixture::fractional();
+        let mut cutoffs = fixture.boundary.per_source_cutoffs().clone();
+        let cutoff = cutoffs
+            .get_mut(&DecisionSource::FinalizedExecution)
+            .expect("registered source");
+        let original_ms = cutoff.timestamp_millis();
+        *cutoff += ChronoDuration::microseconds(1);
+        assert_eq!(cutoff.timestamp_millis(), original_ms);
+        fixture.features.values_mut().next().expect("feature group")[0].per_source_cutoffs_json =
+            serde_json::to_string(&cutoffs).expect("changed exact source cutoff");
+        let error = boundary_from_online(
+            &fixture.completion,
+            &[],
+            &fixture.features,
+            &fixture.persisted,
+        )
+        .expect_err("JSON must not lose a one-microsecond watermark mismatch");
+        assert!(matches!(
+            &error,
+            QuantError::Research(ResearchError::Determinism { .. })
+        ));
+        assert!(error.to_string().contains("source cutoffs"), "{error}");
+    }
+
+    #[test]
+    fn boundary_precision_future_source() {
+        for change_persisted in [false, true] {
+            let mut fixture = OnlineBoundaryFixture::fractional();
+            let future = fixture.boundary.knowledge_cutoff() + ChronoDuration::microseconds(1);
+            if change_persisted {
+                let mut encoded = serde_json::to_value(&fixture.boundary).expect("typed boundary");
+                encoded["per_source_cutoffs"]["finalized_execution"] =
+                    serde_json::to_value(future).expect("future cutoff");
+                fixture
+                    .persisted
+                    .values_mut()
+                    .next()
+                    .expect("PG vector")
+                    .decision_boundary =
+                    serde_json::from_value(encoded).expect("untrusted persisted boundary");
+            } else {
+                let mut cutoffs = fixture.boundary.per_source_cutoffs().clone();
+                cutoffs.insert(DecisionSource::FinalizedExecution, future);
+                fixture.features.values_mut().next().expect("feature group")[0]
+                    .per_source_cutoffs_json =
+                    serde_json::to_string(&cutoffs).expect("future JSON cutoff");
+            }
+            let error = boundary_from_online(
+                &fixture.completion,
+                &[],
+                &fixture.features,
+                &fixture.persisted,
+            )
+            .expect_err("a future source cutoff must never be clamped into acceptance");
+            if change_persisted {
+                assert!(matches!(&error, QuantError::Config(_)));
+            } else {
+                assert!(matches!(
+                    &error,
+                    QuantError::Research(ResearchError::Determinism { .. })
+                ));
+            }
+            assert!(error.to_string().contains("source"), "{error}");
+        }
+    }
+
+    #[test]
+    fn boundary_precision_missing_source() {
+        for change_persisted in [false, true] {
+            let mut fixture = OnlineBoundaryFixture::fractional();
+            if change_persisted {
+                let incomplete = DecisionClock::new(2)
+                    .boundary(fixture.boundary.decision_at())
+                    .expect("general clock without serving source registrations");
+                let info = fixture.persisted.values_mut().next().expect("PG vector");
+                info.decision_boundary = incomplete.clone();
+                info.decision_capture.snapshot.boundary = incomplete;
+                fixture.features.values_mut().next().expect("feature group")[0]
+                    .per_source_cutoffs_json = "{}".to_owned();
+            } else {
+                let mut cutoffs = fixture.boundary.per_source_cutoffs().clone();
+                cutoffs.remove(&DecisionSource::DomainWeather);
+                fixture.features.values_mut().next().expect("feature group")[0]
+                    .per_source_cutoffs_json =
+                    serde_json::to_string(&cutoffs).expect("incomplete JSON source map");
+            }
+            let error = boundary_from_online(
+                &fixture.completion,
+                &[],
+                &fixture.features,
+                &fixture.persisted,
+            )
+            .expect_err("serving replay requires all seven frozen sources");
+            assert!(matches!(
+                &error,
+                QuantError::Research(ResearchError::Determinism { .. })
+            ));
+            assert!(error.to_string().contains("source"), "{error}");
+        }
+    }
+
+    #[test]
+    fn boundary_precision_missing_vectors() {
+        for missing_persisted in [false, true] {
+            let mut fixture = OnlineBoundaryFixture::fractional();
+            if missing_persisted {
+                fixture.persisted.clear();
+            } else {
+                fixture.features.clear();
+            }
+            let error = boundary_from_online(
+                &fixture.completion,
+                &[],
+                &fixture.features,
+                &fixture.persisted,
+            )
+            .expect_err("missing persisted or CH boundary population must fail closed");
+            assert!(matches!(
+                &error,
+                QuantError::Research(ResearchError::Determinism { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn boundary_precision_clock_mismatch() {
+        for change_completion in [false, true] {
+            let mut fixture = OnlineBoundaryFixture::fractional();
+            if change_completion {
+                fixture.completion.knowledge_cutoff += 1;
+            } else {
+                fixture.features.values_mut().next().expect("feature group")[0].decision_at += 1;
+            }
+            let error = boundary_from_online(
+                &fixture.completion,
+                &[],
+                &fixture.features,
+                &fixture.persisted,
+            )
+            .expect_err("CH scalar projections must match the exact PG boundary");
+            assert!(matches!(
+                &error,
+                QuantError::Research(ResearchError::Determinism { .. })
+            ));
+            assert!(error.to_string().contains("clock"), "{error}");
+        }
+    }
+
     #[test]
     fn zero_inputs_complete() {
         let decision_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
             .expect("millisecond decision time");
         let boundary = DecisionClock::new(0)
-            .boundary(decision_at)
-            .expect("decision boundary");
-        let run_id = ModelRunId::from_v7();
-        let vector_id = FeatureVectorId::from_v7();
-        let market_id = MarketId::new("zero-input-market");
-        let row = feature_row(&vector_id, &market_id, decision_at.timestamp_millis());
-        let feature_rows = vec![row];
-        let feature_evidence = feature_commitment(&feature_rows).expect("feature commitment");
-        let completion = completion_marker(&run_id, &boundary, &feature_evidence, &[], 1)
-            .expect("zero-input completion");
+            .serving_boundary(decision_at, 0, 0)
+            .expect("complete serving boundary");
+        let fixture = OnlineBoundaryFixture::new(&boundary);
+        let run_id = fixture.completion.model_run_id;
+        let market = &fixture
+            .persisted
+            .values()
+            .next()
+            .expect("PG vector")
+            .market_id;
+        let candidate = candidate(&run_id, market.as_str(), decision_at);
         let inputs_by_run = HashMap::new();
-        let features_by_vector = HashMap::from([(vector_id, feature_rows)]);
-        let candidate = candidate(&run_id, market_id.as_str(), decision_at);
-
         let inputs = validate_run_completion(
             &run_id,
             &candidate,
-            &completion,
+            &fixture.completion,
             &inputs_by_run,
-            &features_by_vector,
+            &fixture.features,
         )
         .expect("valid zero-input serving completion");
-
         assert!(inputs.is_empty());
         assert_eq!(
-            boundary_from_online(&completion, inputs, &features_by_vector)
-                .expect("boundary from feature evidence"),
-            boundary
+            boundary_from_online(
+                &fixture.completion,
+                inputs,
+                &fixture.features,
+                &fixture.persisted,
+            )
+            .expect("complete boundary with zero inputs"),
+            boundary,
         );
     }
 
@@ -3819,6 +5634,200 @@ mod tests {
         }));
     }
 
+    struct InputWitnessFixture {
+        online: OnlineBoundaryFixture,
+        run: ModelRunInfo,
+        candidate: FeatureParityCandidate,
+        input: QuantModelInputEventRow,
+    }
+
+    impl InputWitnessFixture {
+        fn new() -> Self {
+            let online = OnlineBoundaryFixture::fractional();
+            let vector = online.persisted.values().next().expect("committed vector");
+            let decision_at = online.boundary.decision_at();
+            let run_id = online.completion.model_run_id;
+            let mut input = input_row(
+                &run_id,
+                &vector.feature_vector_id,
+                &vector.market_id,
+                decision_at.timestamp_millis(),
+            );
+            let digest = ContentHash::from_bytes([7; 32]);
+            input.knowledge_cutoff = online.boundary.knowledge_cutoff().timestamp_millis();
+            input.transform_hash = digest.canonical_text().to_string();
+            let mut candidate = candidate(&run_id, vector.market_id.as_str(), decision_at);
+            candidate.input_witness = FeatureParityInputWitness::VerifiedModelInput {
+                feature_vector_id: vector.feature_vector_id,
+            };
+            let run = ModelRunInfo {
+                model_run_id: run_id,
+                run_kind: ModelRunKind::LiveInference,
+                model_version_id: Some(input.model_version_id),
+                decision_policy_snapshot_id: online.features[&vector.feature_vector_id][0]
+                    .decision_policy_snapshot_id,
+                market_selection_id: Some(MarketSelectionId::from_v7()),
+                window_start: decision_at,
+                window_end: decision_at + ChronoDuration::milliseconds(1),
+                status: ModelRunStatus::Succeeded,
+                input_hash: digest,
+                output_hash: Some(digest),
+                error_code: None,
+                error_message: None,
+                started_at: decision_at,
+                finished_at: Some(decision_at + ChronoDuration::milliseconds(1)),
+            };
+            Self {
+                online,
+                run,
+                candidate,
+                input,
+            }
+        }
+    }
+
+    #[test]
+    fn pending_requires_rediscovery() {
+        let fixture = InputWitnessFixture::new();
+        let inputs = vec![fixture.input.clone()];
+        let rows = fixture
+            .online
+            .features
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        let commitment = feature_commitment(&rows).expect("actual feature commitment");
+        let completion = completion_marker(
+            &fixture.run.model_run_id,
+            &fixture.online.boundary,
+            &commitment,
+            &inputs,
+            fixture.input.ingestion_time,
+        )
+        .expect("writer became complete after discovery");
+        let input_groups = HashMap::from([(fixture.run.model_run_id, inputs)]);
+        validate_run_completion(
+            &fixture.run.model_run_id,
+            &fixture.candidate,
+            &completion,
+            &input_groups,
+            &fixture.online.features,
+        )
+        .expect("fresh writer evidence is already complete");
+
+        let mut pending = fixture.candidate.clone();
+        pending.input_witness = FeatureParityInputWitness::PendingServingEvidence;
+        validate_witness_states(slice::from_ref(&pending)).expect("all-pending discovery");
+        let (ready, deferred) = partition_witness_candidates(slice::from_ref(&pending))
+            .expect("pending snapshot partitions before any evidence load");
+        assert!(ready.is_empty());
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].sampling_key, pending.sampling_key);
+        assert_eq!(deferred[0].reason, "serving_evidence_completion_missing");
+        assert!(
+            validate_replay_witnesses(&fixture.run, &[&pending], slice::from_ref(&fixture.input))
+                .is_err()
+        );
+
+        let (ready, deferred) = partition_witness_candidates(slice::from_ref(&fixture.candidate))
+            .expect("next attempt re-discovered the committed input");
+        assert_eq!(ready.len(), 1);
+        assert!(deferred.is_empty());
+        validate_replay_witnesses(&fixture.run, &[&ready[0]], slice::from_ref(&fixture.input))
+            .expect("verified retry uses the exact committed binding");
+    }
+
+    #[test]
+    fn witness_states_are_scoped() {
+        let fixture = InputWitnessFixture::new();
+        let mut pending = fixture.candidate.clone();
+        pending.input_witness = FeatureParityInputWitness::PendingServingEvidence;
+        assert!(validate_witness_states(&[pending.clone(), fixture.candidate.clone()]).is_err());
+        pending.subject = FeatureParitySubject::ModelRun(ModelRunId::from_v7());
+        validate_witness_states(&[pending, fixture.candidate.clone()])
+            .expect("different model subjects retain independent qualification states");
+
+        let mut report = fixture.candidate.clone();
+        report.subject =
+            FeatureParitySubject::RecommendationReport(RecommendationReportId::from_v7());
+        for witness in [
+            fixture.candidate.input_witness,
+            FeatureParityInputWitness::PendingServingEvidence,
+        ] {
+            report.input_witness = witness;
+            assert!(validate_witness_states(slice::from_ref(&report)).is_err());
+            assert!(partition_witness_candidates(slice::from_ref(&report)).is_err());
+        }
+        report.input_witness = FeatureParityInputWitness::SelectionOnly;
+        validate_witness_states(slice::from_ref(&report)).expect("report selection remains valid");
+    }
+
+    #[test]
+    fn input_binding_is_bidirectional() {
+        let fixture = InputWitnessFixture::new();
+        let inputs = slice::from_ref(&fixture.input);
+        validate_replay_witnesses(&fixture.run, &[&fixture.candidate], inputs)
+            .expect("exact verified model/market/vector witness");
+        for case in 0..6 {
+            let mut candidate = fixture.candidate.clone();
+            match case {
+                0 => {
+                    candidate.input_witness = FeatureParityInputWitness::VerifiedModelInput {
+                        feature_vector_id: FeatureVectorId::from_v7(),
+                    }
+                }
+                1 => candidate.input_witness = FeatureParityInputWitness::SelectionOnly,
+                2 => candidate.input_witness = FeatureParityInputWitness::PendingServingEvidence,
+                3 => candidate.subject = FeatureParitySubject::ModelRun(ModelRunId::from_v7()),
+                4 => candidate.market_id = Some(MarketId::new("outside-frozen-input")),
+                5 => candidate.market_id = None,
+                _ => unreachable!("bounded witness mutation matrix"),
+            }
+            let error = validate_replay_witnesses(&fixture.run, &[&candidate], inputs)
+                .expect_err("qualified input binding drift must fail closed");
+            assert!(
+                error.to_string().contains("input witness differs"),
+                "case {case}: {error}"
+            );
+        }
+        assert!(validate_replay_witnesses(&fixture.run, &[&fixture.candidate], &[]).is_err());
+        let mut selection_only = fixture.candidate;
+        selection_only.input_witness = FeatureParityInputWitness::SelectionOnly;
+        validate_replay_witnesses(&fixture.run, &[&selection_only], &[])
+            .expect("no-input selection evidence never claims a model input");
+    }
+
+    #[test]
+    fn input_identity_fails_closed() {
+        let fixture = InputWitnessFixture::new();
+        for case in 0..3 {
+            let mut input = fixture.input.clone();
+            match case {
+                0 => input.model_run_id = ModelRunId::from_v7(),
+                1 => input.model_version_id = ModelVersionId::from_v7(),
+                2 => input.transform_hash = "missing-transform".to_owned(),
+                _ => unreachable!("bounded input identity matrix"),
+            }
+            let error = verified_input_bindings(&fixture.run, &[input])
+                .expect_err("foreign or unverifiable input cannot qualify");
+            assert!(
+                error.to_string().contains("input witness"),
+                "case {case}: {error}"
+            );
+        }
+        let mut missing_version = fixture.run.clone();
+        missing_version.model_version_id = None;
+        assert!(
+            verified_input_bindings(&missing_version, slice::from_ref(&fixture.input)).is_err()
+        );
+        let mut conflicting = fixture.input.clone();
+        conflicting.feature_vector_id = FeatureVectorId::from_v7();
+        let error = verified_input_bindings(&fixture.run, &[fixture.input, conflicting])
+            .expect_err("one market cannot qualify two feature vectors");
+        assert!(error.to_string().contains("multiple feature vectors"));
+    }
+
     #[test]
     fn empty_returns_error_indexing() {
         let run_id = ModelRunId::from_v7();
@@ -3927,7 +5936,7 @@ mod tests {
 
         let feature_vector_id = FeatureVectorId::from_v7();
         dq.tokens_json = ReportDataQualityTokens(vec![TokenDataQualityRecord {
-            feature_vector_id: Some(feature_vector_id),
+            feature_vector_id,
             token_id: member.primary_token_id.clone(),
             market_id: member.market_id.clone(),
             status: DataQualityStatus::Fresh,
@@ -3942,5 +5951,27 @@ mod tests {
 
         dq.tokens_json.0[0].market_id = MarketId::new("outside-selection");
         assert!(validate_quality_evidence(&report, &[member], &dq).is_err());
+    }
+
+    #[test]
+    fn orchestration_excludes_compute_calls() {
+        let source = include_str!("durable_feature_parity.rs");
+        let replay = source
+            .split("async fn replay(")
+            .nth(2)
+            .and_then(|tail| tail.split("impl DurableFeatureParitySource").next())
+            .expect("replay source");
+        let pages = source
+            .split("async fn replay_pages")
+            .nth(1)
+            .and_then(|tail| tail.split("async fn frozen_candidates").next())
+            .expect("replay pages source");
+        for orchestration in [replay, pages] {
+            assert!(!orchestration.contains("run_compute("));
+            assert!(!orchestration.contains("block_on("));
+            assert!(!orchestration.contains("run_offline"));
+        }
+        let scoped = ["run_offline", "_scoped"].concat();
+        assert!(!source.contains(&scoped));
     }
 }

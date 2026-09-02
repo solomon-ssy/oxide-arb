@@ -7,32 +7,40 @@ mod rate_limiter;
 mod sdk_error;
 mod token;
 
-use std::{convert::TryFrom, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap, convert::TryFrom, fmt::Debug, str::FromStr, sync::Arc, time::Duration,
+};
 
-use alloy::signers::Signer;
-pub use book::OrderbookSnapshot;
+use alloy::primitives::Address;
+pub use book::{OrderbookSnapshot, VenueOrderMetadata};
 use chrono::{DateTime, NaiveDate, Utc};
 pub use convert::{ClobSide, SdkSideConversionError};
 use num_traits::ToPrimitive;
-pub use orders::{CancelAllResult, CancelResult, ClobMakerOrder, ClobOrder, ClobTrade, OpenOrder};
+pub use orders::{
+    CancelAllResult, CancelResult, ClobMakerOrder, ClobOrder, ClobTrade, OpenOrder,
+    VenueBalanceAllowanceSnapshot, VenueFundingAsset, VenueFundingBalance, VenueFundingEvidence,
+};
 use polymarket_client_sdk_v2::{
     auth::{Normal, state::Authenticated},
     clob::{
         Client as SdkClient, Config as SdkConfig,
         types::{
-            Amount, AssetType, OrderStatusType, OrderType as SdkOrderType, Side as SdkSide,
-            SignableOrder, TradeStatusType, TraderSide,
+            Amount, AssetType, OrderPayload, OrderStatusType, OrderType as SdkOrderType,
+            Side as SdkSide, SignableOrder, SignatureType, TickSize as SdkTickSize,
+            TradeStatusType, TraderSide,
             request::{
                 BalanceAllowanceRequest, OrderBookSummaryRequest, OrdersRequest, TradesRequest,
             },
             response::{
-                ClobMarketInfoResponse, OpenOrderResponse, PostOrderResponse, TradeResponse,
+                BalanceAllowanceResponse, ClobMarketInfoResponse, OpenOrderResponse,
+                OrderBookSummaryResponse, PostOrderResponse, TradeResponse,
             },
         },
     },
+    contract_config,
     types::{B256, U256},
 };
-use quant_pivot_error::api::ApiError;
+use quant_pivot_error::api::{ApiError, ClobOrderError};
 use quant_pivot_models::{
     config::PolymarketConfig,
     domain::{
@@ -40,7 +48,7 @@ use quant_pivot_models::{
             BookLevel,
             book::{OrderbookSide, QuantBookSnapshot},
         },
-        order::{OrderRequest, OrderResponse},
+        order::{CanonicalOrderAmounts, OrderRequest, OrderResponse, PolymarketOrderRules},
     },
     enums::{
         common::{OrderType, Side, TickSize},
@@ -50,7 +58,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         Bps, ClobFeeDetails, ClobMarketInfoVersion, ClobMarketInfoVersionId, ClobTokenDescriptor,
-        EvmAddress, EvmTransactionHash, MarketId, OrderId, Price, Shares, TokenId, Usd,
+        EvmAddress, EvmTransactionHash, EvmUint256, MarketId, OrderId, Price, Shares, TokenId, Usd,
         VenueOrderAmount, VenueTradeId,
     },
 };
@@ -61,6 +69,7 @@ pub use sdk_error::SdkClobError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use token::WireTokenId;
+use tokio::sync::Mutex;
 
 use crate::{
     infra::{
@@ -124,7 +133,10 @@ pub struct ClobClient {
     http: Client,
     clob_base_url: String,
     maker_address: EvmAddress,
+    chain_id: u64,
+    signature_type: SignatureType,
     signer: Arc<OrderSigner>,
+    sdk_rule_lock: Mutex<()>,
     order_post_timeout: Duration,
     rate_limiter: RateLimiter,
     on_book_level_rejected: Option<BookLevelRejectHook>,
@@ -193,13 +205,6 @@ pub struct MakerRebateReportedAccrual {
     pub amount_usd: Usd,
 }
 
-/// Venue-owned order metadata re-read immediately before admission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VenueOrderMetadata {
-    pub tick_size: TickSize,
-    pub neg_risk: bool,
-}
-
 fn push_rest_level(
     levels: &mut Vec<BookLevel>,
     price: Decimal,
@@ -219,7 +224,7 @@ fn push_rest_level(
 
 fn sdk_amount(amount: VenueOrderAmount) -> Result<Amount, ApiError> {
     match amount {
-        VenueOrderAmount::GrossUsd(value) => Amount::usdc(value.inner()),
+        VenueOrderAmount::PrincipalUsd(value) => Amount::usdc(value.inner()),
         VenueOrderAmount::Shares(value) => Amount::shares(value.inner()),
     }
     .map_err(|error| ApiError::Sdk(error.to_string()))
@@ -235,6 +240,268 @@ fn limit_order_shares(amount: VenueOrderAmount) -> Result<Decimal, ApiError> {
             message: "limit orders require share-denominated amount".to_owned(),
             retryable: false,
         })
+}
+
+struct ParsedBalanceAllowance {
+    balance: U256,
+    allowances: BTreeMap<Address, U256>,
+}
+
+struct ParsedFundingSnapshot {
+    snapshot: VenueBalanceAllowanceSnapshot,
+    balance: U256,
+    allowance: Option<U256>,
+}
+
+struct PreparedOrderEvidence {
+    metadata: VenueOrderMetadata,
+    canonical: CanonicalOrderAmounts,
+    funding: VenueFundingEvidence,
+}
+
+fn strict_u256(field: &'static str, value: &str) -> Result<U256, ApiError> {
+    let canonical = EvmUint256::parse(value).map_err(|error| ClobOrderError::MalformedUint256 {
+        field,
+        value: value.to_owned(),
+        detail: error.to_string(),
+    })?;
+    U256::from_str(canonical.as_str()).map_err(|error| {
+        ClobOrderError::MalformedUint256 {
+            field,
+            value: value.to_owned(),
+            detail: error.to_string(),
+        }
+        .into()
+    })
+}
+
+fn project_uint256(field: &'static str, value: U256) -> Result<EvmUint256, ApiError> {
+    let value = value.to_string();
+    EvmUint256::parse(value.as_str()).map_err(|error| {
+        ClobOrderError::MalformedUint256 {
+            field,
+            value,
+            detail: error.to_string(),
+        }
+        .into()
+    })
+}
+
+fn parse_balance_allowance(
+    response: BalanceAllowanceResponse,
+) -> Result<ParsedBalanceAllowance, ApiError> {
+    let balance_text = response.balance.normalize().to_string();
+    let balance = strict_u256("balance", &balance_text)?;
+    let allowances = response
+        .allowances
+        .into_iter()
+        .map(|(spender, value)| {
+            strict_u256("allowance", &value).map(|allowance| (spender, allowance))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    Ok(ParsedBalanceAllowance {
+        balance,
+        allowances,
+    })
+}
+
+fn wire_units(field: &'static str, value: Decimal) -> Result<U256, ApiError> {
+    let scale = Decimal::from(1_000_000_u64);
+    let scaled = value
+        .checked_mul(scale)
+        .ok_or_else(|| ClobOrderError::RuleViolation {
+            detail: format!("{field} overflows six-decimal wire scaling"),
+        })?;
+    if !scaled.fract().is_zero() {
+        return Err(ClobOrderError::RuleViolation {
+            detail: format!("{field} `{value}` is finer than six-decimal wire precision"),
+        }
+        .into());
+    }
+    strict_u256(field, &scaled.normalize().to_string())
+}
+
+fn human_units(field: &'static str, value: U256) -> Result<Decimal, ApiError> {
+    let raw = value.to_string();
+    let decimal = Decimal::from_str(&raw)
+        .map_err(|_| ClobOrderError::HumanScaleOverflow { field, value: raw })?;
+    decimal
+        .checked_div(Decimal::from(1_000_000_u64))
+        .ok_or_else(|| {
+            ClobOrderError::RuleViolation {
+                detail: format!("{field} cannot be converted from six-decimal wire units"),
+            }
+            .into()
+        })
+}
+
+fn evm_address(address: Address) -> Result<EvmAddress, ApiError> {
+    let value = format!("{address:#x}");
+    EvmAddress::parse(value.as_str()).map_err(|error| {
+        ClobOrderError::IdentityMismatch {
+            field: "spender",
+            expected: "canonical lower-case EVM address".to_owned(),
+            actual: format!("{value}: {error}"),
+        }
+        .into()
+    })
+}
+
+fn metadata_from_book(
+    token_id: &TokenId,
+    response: &OrderBookSummaryResponse,
+) -> Result<VenueOrderMetadata, ApiError> {
+    let observed_token_id = TokenId::new(response.asset_id.to_string());
+    if &observed_token_id != token_id {
+        return Err(ClobOrderError::IdentityMismatch {
+            field: "book.asset_id",
+            expected: token_id.to_string(),
+            actual: observed_token_id.to_string(),
+        }
+        .into());
+    }
+    let tick_size = TickSize::try_from(response.tick_size.as_decimal()).map_err(|error| {
+        ClobOrderError::RuleViolation {
+            detail: error.to_string(),
+        }
+    })?;
+    let minimum_order_size = Shares::new(response.min_order_size);
+    PolymarketOrderRules::new(tick_size, minimum_order_size).map_err(|error| {
+        ClobOrderError::RuleViolation {
+            detail: error.to_string(),
+        }
+    })?;
+    Ok(VenueOrderMetadata {
+        market_id: MarketId::new(format!("{:#x}", response.market)),
+        token_id: observed_token_id,
+        tick_size,
+        minimum_order_size,
+        neg_risk: response.neg_risk,
+    })
+}
+
+fn verify_order_identity(
+    request: &OrderRequest,
+    metadata: &VenueOrderMetadata,
+) -> Result<(), ApiError> {
+    for (field, expected, actual) in [
+        (
+            "book.market",
+            request.market_id.as_str(),
+            metadata.market_id.as_str(),
+        ),
+        (
+            "book.asset_id",
+            request.token_id.as_str(),
+            metadata.token_id.as_str(),
+        ),
+    ] {
+        if expected != actual {
+            return Err(ClobOrderError::IdentityMismatch {
+                field,
+                expected: expected.to_owned(),
+                actual: actual.to_owned(),
+            }
+            .into());
+        }
+    }
+    for result in [
+        require_payload_match(
+            "book.tick_size",
+            &request.expected_tick_size,
+            &metadata.tick_size,
+        ),
+        require_payload_match(
+            "book.minimum_order_size",
+            &request.expected_minimum_order_size,
+            &metadata.minimum_order_size,
+        ),
+        require_payload_match(
+            "book.neg_risk",
+            &request.expected_neg_risk,
+            &metadata.neg_risk,
+        ),
+    ] {
+        result?;
+    }
+    Ok(())
+}
+
+fn verify_market_info_identity(
+    request: &OrderRequest,
+    metadata: &VenueOrderMetadata,
+    market_info: &ClobMarketInfoVersion,
+) -> Result<(), ApiError> {
+    let token_matches = market_info
+        .tokens
+        .iter()
+        .any(|token| token.token_id == request.token_id);
+    for result in [
+        require_payload_match(
+            "market_info.market_id",
+            &request.market_id,
+            &market_info.market_id,
+        ),
+        require_payload_match("market_info.token_id", &true, &token_matches),
+        require_payload_match(
+            "market_info.tick_size",
+            &request.expected_tick_size,
+            &market_info.tick_size,
+        ),
+        require_payload_match(
+            "market_info.minimum_order_size",
+            &request.expected_minimum_order_size,
+            &market_info.minimum_order_size,
+        ),
+        require_payload_match(
+            "market_info.neg_risk",
+            &request.expected_neg_risk,
+            &market_info.neg_risk,
+        ),
+        require_payload_match(
+            "market_info.payload_hash",
+            &request.expected_clob_market_info_payload_hash,
+            &market_info.payload_hash,
+        ),
+        require_payload_match(
+            "book.market_info.market_id",
+            &metadata.market_id,
+            &market_info.market_id,
+        ),
+        require_payload_match(
+            "book.market_info.tick_size",
+            &metadata.tick_size,
+            &market_info.tick_size,
+        ),
+        require_payload_match(
+            "book.market_info.minimum_order_size",
+            &metadata.minimum_order_size,
+            &market_info.minimum_order_size,
+        ),
+        require_payload_match(
+            "book.market_info.neg_risk",
+            &metadata.neg_risk,
+            &market_info.neg_risk,
+        ),
+    ] {
+        result?;
+    }
+    Ok(())
+}
+
+fn require_payload_match<T>(field: &'static str, expected: &T, actual: &T) -> Result<(), ApiError>
+where
+    T: Debug + PartialEq,
+{
+    if expected == actual {
+        return Ok(());
+    }
+    Err(ClobOrderError::PayloadMismatch {
+        field,
+        expected: format!("{expected:?}"),
+        actual: format!("{actual:?}"),
+    }
+    .into())
 }
 
 fn map_post_order_response(
@@ -255,7 +522,7 @@ fn map_post_order_response(
             .shares()
             .is_some_and(|shares| filled_shares >= shares)
             || order_amount
-                .gross_usd()
+                .principal_usd()
                 .is_some_and(|usd| cash_amount >= usd.inner())
         {
             VenueOrderStatus::Filled
@@ -269,7 +536,7 @@ fn map_post_order_response(
         .shares()
         .is_some_and(|shares| filled_shares >= shares)
         || order_amount
-            .gross_usd()
+            .principal_usd()
             .is_some_and(|usd| cash_amount >= usd.inner())
     {
         VenueOrderStatus::Filled
@@ -591,7 +858,7 @@ impl ClobClient {
             market_id: market_id.clone(),
             tokens,
             tick_size,
-            minimum_order_size: raw.minimum_order_size,
+            minimum_order_size: Shares::new(raw.minimum_order_size),
             neg_risk: raw.neg_risk,
             taker_order_delay_enabled: raw.taker_order_delay_enabled,
             minimum_order_age_secs: Some(raw.minimum_order_age_secs),
@@ -611,40 +878,37 @@ impl ClobClient {
         Ok(version)
     }
 
-    /// Read the SDK's authoritative tick-size and `NegRisk` metadata for a token.
-    ///
-    /// The official SDK caches these endpoints and also consumes them while
-    /// building the signed order. Admission compares this view with the frozen
-    /// registry before allowing a money-changing claim.
+    /// Read the venue's atomic `/book` identity and order rules for a token.
+    /// The response is validated against the requested asset before exposure.
     pub async fn order_metadata(&self, token_id: &TokenId) -> Result<VenueOrderMetadata, ApiError> {
-        let token_id = WireTokenId::try_from(token_id)?.0;
-        let (tick, neg_risk) = tokio::try_join!(
-            async {
-                self.sdk
-                    .tick_size(token_id)
+        let response = self.fetch_book_response(token_id).await?;
+        metadata_from_book(token_id, &response)
+    }
+
+    async fn fetch_book_response(
+        &self,
+        token_id: &TokenId,
+    ) -> Result<OrderBookSummaryResponse, ApiError> {
+        self.rate_limiter.acquire("GET /book").await;
+        let wire_token_id = WireTokenId::try_from(token_id)?.0;
+        let sdk = Arc::clone(&self.sdk);
+        let expected = token_id.clone();
+        retry::retry_with_policy(&RetryPolicy::clob_default(), || {
+            let sdk = Arc::clone(&sdk);
+            let expected = expected.clone();
+            async move {
+                let request = OrderBookSummaryRequest::builder()
+                    .token_id(wire_token_id)
+                    .build();
+                let response = sdk
+                    .order_book(&request)
                     .await
-                    .map_err(|error| ApiError::from(sdk_error::SdkClobError(&error)))
-            },
-            async {
-                self.sdk
-                    .neg_risk(token_id)
-                    .await
-                    .map_err(|error| ApiError::from(sdk_error::SdkClobError(&error)))
+                    .map_err(|error| SdkClobError(&error).snapshot("order book"))?;
+                metadata_from_book(&expected, &response)?;
+                Ok(response)
             }
-        )?;
-        let tick_size =
-            TickSize::try_from(tick.minimum_tick_size.as_decimal()).map_err(|error| {
-                ApiError::Clob {
-                    endpoint: "GET /tick-size".to_owned(),
-                    code: "unsupported_tick_size".to_owned(),
-                    message: error.to_string(),
-                    retryable: false,
-                }
-            })?;
-        Ok(VenueOrderMetadata {
-            tick_size,
-            neg_risk: neg_risk.neg_risk,
         })
+        .await
     }
 
     /// Authenticate with Polymarket CLOB and create a connected client.
@@ -659,9 +923,10 @@ impl ClobClient {
         config: &PolymarketConfig,
         topology: &WalletTopology,
     ) -> Result<Self, ApiError> {
-        // Polymarket L1 auth / EIP-712 requires `chain_id` on the alloy signer.
-        let mut auth_signer = signer.inner().clone();
-        auth_signer.set_chain_id(Some(config.chain_id));
+        // Authentication and every later EIP-712 order signature must share the
+        // same chain-bound signer. Keeping the unbound input would make the SDK
+        // panic after WAL persistence when it reads `Signer::chain_id()`.
+        let signer = Arc::new(signer.as_ref().clone().with_chain_id(Some(config.chain_id)));
 
         let sdk_config = SdkConfig::builder().use_server_time(true).build();
         let sdk = SdkClient::new(&config.clob_base_url, sdk_config)
@@ -680,7 +945,7 @@ impl ClobClient {
                 retryable: false,
             });
         }
-        let builder = sdk.authentication_builder(&auth_signer);
+        let builder = sdk.authentication_builder(signer.inner());
         // EOA is the SDK default; only Proxy / Safe attach an explicit funder +
         // signature type (the SDK rejects a funder paired with the EOA type).
         let builder = if topology.is_eoa() {
@@ -717,7 +982,10 @@ impl ClobClient {
             http,
             clob_base_url: config.clob_base_url.clone(),
             maker_address,
+            chain_id: config.chain_id,
+            signature_type: topology.signature_type,
             signer,
+            sdk_rule_lock: Mutex::new(()),
             order_post_timeout: Duration::from_millis(config.order_post_timeout_ms),
             rate_limiter: RateLimiter::new(),
             on_book_level_rejected: None,
@@ -743,14 +1011,276 @@ impl ClobClient {
         Ok(())
     }
 
+    fn exact_spender(&self, neg_risk: bool) -> Result<Address, ApiError> {
+        // V2 order transfer authority is the same route-specific exchange used
+        // as the EIP-712 verifying contract. The NegRisk adapter owns separate
+        // split/merge operations and is never accepted as an order-allowance
+        // fallback here.
+        contract_config(self.chain_id, neg_risk)
+            .and_then(|config| config.exchange_v2)
+            .ok_or_else(|| {
+                ClobOrderError::SpenderUnavailable {
+                    chain_id: self.chain_id,
+                    neg_risk,
+                }
+                .into()
+            })
+    }
+
+    async fn fetch_balance_allowance(
+        &self,
+        asset: VenueFundingAsset,
+        token_id: Option<&TokenId>,
+    ) -> Result<ParsedBalanceAllowance, ApiError> {
+        let wire_token_id = token_id
+            .map(WireTokenId::try_from)
+            .transpose()?
+            .map(|id| id.0);
+        match (asset, wire_token_id) {
+            (VenueFundingAsset::Collateral, Some(_)) => {
+                return Err(ClobOrderError::IdentityMismatch {
+                    field: "balance_allowance.token_id",
+                    expected: "absent for collateral".to_owned(),
+                    actual: token_id.map_or_else(String::new, ToString::to_string),
+                }
+                .into());
+            }
+            (VenueFundingAsset::Conditional, None) => {
+                return Err(ClobOrderError::IdentityMismatch {
+                    field: "balance_allowance.token_id",
+                    expected: "present for conditional token".to_owned(),
+                    actual: "absent".to_owned(),
+                }
+                .into());
+            }
+            (VenueFundingAsset::Collateral, None) | (VenueFundingAsset::Conditional, Some(_)) => {}
+        }
+        self.rate_limiter.acquire("GET /balance-allowance").await;
+        let sdk = Arc::clone(&self.sdk);
+        retry::retry_with_policy(&RetryPolicy::clob_default(), || {
+            let sdk = Arc::clone(&sdk);
+            async move {
+                let mut request = BalanceAllowanceRequest::builder()
+                    .asset_type(match asset {
+                        VenueFundingAsset::Collateral => AssetType::Collateral,
+                        VenueFundingAsset::Conditional => AssetType::Conditional,
+                    })
+                    .build();
+                request.token_id = wire_token_id;
+                let response = sdk
+                    .balance_allowance(request)
+                    .await
+                    .map_err(|error| SdkClobError(&error).snapshot("balance allowance"))?;
+                parse_balance_allowance(response)
+            }
+        })
+        .await
+    }
+
+    async fn parsed_funding_snapshot(
+        &self,
+        asset: VenueFundingAsset,
+        token_id: Option<&TokenId>,
+        metadata: &VenueOrderMetadata,
+    ) -> Result<ParsedFundingSnapshot, ApiError> {
+        if let Some(token_id) = token_id
+            && token_id != &metadata.token_id
+        {
+            return Err(ClobOrderError::IdentityMismatch {
+                field: "balance_allowance.token_id",
+                expected: metadata.token_id.to_string(),
+                actual: token_id.to_string(),
+            }
+            .into());
+        }
+        let spender = self.exact_spender(metadata.neg_risk)?;
+        let parsed = self.fetch_balance_allowance(asset, token_id).await?;
+        let allowance = parsed.allowances.get(&spender).copied();
+        let human_balance = match asset {
+            VenueFundingAsset::Collateral => VenueFundingBalance::Collateral(Usd::new(
+                human_units("collateral_balance", parsed.balance)?,
+            )),
+            VenueFundingAsset::Conditional => VenueFundingBalance::Conditional(Shares::new(
+                human_units("conditional_balance", parsed.balance)?,
+            )),
+        };
+        let snapshot = VenueBalanceAllowanceSnapshot {
+            asset,
+            token_id: token_id.cloned(),
+            spender: evm_address(spender)?,
+            balance: project_uint256("balance", parsed.balance)?,
+            human_balance,
+            allowance: allowance
+                .map(|value| project_uint256("allowance", value))
+                .transpose()?,
+        };
+        Ok(ParsedFundingSnapshot {
+            snapshot,
+            balance: parsed.balance,
+            allowance,
+        })
+    }
+
+    /// Read and strictly parse the exact V2 exchange funding snapshot for one
+    /// route and asset. This never sends an approval or cache-update request.
+    pub async fn balance_allowance_snapshot(
+        &self,
+        asset: VenueFundingAsset,
+        token_id: Option<&TokenId>,
+        metadata: &VenueOrderMetadata,
+    ) -> Result<VenueBalanceAllowanceSnapshot, ApiError> {
+        Ok(self
+            .parsed_funding_snapshot(asset, token_id, metadata)
+            .await?
+            .snapshot)
+    }
+
+    async fn funding_evidence(
+        &self,
+        request: &OrderRequest,
+        metadata: &VenueOrderMetadata,
+        canonical: &CanonicalOrderAmounts,
+    ) -> Result<VenueFundingEvidence, ApiError> {
+        let (asset, token_id, required_amount) = match request.side {
+            Side::Buy => {
+                let total = canonical
+                    .maker_amount
+                    .checked_add(request.expected_fee.inner())
+                    .ok_or_else(|| ClobOrderError::RuleViolation {
+                        detail: "BUY principal plus fee overflows decimal".to_owned(),
+                    })?;
+                (VenueFundingAsset::Collateral, None, total)
+            }
+            Side::Sell => (
+                VenueFundingAsset::Conditional,
+                Some(&request.token_id),
+                canonical.maker_amount,
+            ),
+        };
+        let parsed = self
+            .parsed_funding_snapshot(asset, token_id, metadata)
+            .await?;
+        let required = wire_units("required_funding", required_amount)?;
+        let required_value = project_uint256("required_funding", required)?;
+        let evidence = if parsed.balance < required {
+            VenueFundingEvidence::InsufficientBalance {
+                snapshot: parsed.snapshot,
+                required: required_value,
+            }
+        } else {
+            match parsed.allowance {
+                None => VenueFundingEvidence::MissingAllowance {
+                    snapshot: parsed.snapshot,
+                    required: required_value,
+                },
+                Some(allowance) if allowance < required => {
+                    VenueFundingEvidence::InsufficientAllowance {
+                        snapshot: parsed.snapshot,
+                        required: required_value,
+                    }
+                }
+                Some(_) => VenueFundingEvidence::Ready {
+                    snapshot: parsed.snapshot,
+                    required: required_value,
+                },
+            }
+        };
+        Ok(evidence)
+    }
+
+    async fn validated_funding_evidence(
+        &self,
+        request: &OrderRequest,
+        metadata: &VenueOrderMetadata,
+    ) -> Result<(CanonicalOrderAmounts, VenueFundingEvidence), ApiError> {
+        Self::validate_order_semantics(request.order_type, request.post_only)?;
+        verify_order_identity(request, metadata)?;
+        let rules = PolymarketOrderRules::new(metadata.tick_size, metadata.minimum_order_size)
+            .map_err(|error| ClobOrderError::RuleViolation {
+                detail: error.to_string(),
+            })?;
+        let canonical = rules
+            .validate_order(request.side, request.amount, request.price)
+            .map_err(|error| ClobOrderError::RuleViolation {
+                detail: error.to_string(),
+            })?;
+        let funding = self.funding_evidence(request, metadata, &canonical).await?;
+        Ok((canonical, funding))
+    }
+
+    async fn prepare_order_evidence(
+        &self,
+        request: &OrderRequest,
+    ) -> Result<PreparedOrderEvidence, ApiError> {
+        let metadata = self.order_metadata(&request.token_id).await?;
+        verify_order_identity(request, &metadata)?;
+        let market_info = self.clob_market_info_version(&request.market_id).await?;
+        verify_market_info_identity(request, &metadata, &market_info)?;
+        let (canonical, funding) = self.validated_funding_evidence(request, &metadata).await?;
+        Ok(PreparedOrderEvidence {
+            metadata,
+            canonical,
+            funding,
+        })
+    }
+
+    /// Build funding evidence from the caller's single live `/book` metadata
+    /// observation and one `/balance-allowance` read. This method revalidates
+    /// request identity but never fetches `/book` itself. Admission may map a
+    /// valid closed state to Defer; malformed, rule, and transport failures
+    /// remain errors.
+    pub async fn order_funding_evidence(
+        &self,
+        request: &OrderRequest,
+        metadata: &VenueOrderMetadata,
+    ) -> Result<VenueFundingEvidence, ApiError> {
+        Ok(self.validated_funding_evidence(request, metadata).await?.1)
+    }
+
+    fn require_funding(evidence: &VenueFundingEvidence) -> Result<(), ApiError> {
+        let Some(deficit) = evidence.deficit() else {
+            return Ok(());
+        };
+        Err(ClobOrderError::FundingUnavailable {
+            deficit,
+            asset: evidence.snapshot().asset.as_str(),
+            spender: evidence.snapshot().spender.to_string(),
+            required: evidence.required().to_string(),
+            balance: evidence.snapshot().balance.to_string(),
+            allowance: evidence
+                .snapshot()
+                .allowance
+                .as_ref()
+                .map_or_else(|| "missing".to_owned(), ToString::to_string),
+        }
+        .into())
+    }
+
+    fn seed_order_rules(
+        &self,
+        token_id: U256,
+        metadata: &VenueOrderMetadata,
+    ) -> Result<(), ApiError> {
+        let tick_size =
+            SdkTickSize::try_from(metadata.tick_size.as_decimal()).map_err(|error| {
+                ClobOrderError::RuleViolation {
+                    detail: error.to_string(),
+                }
+            })?;
+        self.sdk.set_tick_size(token_id, tick_size);
+        self.sdk.set_neg_risk(token_id, metadata.neg_risk);
+        Ok(())
+    }
+
     async fn build_unsigned_order(
         &self,
         req: &OrderRequest,
+        canonical: CanonicalOrderAmounts,
         token_id: U256,
         order_side: SdkSide,
     ) -> Result<SignableOrder, OrderSubmissionError> {
         let price = req.price.inner();
-        let order_amount = req.amount;
+        let order_amount = canonical.venue_amount;
         let post_only = req.post_only;
         match req.order_type {
             OrderType::Fok | OrderType::Fak => {
@@ -821,28 +1351,67 @@ impl ClobClient {
         }
     }
 
-    async fn verify_buy_balance(&self, req: &OrderRequest) -> Result<(), OrderSubmissionError> {
-        if req.side != Side::Buy {
-            return Ok(());
-        }
-        let principal = match req.amount {
-            VenueOrderAmount::GrossUsd(gross) => gross,
-            VenueOrderAmount::Shares(shares) => Usd::new(shares.inner() * req.price.inner()),
+    fn validate_unsigned_order(
+        &self,
+        request: &OrderRequest,
+        token_id: U256,
+        order_side: SdkSide,
+        canonical: &CanonicalOrderAmounts,
+        unsigned: &SignableOrder,
+    ) -> Result<(), ApiError> {
+        let OrderPayload::V2(payload) = &unsigned.payload else {
+            return Err(ClobOrderError::PayloadMismatch {
+                field: "protocol_version",
+                expected: "2".to_owned(),
+                actual: unsigned.payload.version().to_string(),
+            }
+            .into());
         };
-        let required = principal + req.expected_fee;
-        let available = self
-            .collateral_balance()
-            .await
-            .map_err(OrderSubmissionError::prepare)?;
-        if available < required {
-            return Err(OrderSubmissionError::prepare(ApiError::Clob {
-                endpoint: "GET /balance-allowance".to_owned(),
-                code: "insufficient_pusd_balance".to_owned(),
-                message: format!(
-                    "live pUSD collateral {available} is below exact admitted cash requirement {required}"
-                ),
-                retryable: false,
-            }));
+        let expected_maker = Address::from_str(self.maker_address.as_str()).map_err(|error| {
+            ClobOrderError::IdentityMismatch {
+                field: "authenticated_maker",
+                expected: "canonical EVM address".to_owned(),
+                actual: error.to_string(),
+            }
+        })?;
+        let expected_signer = if self.signature_type == SignatureType::Poly1271 {
+            expected_maker
+        } else {
+            self.signer.inner().address()
+        };
+        let expected_order_type = match request.order_type {
+            OrderType::Fok => SdkOrderType::FOK,
+            OrderType::Fak => SdkOrderType::FAK,
+            OrderType::Gtc => SdkOrderType::GTC,
+            OrderType::Gtd { .. } => SdkOrderType::GTD,
+        };
+        let expected_post_only = match request.order_type {
+            OrderType::Fok | OrderType::Fak => None,
+            OrderType::Gtc | OrderType::Gtd { .. } => Some(request.post_only),
+        };
+        let expected_expiration = match request.order_type {
+            OrderType::Gtd { expiration } => U256::from(expiration),
+            OrderType::Fok | OrderType::Fak | OrderType::Gtc => U256::ZERO,
+        };
+        let maker_amount = wire_units("maker_amount", canonical.maker_amount)?;
+        let taker_amount = wire_units("taker_amount", canonical.taker_amount)?;
+        for result in [
+            require_payload_match("token_id", &token_id, &payload.order.tokenId),
+            require_payload_match("maker", &expected_maker, &payload.order.maker),
+            require_payload_match("signer", &expected_signer, &payload.order.signer),
+            require_payload_match("maker_amount", &maker_amount, &payload.order.makerAmount),
+            require_payload_match("taker_amount", &taker_amount, &payload.order.takerAmount),
+            require_payload_match("side", &(order_side as u8), &payload.order.side),
+            require_payload_match(
+                "signature_type",
+                &(self.signature_type as u8),
+                &payload.order.signatureType,
+            ),
+            require_payload_match("expiration", &expected_expiration, &payload.expiration),
+            require_payload_match("order_type", &expected_order_type, &unsigned.order_type),
+            require_payload_match("post_only", &expected_post_only, &unsigned.post_only),
+        ] {
+            result?;
         }
         Ok(())
     }
@@ -861,20 +1430,28 @@ impl ClobClient {
             .map_err(OrderSubmissionError::prepare)?
             .0;
         let order_side = SdkSide::from(ClobSide::from(req.side));
-        let order_amount = req.amount;
         let order_type = req.order_type;
-        let post_only = req.post_only;
-        Self::validate_order_semantics(order_type, post_only)
+        let prepared = self
+            .prepare_order_evidence(req)
+            .await
             .map_err(OrderSubmissionError::prepare)?;
-        self.verify_buy_balance(req).await?;
+        Self::require_funding(&prepared.funding).map_err(OrderSubmissionError::prepare)?;
+        let sdk_rule_guard = self.sdk_rule_lock.lock().await;
+        self.seed_order_rules(token_id, &prepared.metadata)
+            .map_err(OrderSubmissionError::prepare)?;
 
         let submitted_at = Utc::now();
-        let unsigned = self.build_unsigned_order(req, token_id, order_side).await?;
+        let unsigned = self
+            .build_unsigned_order(req, prepared.canonical, token_id, order_side)
+            .await?;
+        self.validate_unsigned_order(req, token_id, order_side, &prepared.canonical, &unsigned)
+            .map_err(OrderSubmissionError::prepare)?;
 
         let signed_order = sdk
             .sign(signer.inner(), unsigned)
             .await
             .map_err(|e| OrderSubmissionError::sign(ApiError::from(SdkClobError(&e))))?;
+        drop(sdk_rule_guard);
 
         let resp = tokio::time::timeout(self.order_post_timeout, sdk.post_order(signed_order))
             .await
@@ -887,8 +1464,14 @@ impl ClobClient {
             })?
             .map_err(|e| OrderSubmissionError::post(ApiError::from(SdkClobError(&e))))?;
 
-        map_post_order_response(req, order_type, order_amount, submitted_at, &resp)
-            .map_err(OrderSubmissionError::post)
+        map_post_order_response(
+            req,
+            order_type,
+            prepared.canonical.venue_amount,
+            submitted_at,
+            &resp,
+        )
+        .map_err(OrderSubmissionError::post)
     }
 
     /// Cancel a single order by ID.
@@ -956,43 +1539,32 @@ impl ClobClient {
     /// Fetch a full orderbook snapshot for a token.
     #[tracing::instrument(skip(self), fields(token_id = %token_id))]
     pub async fn get_book(&self, token_id: &TokenId) -> Result<OrderbookSnapshot, ApiError> {
-        self.rate_limiter.acquire("GET /book").await;
-
-        let tid = WireTokenId::try_from(token_id)?.0;
-        let sdk = Arc::clone(&self.sdk);
+        let response = self.fetch_book_response(token_id).await?;
+        let metadata = metadata_from_book(token_id, &response)?;
         let on_rejected = self.on_book_level_rejected.clone();
-
-        retry::retry_with_policy(&RetryPolicy::clob_default(), || {
-            let sdk = Arc::clone(&sdk);
-            let on_rejected = on_rejected.clone();
-            async move {
-                let request = OrderBookSummaryRequest::builder().token_id(tid).build();
-                let resp = sdk
-                    .order_book(&request)
-                    .await
-                    .map_err(|e| ApiError::from(SdkClobError(&e)))?;
-
-                let mut bids = Vec::with_capacity(resp.bids.len());
-                for level in &resp.bids {
-                    push_rest_level(&mut bids, level.price, level.size, on_rejected.as_ref());
+        let mut bids = Vec::with_capacity(response.bids.len());
+        for level in &response.bids {
+            push_rest_level(&mut bids, level.price, level.size, on_rejected.as_ref());
+        }
+        let mut asks = Vec::with_capacity(response.asks.len());
+        for level in &response.asks {
+            push_rest_level(&mut asks, level.price, level.size, on_rejected.as_ref());
+        }
+        let timestamp_ms =
+            u64::try_from(response.timestamp.timestamp_millis()).map_err(|error| {
+                ClobOrderError::MalformedUint256 {
+                    field: "book.timestamp",
+                    value: response.timestamp.to_rfc3339(),
+                    detail: error.to_string(),
                 }
-
-                let mut asks = Vec::with_capacity(resp.asks.len());
-                for level in &resp.asks {
-                    push_rest_level(&mut asks, level.price, level.size, on_rejected.as_ref());
-                }
-
-                Ok(OrderbookSnapshot {
-                    token_id: token_id.clone(),
-                    bids,
-                    asks,
-                    hash: resp.hash.unwrap_or_default(),
-                    timestamp_ms: ToPrimitive::to_u64(&resp.timestamp.timestamp_millis().max(0))
-                        .unwrap_or(0),
-                })
-            }
+            })?;
+        Ok(OrderbookSnapshot {
+            metadata,
+            bids,
+            asks,
+            hash: response.hash.unwrap_or_default(),
+            timestamp_ms,
         })
-        .await
     }
 
     /// Fetch both YES and NO token books and build a strict binary-market snapshot.
@@ -1031,60 +1603,33 @@ impl ClobClient {
     /// Query current pUSD collateral balance.
     ///
     /// Uses the CLOB `balance-allowance` endpoint with `AssetType::Collateral`.
-    /// Returns the raw on-exchange balance (before subtracting reservations).
+    /// Strictly decodes the raw six-decimal units and returns human-scale USD
+    /// before subtracting local reservations.
     #[tracing::instrument(skip(self))]
     pub async fn collateral_balance(&self) -> Result<Usd, ApiError> {
-        self.rate_limiter.acquire("GET /balance-allowance").await;
-
-        let sdk = Arc::clone(&self.sdk);
-
-        retry::retry_with_policy(&RetryPolicy::clob_default(), || {
-            let sdk = Arc::clone(&sdk);
-            async move {
-                let request = BalanceAllowanceRequest::builder()
-                    .asset_type(AssetType::Collateral)
-                    .build();
-
-                let resp = sdk
-                    .balance_allowance(request)
-                    .await
-                    .map_err(|e| ApiError::from(SdkClobError(&e)))?;
-
-                Ok(Usd::new(resp.balance))
-            }
-        })
-        .await
+        let snapshot = self
+            .fetch_balance_allowance(VenueFundingAsset::Collateral, None)
+            .await?;
+        Ok(Usd::new(human_units(
+            "collateral_balance",
+            snapshot.balance,
+        )?))
     }
 
     /// Query the current conditional-token (ERC-1155 outcome share) balance.
     ///
     /// Uses the CLOB `balance-allowance` endpoint with `AssetType::Conditional`
-    /// scoped to `token_id`. Returns the raw on-exchange share balance — the
-    /// reconciliation evidence for whether outcome shares were actually received.
+    /// scoped to `token_id`. Strictly decodes raw six-decimal units into the
+    /// human-scale share balance used by reconciliation.
     #[tracing::instrument(skip(self), fields(token_id = ?token_id))]
     pub async fn token_balance(&self, token_id: &TokenId) -> Result<Shares, ApiError> {
-        self.rate_limiter.acquire("GET /balance-allowance").await;
-
-        let sdk = Arc::clone(&self.sdk);
-        let asset_id = WireTokenId::try_from(token_id)?.0;
-
-        retry::retry_with_policy(&RetryPolicy::clob_default(), || {
-            let sdk = Arc::clone(&sdk);
-            async move {
-                let mut request = BalanceAllowanceRequest::builder()
-                    .asset_type(AssetType::Conditional)
-                    .build();
-                request.token_id = Some(asset_id);
-
-                let resp = sdk
-                    .balance_allowance(request)
-                    .await
-                    .map_err(|e| ApiError::from(SdkClobError(&e)))?;
-
-                Ok(Shares::new(resp.balance))
-            }
-        })
-        .await
+        let snapshot = self
+            .fetch_balance_allowance(VenueFundingAsset::Conditional, Some(token_id))
+            .await?;
+        Ok(Shares::new(human_units(
+            "conditional_balance",
+            snapshot.balance,
+        )?))
     }
 
     /// List authenticated account trades inside an explicit query boundary.

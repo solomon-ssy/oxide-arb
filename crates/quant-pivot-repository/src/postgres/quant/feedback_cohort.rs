@@ -6,12 +6,16 @@ use quant_pivot_error::storage::{StorageError, entity::QUANT_RECOMMENDATION};
 use quant_pivot_models::{
     domain::quant::{
         FeedbackCohortCandidate, FeedbackCohortPage, FeedbackCohortPageQuery,
-        FeedbackRecommendationContext, RecommendationExecutionRollupInfo, RecommendationInfo,
-        RecommendationReportInfo, RecommendationResolutionOutcomeInfo, ReportRouteRunInfo,
+        FeedbackRecommendationContext, RecommendationEconomicOutcomeInfo,
+        RecommendationExecutionRollupInfo, RecommendationInfo, RecommendationReportInfo,
+        RecommendationResolutionOutcomeInfo, ReportRouteRunInfo,
     },
     entities::{
         quant_recommendation::{
             Column as QuantRecommendationColumn, Entity as QuantRecommendationEntity,
+        },
+        quant_recommendation_economic_outcome::{
+            Column as EconomicOutcomeColumn, Entity as EconomicOutcomeEntity,
         },
         quant_recommendation_execution_rollup::{
             Column as QuantRecommendationExecutionRollupColumn,
@@ -92,6 +96,8 @@ impl PgFeedbackCohortRepository {
             Self::load_resolution_outcomes(transaction, query, &recommendation_ids).await?;
         let mut execution_rollups =
             Self::load_execution_rollups(transaction, query, &recommendation_ids).await?;
+        let mut economic_outcomes =
+            Self::load_economic_outcomes(transaction, query, &recommendation_ids).await?;
         let candidates = contexts
             .into_iter()
             .map(|context| {
@@ -101,11 +107,39 @@ impl PgFeedbackCohortRepository {
                     context,
                     resolution_outcomes.remove(&recommendation_id),
                     execution_rollups.remove(&recommendation_id),
+                    economic_outcomes.remove(&recommendation_id),
                 )
                 .map_err(feedback_contract_error)
             })
             .collect::<Result<Vec<_>, _>>()?;
         FeedbackCohortPage::try_new(cohort, candidates, has_more).map_err(feedback_contract_error)
+    }
+}
+
+impl PgFeedbackCohortRepository {
+    async fn load_economic_outcomes(
+        transaction: &DatabaseTransaction,
+        query: &FeedbackCohortPageQuery,
+        recommendation_ids: &[RecommendationId],
+    ) -> Result<HashMap<RecommendationId, RecommendationEconomicOutcomeInfo>, StorageError> {
+        if recommendation_ids.is_empty() || !query.cohort().requires_economic_outcome() {
+            return Ok(HashMap::new());
+        }
+        EconomicOutcomeEntity::find()
+            .filter(
+                EconomicOutcomeColumn::RecommendationId.is_in(recommendation_ids.iter().copied()),
+            )
+            .filter(EconomicOutcomeColumn::AvailableAt.lte(query.snapshot().truth_cutoff()))
+            .all(transaction)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(|row| {
+                let outcome = RecommendationEconomicOutcomeInfo::from(row);
+                outcome.verify().map_err(feedback_contract_error)?;
+                Ok((outcome.recommendation_id, outcome))
+            })
+            .collect()
     }
 }
 

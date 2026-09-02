@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+use crate::api::ClobFundingDeficit;
+
 /// Failures in order-intent, admission, dispatch, capital, and reconciliation
 /// execution flows.
 #[derive(Debug, Error)]
@@ -43,6 +45,23 @@ pub enum ExecutionError {
     #[error("admission deferred: {reason}")]
     AdmissionDeferred { reason: String },
 
+    /// A valid live conditional-token funding snapshot cannot authorize an exit
+    /// yet. No WAL row or venue POST has been created, so retry is safe.
+    #[error(
+        "exit funding deferred ({deficit}): required={required}, balance={balance}, allowance={allowance}"
+    )]
+    ExitFundingDeferred {
+        deficit: ClobFundingDeficit,
+        required: String,
+        balance: String,
+        allowance: String,
+    },
+
+    /// Current venue tick rules cannot represent the governed SELL hard
+    /// minimum without exceeding the valid price range. No WAL/POST occurred.
+    #[error("exit price deferred: {reason}")]
+    ExitPriceDeferred { reason: String },
+
     /// Approval has been invalidated by a newer state/config/market fact.
     #[error("approval invalidated: {reason}")]
     ApprovalInvalidated { reason: String },
@@ -58,6 +77,10 @@ pub enum ExecutionError {
     /// A finalized accepted chain event cannot be projected into account truth.
     #[error("account chain execution projection failed: {reason}")]
     AccountChainProjection { reason: String },
+
+    /// Account pause, evidence, allocation, or manifest invariants did not converge.
+    #[error("account recovery failed: {reason}")]
+    AccountRecovery { reason: String },
 
     /// The canonical finalized resolution source could not be read or verified.
     #[error("outcome reconciliation source failed: {reason}")]

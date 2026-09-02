@@ -12,11 +12,11 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{
         ports::{
-            AccountReadPort, BacktestPort, CalibrationArtifactFitPort, CatalogStatusPort,
-            CommittedPolicyApplyPort, CpcvBacktestPort, DataQualityPort,
-            ExchangeHistoryProgressPort, ExecutionReadPort, ExecutionRecoveryPort,
-            FeatureIntegrityPort, FeedbackMutationPort, FeedbackReadPort, KillSwitchPort,
-            MarketDataPort, MarketLinkageGovernancePort, MetricsScrapePort,
+            AccountReadPort, AccountRecoveryControlPort, BacktestPort, CalibrationArtifactFitPort,
+            CatalogStatusPort, CommittedPolicyApplyPort, CpcvBacktestPort, DataQualityPort,
+            EconomicFeedbackPort, ExchangeHistoryProgressPort, ExecutionReadPort,
+            ExecutionRecoveryPort, FeatureIntegrityPort, FeedbackMutationPort, FeedbackReadPort,
+            KillSwitchPort, MarketDataPort, MarketLinkageGovernancePort, MetricsScrapePort,
             ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort, ModelTrainingPort,
             OrderIntentPort, PasswordCryptoPort, PolicySnapshotPort, QuantReportPort,
             ReadinessPort, ReconciliationPort, ResearchCatalogPort, ResearchJobPort,
@@ -129,6 +129,8 @@ pub struct AppState {
     pub structural_monitor: Arc<dyn StructuralMonitorPort>,
     /// Recommendation report read and governed mutation API.
     pub quant_reports: Arc<dyn QuantReportPort>,
+    /// Recommendation economic outcome, actual comparison, and Route health reads.
+    pub economic_feedback: Arc<dyn EconomicFeedbackPort>,
     /// Venue account live + snapshot read surface.
     pub account_read: Arc<dyn AccountReadPort>,
     /// Append-only incentive ledger and reconciliation scan manifests.
@@ -147,6 +149,8 @@ pub struct AppState {
     pub reconciliation: Arc<dyn ReconciliationPort>,
     /// Execution recovery playbook detail API.
     pub execution_recovery: Arc<dyn ExecutionRecoveryPort>,
+    /// Strict break-glass account recovery read and governed mutation API.
+    pub account_recovery_control: Arc<dyn AccountRecoveryControlPort>,
 }
 
 impl AppState {

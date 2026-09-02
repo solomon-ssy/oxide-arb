@@ -34,6 +34,7 @@ pub mod calibration_artifacts;
 pub mod dashboard;
 pub mod data_quality;
 pub mod domain_sources;
+pub mod economic_health;
 pub mod execution_orders;
 pub mod factor_catalog;
 pub mod feature_integrity;
@@ -107,6 +108,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(market_linkages::route_specs());
     specs.extend(basis_alerts::route_specs());
     specs.extend(domain_sources::route_specs());
+    specs.extend(economic_health::route_specs());
     specs.extend(structural_monitor::route_specs());
     specs.extend(model_governance::route_specs());
     specs.extend(factor_catalog::route_specs());
@@ -253,6 +255,68 @@ mod tests {
                     Method::GET,
                     "/research/factors/{id}",
                     Rule::ResourceOp(ResourceType::FactorDefinition, Operation::Read),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn economic_recovery_routes_manifest() {
+        let routes = protected_route_specs()
+            .into_iter()
+            .filter(|spec| {
+                spec.path.contains("economic-outcome")
+                    || spec.path.contains("execution-comparison")
+                    || spec.path == "/research/economic-health"
+                    || spec
+                        .path
+                        .starts_with("/system/execution-recovery/incidents/")
+            })
+            .map(|spec| (spec.method, spec.path, spec.rule))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            routes,
+            [
+                (
+                    Method::GET,
+                    "/system/execution-recovery/incidents/active",
+                    Rule::ResourceOp(ResourceType::System, Operation::Read),
+                ),
+                (
+                    Method::GET,
+                    "/system/execution-recovery/incidents/{id}",
+                    Rule::ResourceOp(ResourceType::System, Operation::Read),
+                ),
+                (
+                    Method::POST,
+                    "/system/execution-recovery/incidents/{id}/pause-and-reconcile",
+                    Rule::ActingRoleGoverned(ResourceType::System, Operation::Emergency),
+                ),
+                (
+                    Method::POST,
+                    "/system/execution-recovery/incidents/{id}/seal",
+                    Rule::ActingRoleGoverned(ResourceType::System, Operation::Resolve),
+                ),
+                (
+                    Method::POST,
+                    "/system/execution-recovery/incidents/{id}/unpause-and-finalize",
+                    Rule::ActingRoleGoverned(ResourceType::System, Operation::Resume),
+                ),
+                (
+                    Method::GET,
+                    "/research/economic-health",
+                    Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+                ),
+                (
+                    Method::GET,
+                    "/quant/recommendations/{id}/economic-outcome",
+                    Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
+                ),
+                (
+                    Method::GET,
+                    "/quant/recommendations/{id}/execution-comparison",
+                    Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
                 ),
             ]
         );

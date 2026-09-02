@@ -8,29 +8,37 @@ use std::{
 use anyhow::{Context, Result};
 use quant_pivot_migration::apply as apply_postgres_migrations;
 use quant_pivot_models::{
-    config::{ClickHouseConfig, PostgresConfig, RedisConfig},
+    config::{
+        ClickHouseConfig, ClickHouseIoConfig, ClickHouseResourceGovernance, PostgresConfig,
+        RedisConfig,
+    },
     security::hash_password,
 };
 use quant_pivot_storage::{
     cache::{RedisBackend, connect_pool},
-    clickhouse::{ClickHousePool, ClickHouseSchemaStatus, apply_online_schema_migrations},
+    clickhouse::{ClickHousePool, ClickHouseSchemaStatus, bootstrap_schema},
     postgres::{
         PostgresPool,
         migration::{PostgresSchemaStatus, finalize_schema_deployment},
     },
 };
+use reqwest::Client;
 use testcontainers::{
-    ContainerAsync, GenericImage, ImageExt,
+    ContainerAsync, CopyDataSource, GenericImage, ImageExt,
     core::{WaitFor, wait::HttpWaitStrategy},
     runners::AsyncRunner,
 };
 use testcontainers_modules::{postgres::Postgres, redis::Redis};
+use tokio::time::{Instant, sleep};
 
 const POSTGRES_DATABASE: &str = "quant_pivot_system";
 const POSTGRES_IMAGE_TAG: &str = "16";
 const REDIS_IMAGE_TAG: &str = "7-alpine";
+const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Exact `ClickHouse` image used by disposable schema and production-stack gates.
 pub const CLICKHOUSE_IMAGE_TAG: &str = "26.5";
+const CLICKHOUSE_GOVERNANCE_CONFIG: &[u8] =
+    include_bytes!("../../../docker/clickhouse/config.d/quant-pivot-governance.xml");
 /// Fixed credential installed only in disposable system-test databases.
 pub const BOOTSTRAP_ADMIN_PASSWORD: &str = "system-test-bootstrap-admin";
 
@@ -94,9 +102,11 @@ impl SystemStack {
             _clickhouse_container: clickhouse_container,
             ..
         } = self;
+        let pool_close = tokio::time::timeout(POOL_CLOSE_TIMEOUT, postgres.close()).await;
         drop((postgres, redis, clickhouse));
 
-        tokio::try_join!(
+        // Attempt every owned cleanup even if one service reports an error.
+        let (postgres_cleanup, redis_cleanup, clickhouse_cleanup) = tokio::join!(
             async {
                 postgres_container
                     .rm()
@@ -115,7 +125,11 @@ impl SystemStack {
                     .await
                     .context("remove ClickHouse system-test container")
             },
-        )?;
+        );
+        pool_close.context("time out closing system-test PostgreSQL pool")??;
+        postgres_cleanup?;
+        redis_cleanup?;
+        clickhouse_cleanup?;
         Ok(())
     }
 }
@@ -219,12 +233,17 @@ async fn start_clickhouse() -> Result<(
 )> {
     let container = GenericImage::new("clickhouse/clickhouse-server", CLICKHOUSE_IMAGE_TAG)
         .with_exposed_port(8123.into())
+        .with_exposed_port(9363.into())
         .with_wait_for(WaitFor::http(
             HttpWaitStrategy::new("/ping")
                 .with_port(8123.into())
                 .with_expected_status_code(200u16),
         ))
         .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
+        .with_copy_to(
+            "/etc/clickhouse-server/config.d/quant-pivot-governance.xml",
+            CopyDataSource::Data(CLICKHOUSE_GOVERNANCE_CONFIG.to_vec()),
+        )
         .with_startup_timeout(Duration::from_mins(2))
         .start()
         .await
@@ -233,7 +252,14 @@ async fn start_clickhouse() -> Result<(
         .get_host_port_ipv4(8123)
         .await
         .context("resolve ClickHouse system-test port")?;
+    let metrics_port = container
+        .get_host_port_ipv4(9363)
+        .await
+        .context("resolve ClickHouse Prometheus port")?;
+    verify_clickhouse_metrics(metrics_port).await?;
     let config = ClickHouseConfig {
+        resource_governance: ClickHouseResourceGovernance::SelfManaged,
+        io: ClickHouseIoConfig::default(),
         deployment_id: "system-test".to_owned(),
         cluster_id: "testcontainer".to_owned(),
         url: format!("http://127.0.0.1:{port}"),
@@ -243,10 +269,13 @@ async fn start_clickhouse() -> Result<(
         batch_size: 100,
         flush_interval_secs: 1,
         max_concurrent_inserts: 4,
+        max_inflight_write_bytes: 64 * 1024 * 1024,
+        max_concurrent_reads: 4,
+        max_threads_per_query: 2,
     };
-    let status = apply_online_schema_migrations(&config)
+    let status = bootstrap_schema(&config)
         .await
-        .context("apply ClickHouse system-test migrations")?;
+        .context("bootstrap fresh ClickHouse system-test schema")?;
     let pool = ClickHousePool::connect(&config)
         .await
         .context("connect ClickHouse system-test pool")?;
@@ -256,8 +285,52 @@ async fn start_clickhouse() -> Result<(
         .context("verify ClickHouse system-test schema")?;
     if status != verified {
         anyhow::bail!(
-            "ClickHouse migration status differs from runtime verification: applied={status:?}, verified={verified:?}"
+            "ClickHouse bootstrap status differs from runtime verification: bootstrapped={status:?}, verified={verified:?}"
         );
     }
     Ok((config, pool, verified, container))
+}
+
+async fn verify_clickhouse_metrics(port: u16) -> Result<()> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("build ClickHouse Prometheus probe")?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let result = async {
+            client
+                .get(format!("http://127.0.0.1:{port}/metrics"))
+                .send()
+                .await
+                .context("scrape ClickHouse Prometheus endpoint")?
+                .error_for_status()
+                .context("validate ClickHouse Prometheus response")?
+                .text()
+                .await
+                .context("decode ClickHouse Prometheus response")
+        }
+        .await;
+        match result {
+            Ok(metrics)
+                if metrics.contains("ClickHouseMetrics_")
+                    && metrics.contains("ClickHouseAsyncMetrics_") =>
+            {
+                return Ok(());
+            }
+            Ok(_) => {
+                if Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "ClickHouse Prometheus endpoint omitted live or asynchronous metrics"
+                    );
+                }
+            }
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(error);
+                }
+            }
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
 }

@@ -132,6 +132,16 @@ pub enum ModelCalibrationFitOutcome {
     },
 }
 
+/// Result of explicitly terminalizing a calibration run after operator
+/// cancellation or exhausted retries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalibrationRunFinalization {
+    /// The run was absent, newly terminalized, or already in the requested state.
+    Terminalized,
+    /// The atomic calibration commit won and exact outcome recovery must finish.
+    CommitWon,
+}
+
 /// Dependency-inversion boundary between the HTTP / job layer and the core
 /// model-score probability-calibrator fitter.
 #[async_trait]
@@ -145,6 +155,18 @@ pub trait ModelCalibrationFitPort: Send + Sync {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<ModelCalibrationFitOutcome>;
+
+    async fn cancel_run(
+        &self,
+        model_run_id: &ModelRunId,
+        reason: String,
+    ) -> QuantResult<CalibrationRunFinalization>;
+
+    async fn fail_run(
+        &self,
+        model_run_id: &ModelRunId,
+        reason: String,
+    ) -> QuantResult<CalibrationRunFinalization>;
 
     /// Read-only disjoint + embargo preflight check — the
     /// same purge/embargo primitive `fit` enforces fail-closed, without

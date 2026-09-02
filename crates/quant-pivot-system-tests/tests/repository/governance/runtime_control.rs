@@ -35,28 +35,28 @@ pub async fn singleton_cas_atomic_rejects() {
     assert_eq!(initial.kill_switch_state, KillSwitchState::Closed);
     assert!(!initial.kill_switch_requires_ack);
 
-    let operator_policy = repository
+    let automatic_policy = repository
         .compare_and_set(RuntimeControlUpdate {
             expected_revision: initial.revision,
-            entry_authorization_policy: Some(EntryAuthorizationPolicy::OperatorApprovalRequired),
+            entry_authorization_policy: Some(EntryAuthorizationPolicy::PolicyAutomatic),
             settlement_write_policy: None,
             kill_switch_state: None,
             kill_switch_requires_ack: None,
             actor: "runtime-admin".to_owned(),
-            reason: "operator selected semi-auto".to_owned(),
+            reason: "authorization preflight approved policy automatic".to_owned(),
         })
         .await
-        .expect("transition quant mode");
-    assert_eq!(operator_policy.revision, 1);
+        .expect("transition entry authorization policy");
+    assert_eq!(automatic_policy.revision, 1);
     assert_eq!(
-        operator_policy.entry_authorization_policy,
-        EntryAuthorizationPolicy::OperatorApprovalRequired
+        automatic_policy.entry_authorization_policy,
+        EntryAuthorizationPolicy::PolicyAutomatic
     );
 
     let idempotent = repository
         .compare_and_set(RuntimeControlUpdate {
-            expected_revision: operator_policy.revision,
-            entry_authorization_policy: Some(EntryAuthorizationPolicy::OperatorApprovalRequired),
+            expected_revision: automatic_policy.revision,
+            entry_authorization_policy: Some(EntryAuthorizationPolicy::PolicyAutomatic),
             settlement_write_policy: None,
             kill_switch_state: None,
             kill_switch_requires_ack: None,
@@ -65,11 +65,11 @@ pub async fn singleton_cas_atomic_rejects() {
         })
         .await
         .expect("idempotent retry");
-    assert_eq!(idempotent.revision, operator_policy.revision);
+    assert_eq!(idempotent.revision, automatic_policy.revision);
 
     let malformed = repository
         .compare_and_set(RuntimeControlUpdate {
-            expected_revision: operator_policy.revision,
+            expected_revision: automatic_policy.revision,
             entry_authorization_policy: Some(EntryAuthorizationPolicy::PolicyAutomatic),
             settlement_write_policy: Some(SettlementWritePolicy::PolicyAutomatic),
             kill_switch_state: None,
@@ -100,7 +100,7 @@ pub async fn singleton_cas_atomic_rejects() {
     let right = PgRuntimeControlRepository::new(db.clone());
     let (policy_result, halt_result) = tokio::join!(
         left.compare_and_set(RuntimeControlUpdate {
-            expected_revision: operator_policy.revision,
+            expected_revision: automatic_policy.revision,
             entry_authorization_policy: None,
             settlement_write_policy: Some(SettlementWritePolicy::GovernedCanary),
             kill_switch_state: None,
@@ -109,7 +109,7 @@ pub async fn singleton_cas_atomic_rejects() {
             reason: "enable governed canary".to_owned(),
         }),
         right.compare_and_set(RuntimeControlUpdate {
-            expected_revision: operator_policy.revision,
+            expected_revision: automatic_policy.revision,
             entry_authorization_policy: None,
             settlement_write_policy: None,
             kill_switch_state: Some(KillSwitchState::ExecutionHalted),

@@ -1,6 +1,6 @@
-//! Governance bundle: runtime config, mode control, health, notifications.
+//! Governance bundle: runtime config, independent authorities, health, notifications.
 
-use std::{sync::Arc, time::Duration};
+use std::{mem, sync::Arc, time::Duration};
 
 use quant_pivot_api::ws::WsShardHealthPort;
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
@@ -19,13 +19,15 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CapitalAllocationRepository, ModelRegistryRepository,
     ModelRunRepository, PolicyRepository, PromotionPermitRepository,
-    RecommendationReportRepository, ReconciliationRepository, RuntimeControlRepository,
-    ShadowComparisonRepository,
+    RecommendationReportRepository, ReconciliationRepository, RouteEconomicHealthRepository,
+    RuntimeControlRepository, ShadowComparisonRepository,
 };
-use tokio::{task::JoinHandle, time::MissedTickBehavior};
+use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
 
 use super::{DataBundle, InfraBundle, PgRepositories};
 use crate::{
+    app::{task_id::TaskId, task_registry::AppRunner},
     execution::ExitMonitorHealthHandle,
     governance::{
         AuthorizationPreflightDeps, BiasTableApplicator, DefaultAuthorizationPreflight,
@@ -42,7 +44,7 @@ use crate::{
     },
 };
 
-/// Active runtime config, mode, kill-switch, and notification wiring loaded from Postgres.
+/// Active runtime config, entry authority, kill switch, and notification wiring loaded from Postgres.
 pub struct RuntimeSnapshot {
     pub config: DecisionPolicySnapshot,
     pub store: Arc<DecisionPolicyStore>,
@@ -51,7 +53,7 @@ pub struct RuntimeSnapshot {
 }
 
 impl RuntimeSnapshot {
-    /// Bootstrap or restore the active runtime config, quant runtime mode, and
+    /// Bootstrap or restore the active runtime config, entry authorization, and
     /// operational kill-switch (both operational singletons fail closed if missing).
     pub async fn bootstrap(repos: &PgRepositories, deploy: &DeployConfig) -> QuantResult<Self> {
         let control = repos.runtime_control.load().await?;
@@ -79,7 +81,7 @@ pub struct GovernanceBundleDeps<'a> {
     pub events: CoreEventPublisher,
 }
 
-/// Governance: runtime config propagation, mode control, kill switch, health, alerts.
+/// Governance: runtime config propagation, independent controls, health, and alerts.
 pub struct GovernanceBundle {
     pub runtime_config: Arc<DecisionPolicyStore>,
     pub applicator: Arc<PolicySnapshotApplicator>,
@@ -99,15 +101,26 @@ pub struct GovernanceBundle {
     /// Server-authorized model-route promotion permits.
     pub promotion_permits: Arc<PromotionPermitService>,
     /// Exit-monitor health: shared with the execution bundle's worker and
-    /// read by admission `#20` + the auto-execution mode preflight.
+    /// read by admission `#20` + the policy-automatic authorization preflight.
     pub exit_monitor_health: ExitMonitorHealthHandle,
     /// Lock-free execution recovery summary embedded in [`SystemStatus`].
     pub execution_recovery: Arc<ExecutionRecoveryCoordinator>,
-    /// Shared WS fan-out helper for mode / kill-switch and lifecycle broadcasts.
+    /// Shared WS fan-out helper for authority, kill-switch, and lifecycle broadcasts.
     pub status_publisher: Arc<SystemStatusPublisher>,
-    /// Durable DB → `ArcSwap` convergence loop, started only after every
-    /// fallible serving-generation subscriber has bootstrapped and attached.
-    policy_bundle_reconciler: Option<JoinHandle<()>>,
+    /// Prepared only after every fallible serving subscriber is attached, then
+    /// moved into the central registry so policy publication stops before research.
+    policy_bundle_reconciler: PolicyReconcilerState,
+}
+
+enum PolicyReconcilerState {
+    Unprepared,
+    Prepared(PolicyBundleReconciler),
+    Registered,
+}
+
+struct PolicyBundleReconciler {
+    repository: Arc<dyn PolicyRepository>,
+    applicator: Arc<CommittedPolicyApplicator>,
 }
 
 impl GovernanceBundle {
@@ -195,29 +208,51 @@ impl GovernanceBundle {
             exit_monitor_health,
             execution_recovery,
             status_publisher,
-            policy_bundle_reconciler: None,
+            policy_bundle_reconciler: PolicyReconcilerState::Unprepared,
         })
     }
 
-    /// Start cross-instance policy convergence after the serving generation,
-    /// execution breaker, and other fallible subscribers are attached.
+    /// Prepare cross-instance policy convergence after the serving generation,
+    /// execution breaker, and other fallible subscribers are attached. No task
+    /// starts until the application registry takes ownership.
     ///
     /// # Errors
     ///
-    /// Rejects duplicate starts so one process has exactly one reconciler.
-    pub fn start_policy_reconciler(
+    /// Rejects duplicate preparation so one process has exactly one reconciler.
+    pub fn prepare_policy_reconciler(
         &mut self,
         repository: Arc<dyn PolicyRepository>,
     ) -> QuantResult<()> {
-        if self.policy_bundle_reconciler.is_some() {
+        if !matches!(
+            self.policy_bundle_reconciler,
+            PolicyReconcilerState::Unprepared
+        ) {
             return Err(QuantError::config(
-                "policy bundle reconciler is already running",
+                "policy bundle reconciler is already prepared or registered",
             ));
         }
-        self.policy_bundle_reconciler = Some(spawn_policy_bundle_reconciler(
+        self.policy_bundle_reconciler = PolicyReconcilerState::Prepared(PolicyBundleReconciler {
             repository,
-            Arc::clone(&self.committed_policy),
-        ));
+            applicator: Arc::clone(&self.committed_policy),
+        });
+        Ok(())
+    }
+
+    /// Transfer the sole policy publisher into the health-monitor drain stage.
+    /// This stage completes before execution, research, and shared pool closure.
+    pub fn register_policy_reconciler(&mut self, runner: &mut AppRunner) -> QuantResult<()> {
+        let state = mem::replace(
+            &mut self.policy_bundle_reconciler,
+            PolicyReconcilerState::Registered,
+        );
+        let PolicyReconcilerState::Prepared(worker) = state else {
+            return Err(QuantError::config(
+                "policy bundle reconciler must be prepared exactly once before registration",
+            ));
+        };
+        runner.spawn(TaskId::PolicyBundleReconciler, move |token| {
+            worker.run(token)
+        });
         Ok(())
     }
 
@@ -249,31 +284,43 @@ impl GovernanceBundle {
     }
 }
 
-fn spawn_policy_bundle_reconciler(
-    repository: Arc<dyn PolicyRepository>,
-    applicator: Arc<CommittedPolicyApplicator>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+impl PolicyBundleReconciler {
+    async fn run(self, shutdown: CancellationToken) {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
-            let bundle = match repository.load_current_bundle().await {
-                Ok(Some(bundle)) => bundle,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::error!(error = %error, "policy bundle reconciliation read failed");
-                    continue;
-                }
-            };
-            if let Err(error) = applicator.apply_committed(bundle).await {
-                tracing::error!(
-                    error = %error,
-                    "durable policy bundle failed runtime convergence"
-                );
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                _ = interval.tick() => {},
+            }
+            // Reads and fallible preparation may be cancelled during drain.
+            // Publication is synchronous; joining this task is the barrier
+            // after which no policy generation can be published again.
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                () = self.reconcile() => {},
             }
         }
-    })
+    }
+
+    async fn reconcile(&self) {
+        let bundle = match self.repository.load_current_bundle().await {
+            Ok(Some(bundle)) => bundle,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::error!(error = %error, "policy bundle reconciliation read failed");
+                return;
+            }
+        };
+        if let Err(error) = self.applicator.apply_committed(bundle).await {
+            tracing::error!(
+                error = %error,
+                "durable policy bundle failed runtime convergence"
+            );
+        }
+    }
 }
 
 /// Dependencies for [`build_runtime_config_applicator`].
@@ -339,13 +386,12 @@ struct OperationsPolicysDeps<'a> {
 fn wire_operations_policys(deps: &OperationsPolicysDeps<'_>) -> OperationsPolicys {
     let deploy = deps.deploy;
     let metrics = deps.metrics;
-    let infra = deps.infra;
     let runtime_config = deps.runtime_config;
     let runtime_controls = deps.runtime_controls;
     let status_publisher = deps.status_publisher;
     let health_checker = deps.health_checker;
     let reconciliation_repo = deps.reconciliation_repo;
-    let repos = &infra.repos;
+    let repos = &deps.infra.repos;
     let execution_recovery_handle = ExecutionRecoveryHandle::new(
         SystemStatus::bootstrap(runtime_controls.entry_authorization_policy()).execution_recovery,
     );
@@ -358,6 +404,8 @@ fn wire_operations_policys(deps: &OperationsPolicysDeps<'_>) -> OperationsPolicy
             model_registry: Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>,
             shadow_comparison: Arc::clone(&repos.shadow_comparison)
                 as Arc<dyn ShadowComparisonRepository>,
+            economic_health: Arc::clone(&repos.route_economic_health)
+                as Arc<dyn RouteEconomicHealthRepository>,
             reconciliation: Arc::clone(reconciliation_repo),
             capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
             runtime_controls: runtime_controls.clone(),

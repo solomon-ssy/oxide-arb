@@ -9,6 +9,7 @@ use quant_pivot_error::signing::SigningError;
 /// Order signer backed by an alloy `PrivateKeySigner` (secp256k1).
 ///
 /// Exposes the inner signer for SDK authentication flows.
+#[derive(Clone)]
 pub struct OrderSigner {
     signer: PrivateKeySigner,
 }

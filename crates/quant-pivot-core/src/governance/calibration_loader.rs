@@ -21,7 +21,9 @@ use quant_pivot_models::{
     types::{CalibrationArtifactId, ContentHash, calibration::ModelScoreCalibrationPayload},
 };
 use quant_pivot_repository::traits::CalibrationArtifactRepository;
-use quant_pivot_research::model::{CalibrationArtifactLoader, ModelArtifact, ResolvedCalibration};
+use quant_pivot_research::model::{
+    CalibrationArtifactLoader, CancellationProbe, ModelArtifact, ResolvedCalibration,
+};
 
 /// Resolve a model artifact's return-model calibration state through the
 /// **single** deep check shared by every production consumer.
@@ -155,14 +157,17 @@ impl TryFrom<&CalibrationArtifactInfo> for VerifiedModelScoreCalibration {
     }
 }
 
-impl From<VerifiedModelScoreCalibration> for ResolvedCalibration {
-    fn from(verified: VerifiedModelScoreCalibration) -> Self {
-        Self {
-            artifact_id: verified.artifact_id,
-            mapping: verified.payload.mapping,
-            reliability: verified.payload.reliability,
-            split_payout_rate: verified.payload.split_payout_rate,
-        }
+impl TryFrom<VerifiedModelScoreCalibration> for ResolvedCalibration {
+    type Error = QuantError;
+
+    fn try_from(verified: VerifiedModelScoreCalibration) -> Result<Self, Self::Error> {
+        Self::try_new(
+            verified.artifact_id,
+            verified.payload.mapping,
+            verified.payload.reliability,
+            verified.payload.split_payout_rate,
+            &CancellationProbe::default(),
+        )
     }
 }
 
@@ -209,7 +214,7 @@ impl CalibrationArtifactLoader for CoreCalibrationArtifactLoader {
                 ),
             }));
         }
-        Ok(ResolvedCalibration::from(verified))
+        ResolvedCalibration::try_from(verified)
     }
 }
 
@@ -240,8 +245,8 @@ mod tests {
             api::CalibrationArtifactListQuery,
             pagination::Paginated,
             quant::{
-                CalibrationArtifactInfo, ModelScoreCalibrationCommit,
-                ModelScoreCalibrationCommitOutcome, NewCalibrationArtifact,
+                CalibrationArtifactInfo, ModelScoreCalibrationCommitOutcome,
+                NewCalibrationArtifact, VerifiedModelScoreCalibrationCommit,
             },
         },
         enums::model::ModelFamily,
@@ -285,7 +290,7 @@ mod tests {
 
         async fn commit_model_score(
             &self,
-            _commit: ModelScoreCalibrationCommit,
+            _commit: VerifiedModelScoreCalibrationCommit,
         ) -> Result<ModelScoreCalibrationCommitOutcome, StorageError> {
             unimplemented!("not exercised by loader tests")
         }

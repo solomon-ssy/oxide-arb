@@ -1,12 +1,15 @@
 //! Durable fresh-boot projection, recovery, and lineage contracts.
 
 use chrono::{DateTime, Duration, Utc};
+use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
         data_plane::{
-            ExchangeHistoryChunkStatus, ExchangeHistoryContinuityBasis, ExchangeHistoryFrontier,
-            ExchangeHistoryQuarantineEvidence, ExchangeHistoryQuarantineKind,
-            NewExchangeHistoryChunk, NewExchangeHistoryQuarantine, ResolveAcceptedHistoryRange,
+            CreateHistoryServingHeadSeal, ExchangeHistoryChunkStatus,
+            ExchangeHistoryContinuityBasis, ExchangeHistoryFrontier,
+            ExchangeHistoryQuarantineEvidence, ExchangeHistoryQuarantineKind, HistorySealChunkRef,
+            NewExchangeHistoryChunk, NewExchangeHistoryPlan, NewExchangeHistoryQuarantine,
+            NewHistoryServingHeadSeal, ResolveAcceptedHistoryRange,
         },
         quant::{
             AdvanceFreshBootRun, BlockFreshBootRun, DelayFreshBootRun, FreshBootAdvancePatch,
@@ -18,8 +21,9 @@ use quant_pivot_models::{
     },
     runtime_config::BuyModelRoute,
     types::{
-        ContentHash, EvmBlockHash, FreshBootRunId, POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID,
-        ResearchProfileArtifact, WorkerId, builtin_research_profiles,
+        ContentHash, EvmBlockHash, FreshBootRunId, HistoryServingHeadSealId,
+        POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID, ResearchProfileArtifact, WorkerId,
+        builtin_research_profiles,
     },
 };
 use quant_pivot_repository::{
@@ -32,7 +36,7 @@ use quant_pivot_repository::{
 use quant_pivot_system_tests::{
     postgres::setup_pg, support::policy_fixtures::bootstrap_default_policy_bundle,
 };
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait};
 use uuid::Uuid;
 
 fn hash(seed: char) -> ContentHash {
@@ -463,4 +467,126 @@ pub async fn quarantine_resolution_unlocks() {
         1,
         "resolution must preserve the append-only quarantine evidence"
     );
+}
+
+pub async fn serving_head_hash_holds() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection();
+    let repo = PgExchangeHistoryRepository::new(db.clone());
+    let now = DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
+        .expect("PostgreSQL microsecond fixture clock");
+    let plan = repo
+        .create_or_load_plan(NewExchangeHistoryPlan {
+            plan_id: Uuid::now_v7(),
+            chain_id: 137,
+            policy_hash: hash('a'),
+            bootstrap_profile_set_hash: hash('b'),
+            finalized_anchor_block: 299,
+            finalized_anchor_hash: block_hash('3'),
+            finalized_anchor_timestamp: now.timestamp(),
+            activation_from_block: 100,
+            activation_through_block: 199,
+            crypto_required_from_block: 100,
+            weather_required_from_block: 100,
+            retention_from_block: 1,
+            retention_through_block: 99,
+            created_at: now,
+        })
+        .await
+        .expect("persist serving-head history plan");
+    let mut chunk = history_chunk(
+        Uuid::now_v7(),
+        100,
+        199,
+        ExchangeHistoryChunkStatus::Accepted,
+        now,
+    );
+    chunk.frontier = ExchangeHistoryFrontier::Activation;
+    let chunk = repo
+        .save_chunk(chunk)
+        .await
+        .expect("persist accepted serving chunk");
+    let mut command = CreateHistoryServingHeadSeal {
+        seal: NewHistoryServingHeadSeal {
+            serving_head_seal_id: HistoryServingHeadSealId::from_v7(),
+            seal_hash: ContentHash::from_bytes([0; 32]),
+            plan_id: plan.plan_id,
+            frontier: ExchangeHistoryFrontier::Activation,
+            previous_seal_id: None,
+            window_from_block: chunk.from_block,
+            accepted_through_block: chunk.to_block,
+            effective_through_at: chunk.effective_through_at.expect("accepted-through time"),
+            policy_hash: plan.policy_hash,
+            created_at: now,
+        },
+        chunks: vec![HistorySealChunkRef {
+            chunk_id: chunk.chunk_id,
+            frontier: chunk.frontier,
+            state_revision: chunk.state_revision.expect("accepted state revision"),
+            from_block: chunk.from_block,
+            to_block: chunk.to_block,
+        }],
+    };
+    command.seal.seal_hash = command.derive_hash().expect("derive creation commitment");
+    let head = repo
+        .create_serving_head(command)
+        .await
+        .expect("persist immutable serving head");
+    assert_eq!(
+        head.derive_hash().expect("derive loaded commitment"),
+        head.seal.seal_hash
+    );
+    assert_eq!(
+        repo.validate_serving_head(head.seal.serving_head_seal_id, head.seal.seal_hash)
+            .await
+            .expect("valid serving head passes read-side rehash"),
+        head
+    );
+
+    // Corruption is isolated to this disposable database. No production path may
+    // bypass WORM; the transaction-local setting resets before the validation read.
+    let transaction = db
+        .begin()
+        .await
+        .expect("begin isolated corruption injection");
+    transaction
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SET LOCAL session_replication_role = 'replica'",
+        ))
+        .await
+        .expect("scope corruption permission to the disposable transaction");
+    let changed = transaction
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE quant_history_serving_head_seal \
+         SET effective_through_at = effective_through_at + interval '1 microsecond' \
+         WHERE serving_head_seal_id = $1",
+            [head.seal.serving_head_seal_id.as_uuid().into()],
+        ))
+        .await
+        .expect("change only one metadata field without replacing the stored hash");
+    assert_eq!(changed.rows_affected(), 1);
+    transaction
+        .commit()
+        .await
+        .expect("commit isolated corruption");
+    let damaged = repo
+        .latest_serving_head(ExchangeHistoryFrontier::Activation)
+        .await
+        .expect("load injected metadata")
+        .expect("serving head still exists");
+    assert_eq!(damaged.seal.seal_hash, head.seal.seal_hash);
+    assert_eq!(
+        damaged.seal.effective_through_at,
+        head.seal.effective_through_at + Duration::microseconds(1)
+    );
+    assert!(matches!(
+        repo.validate_serving_head(head.seal.serving_head_seal_id, head.seal.seal_hash)
+            .await,
+        Err(StorageError::StateConflict {
+            entity: "quant_history_seal",
+            ..
+        })
+    ));
 }

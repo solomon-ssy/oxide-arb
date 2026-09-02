@@ -21,7 +21,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory, OfflineMemoryLease};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::BookMicrostructureRow,
@@ -29,7 +29,7 @@ use quant_pivot_models::{
         data_plane::{DecisionBoundary, DecisionClock, DecisionSource, HistorySealChunkRef},
         market::{MarketInfo, MarketRegistryInfo, fee::MarketFeeSchedule},
         quant::{
-            CompleteTrainingDatasetBuild, ExitTrainingLotRow, JobProgressSink,
+            CompleteTrainingDatasetBuild, ExitTrainingLotRow, JobProgressSink, ModelSpecInfo,
             NewTrainingDatasetPlan, NoopProgressSink, TrainingDatasetInfo,
             TrainingDatasetMaterialization,
         },
@@ -423,8 +423,8 @@ pub fn verify_frozen_dataset_artifact(
     Ok(decoded.examples)
 }
 
-/// Require a complete artifact binding without manufacturing values for a
-/// planned, building, failed-before-materialization, or legacy row.
+/// Require a complete artifact binding without manufacturing values for any
+/// non-materialized lifecycle state.
 pub fn require_dataset_materialization(
     dataset: &TrainingDatasetInfo,
 ) -> QuantResult<TrainingDatasetMaterialization<'_>> {
@@ -1666,6 +1666,8 @@ impl TrainingDatasetService {
         plan: DatasetPlan,
         examples: Vec<TrainingExample>,
         coverage: DatasetCoverage,
+        compute_memory: OfflineMemory,
+        cancel: &CancellationToken,
     ) -> QuantResult<TrainingDatasetArtifact> {
         if plan
             .request
@@ -1684,12 +1686,15 @@ impl TrainingDatasetService {
             }
             .into());
         }
-        if let Some(existing) = self.load_completed_feedback(&plan).await? {
+        if let Some(existing) = self
+            .load_completed_feedback(&plan, compute_memory, cancel)
+            .await?
+        {
             return Ok(existing);
         }
         self.prepare_build_ledger(&plan).await?;
         let training_dataset_id = plan.training_dataset_id;
-        let result = async {
+        let result = Box::pin(async {
             let profile = Self::resolve_research_profile(&plan.request)?;
             let builder = ConfiguredFeatureBuilder::new_for_contract(
                 &self.features,
@@ -1706,17 +1711,36 @@ impl TrainingDatasetService {
                 }
                 .into());
             }
-            self.finalize_dataset(&builder, plan, examples, coverage)
-                .await
-        }
+            Box::pin(self.finalize_dataset(
+                builder,
+                plan,
+                examples,
+                coverage,
+                compute_memory,
+                cancel,
+            ))
+            .await
+        })
         .await;
         self.persist_build_failure(&training_dataset_id, result)
             .await
     }
 
+    fn require_active(cancel: &CancellationToken, boundary: &'static str) -> QuantResult<()> {
+        if cancel.is_cancelled() {
+            return Err(ResearchError::Cancelled {
+                detail: format!("Dataset build cancelled {boundary}"),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     async fn load_completed_feedback(
         &self,
         plan: &DatasetPlan,
+        compute_memory: OfflineMemory,
+        cancel: &CancellationToken,
     ) -> QuantResult<Option<TrainingDatasetArtifact>> {
         let Some(dataset) = self
             .dataset_repo
@@ -1764,7 +1788,16 @@ impl TrainingDatasetService {
         }
         let materialization = require_dataset_materialization(&dataset)?;
         let bytes = self.artifact_store.get(materialization.parquet_uri).await?;
-        let examples = verify_frozen_dataset_artifact(&dataset, &bytes)?;
+        Self::require_active(cancel, "before completed Parquet verification")?;
+        let (dataset, examples) = self
+            .compute
+            .run_offline_cancellable(compute_memory, cancel, move || {
+                let examples = verify_frozen_dataset_artifact(&dataset, &bytes)?;
+                Ok((dataset, examples))
+            })
+            .await?;
+        Self::require_active(cancel, "after completed Parquet verification")?;
+        let materialization = require_dataset_materialization(&dataset)?;
         Ok(Some(TrainingDatasetArtifact {
             format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             training_dataset_id: dataset.training_dataset_id,
@@ -1942,7 +1975,7 @@ impl TrainingDatasetService {
             spine.market_set = output.market_set;
         }
 
-        self.assemble_and_finalize(
+        Box::pin(self.assemble_and_finalize(
             plan,
             BuildTail {
                 pit: &*pit,
@@ -1950,10 +1983,11 @@ impl TrainingDatasetService {
                 clob_market_info: &prefetched.clob_market_info,
                 context: &context,
                 sink: &*sink,
+                cancel: &cancel,
             },
             coverage,
             spine,
-        )
+        ))
         .await
     }
 
@@ -2164,7 +2198,7 @@ impl TrainingDatasetService {
             spine.examples = output.examples;
             spine.market_set = output.market_set;
         }
-        self.assemble_and_finalize(
+        Box::pin(self.assemble_and_finalize(
             plan,
             BuildTail {
                 pit,
@@ -2172,10 +2206,11 @@ impl TrainingDatasetService {
                 clob_market_info: &prefetched.clob_market_info,
                 context: &context,
                 sink: &NoopProgressSink,
+                cancel: &cancel,
             },
             coverage,
             spine,
-        )
+        ))
         .await
     }
 
@@ -2274,6 +2309,7 @@ impl TrainingDatasetService {
             clob_market_info,
             context,
             sink,
+            cancel,
         } = tail;
         let profile = Self::resolve_research_profile(&plan.request)?;
         let builder = ConfiguredFeatureBuilder::new_for_contract(
@@ -2336,8 +2372,15 @@ impl TrainingDatasetService {
             "finalize",
             spine.examples.len() as u64,
         ));
-        self.finalize_dataset(&builder, plan, spine.examples, coverage)
-            .await
+        Box::pin(self.finalize_dataset(
+            builder,
+            plan,
+            spine.examples,
+            coverage,
+            OfflineMemory::try_gib(10)?,
+            cancel,
+        ))
+        .await
     }
 
     /// Assemble the historical-window loader from the frozen staleness bound.
@@ -2625,74 +2668,63 @@ impl TrainingDatasetService {
     /// artifact, and record the ledger row.
     async fn finalize_dataset(
         &self,
-        builder: &ConfiguredFeatureBuilder,
+        builder: ConfiguredFeatureBuilder,
         plan: DatasetPlan,
         examples: Vec<TrainingExample>,
         coverage: DatasetCoverage,
+        compute_memory: OfflineMemory,
+        cancel: &CancellationToken,
     ) -> QuantResult<TrainingDatasetArtifact> {
-        self.validate_finalization_input(&plan, &examples).await?;
-
-        let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
-        if feature_schema_hash != plan.feature_schema_hash
-            || plan
-                .factor_serving_plane
-                .definitions()
-                .iter()
-                .any(|definition| {
-                    definition.feature_contract_hash() != feature_schema_hash
-                        || definition.input_schema_version() != plan.request.feature_schema_version
-                })
-        {
-            return Err(ResearchError::DatasetBuild {
-                detail: "frozen factor plane does not bind the materialized feature contract"
-                    .to_owned(),
-            }
-            .into());
-        }
-        let label_schema_hash = ResearchHasher::label_schema(&plan.label_names)?;
-        let coverage = self
-            .complete_integrity_coverage(
-                &plan.request.model_spec_id,
-                plan.model_family,
-                &examples,
-                builder,
-                coverage,
-            )
+        Self::require_active(cancel, "before leakage verification")?;
+        let memory_lease = self
+            .compute
+            .acquire_offline_memory_cancellable(compute_memory, cancel)
             .await?;
-        let integrity = dataset_integrity_outcome(&coverage)?;
-        let dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
-            DatasetHashContract {
-                model_spec_id: &plan.request.model_spec_id,
-                model_family: plan.model_family,
-                window_start: plan.request.window_start,
-                window_end: plan.request.window_end,
-                purpose: plan.request.purpose,
-                feature_schema_hash: &feature_schema_hash,
-                factor_serving_plane: &plan.factor_serving_plane,
-                label_schema_hash: &label_schema_hash,
-            },
-            &examples,
-        )?;
-
-        let persisted = self
-            .persist_dataset_artifact(
-                &plan,
-                &examples,
-                DatasetSchemaHashes {
-                    feature: feature_schema_hash,
-                    label: label_schema_hash,
-                },
-                dataset_hash,
-            )
+        let resident = ResidentDataset {
+            builder,
+            plan,
+            examples,
+            coverage,
+        };
+        let resident = self
+            .validate_finalization_input(resident, &memory_lease, cancel)
             .await?;
-
+        let resident = self
+            .complete_integrity_coverage(resident, &memory_lease, cancel)
+            .await?;
+        Self::require_active(cancel, "before Dataset hashing")?;
+        let finalized = self
+            .compute
+            .run_leased_cancellable(&memory_lease, cancel, move || resident.finalize())
+            .await?;
+        Self::require_active(cancel, "after Dataset hashing")?;
+        let FinalizedDataset {
+            plan,
+            examples,
+            coverage,
+            finalization,
+        } = finalized;
+        let verified = Box::pin(self.persist_dataset_artifact(
+            plan,
+            examples,
+            finalization.schema_hashes,
+            finalization.dataset_hash,
+            &memory_lease,
+            cancel,
+        ))
+        .await?;
+        let VerifiedDatasetArtifact {
+            plan,
+            examples,
+            persisted,
+        } = verified;
         let completion = CompleteTrainingDatasetBuild::try_new(
-            integrity.status,
+            finalization.integrity.status,
             persisted.manifest.clone(),
             persisted.artifact_bytes_hash,
             persisted.parquet_uri.clone(),
             coverage.clone(),
-            integrity.failure_detail,
+            finalization.integrity.failure_detail,
         )
         .map_err(|error| ResearchError::DatasetBuild {
             detail: error.to_string(),
@@ -2701,6 +2733,7 @@ impl TrainingDatasetService {
             .complete_build(&plan.training_dataset_id, completion)
             .await
             .map_err(QuantError::from)?;
+        drop(memory_lease);
 
         Ok(TrainingDatasetArtifact {
             format_version: DATASET_ARTIFACT_FORMAT_VERSION,
@@ -2709,9 +2742,9 @@ impl TrainingDatasetService {
             window_start: plan.request.window_start,
             window_end: plan.request.window_end,
             examples,
-            feature_schema_hash,
-            label_schema_hash,
-            dataset_hash,
+            feature_schema_hash: finalization.schema_hashes.feature,
+            label_schema_hash: finalization.schema_hashes.label,
+            dataset_hash: finalization.dataset_hash,
             manifest: persisted.manifest,
             artifact_bytes_hash: persisted.artifact_bytes_hash,
             parquet_uri: persisted.parquet_uri,
@@ -2721,15 +2754,23 @@ impl TrainingDatasetService {
 
     async fn validate_finalization_input(
         &self,
-        plan: &DatasetPlan,
-        examples: &[TrainingExample],
-    ) -> QuantResult<()> {
-        assert_no_future_leakage(examples)?;
+        resident: ResidentDataset,
+        memory_lease: &OfflineMemoryLease,
+        cancel: &CancellationToken,
+    ) -> QuantResult<ResidentDataset> {
+        let resident = self
+            .compute
+            .run_leased_cancellable(memory_lease, cancel, move || resident.verify_leakage())
+            .await?;
+        Self::require_active(cancel, "after leakage verification")?;
         // Reject overlapping calibration windows before artifact I/O. Fit-time
         // services repeat this check; model-specific embargo remains a publish
         // concern because this dataset is not yet bound to one model version.
-        if plan.request.purpose == DatasetPurpose::Calibration {
-            let window = TimeWindow::new(plan.request.window_start, plan.request.window_end);
+        if resident.plan.request.purpose == DatasetPurpose::Calibration {
+            let window = TimeWindow::new(
+                resident.plan.request.window_start,
+                resident.plan.request.window_end,
+            );
             assert_dataset_disjoint(
                 self.dataset_repo.as_ref(),
                 &window,
@@ -2737,20 +2778,20 @@ impl TrainingDatasetService {
             )
             .await?;
         }
-        Ok(())
+        Ok(resident)
     }
 
     async fn complete_integrity_coverage(
         &self,
-        model_spec_id: &ModelSpecId,
-        model_family: ModelFamily,
-        examples: &[TrainingExample],
-        builder: &ConfiguredFeatureBuilder,
-        coverage: DatasetCoverage,
-    ) -> QuantResult<DatasetCoverage> {
+        resident: ResidentDataset,
+        memory_lease: &OfflineMemoryLease,
+        cancel: &CancellationToken,
+    ) -> QuantResult<ResidentDataset> {
+        let model_spec_id = resident.plan.request.model_spec_id;
+        let model_family = resident.plan.model_family;
         let model_spec = self
             .model_registry
-            .find_model_spec(model_spec_id)
+            .find_model_spec(&model_spec_id)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| StorageError::NotFound {
@@ -2775,97 +2816,126 @@ impl TrainingDatasetService {
                     model_spec.model_spec_id
                 ),
             })?;
-        let target_label =
-            LabelName::new(model_spec.training_contract.target.label_name().to_owned());
-        let mut coverage = coverage;
-        coverage.bias_table_hash = if model_family.is_classical() {
+        Self::require_active(cancel, "before integrity coverage")?;
+        let bias_table_hash = if model_family.is_classical() {
             None
         } else {
             self.bias_table.as_ref().map(|table| table.content_hash)
         };
-        coverage.feature_state_counts = dataset_feature_state_counts(examples);
-        coverage.matrix_probe = Some(probe_matrix_coverage(
-            examples,
-            builder.schema(),
-            &model_spec.input_contract,
-            &target_label,
-            model_spec.training_contract.target.label_horizon_secs(),
-        )?);
-        Ok(coverage)
+        let resident = self
+            .compute
+            .run_leased_cancellable(memory_lease, cancel, move || {
+                resident.complete_integrity(&model_spec, bias_table_hash)
+            })
+            .await?;
+        Self::require_active(cancel, "after integrity coverage")?;
+        Ok(resident)
     }
 
     async fn persist_dataset_artifact(
         &self,
-        plan: &DatasetPlan,
-        examples: &[TrainingExample],
+        plan: DatasetPlan,
+        examples: Vec<TrainingExample>,
         schema_hashes: DatasetSchemaHashes,
         dataset_hash: ContentHash,
-    ) -> QuantResult<PersistedDatasetArtifact> {
-        let sample_count =
-            u64::try_from(examples.len()).map_err(|error| ResearchError::DatasetBuild {
-                detail: format!("dataset sample count conversion failed: {error}"),
-            })?;
-        let manifest = DatasetManifest {
-            format_version: DATASET_ARTIFACT_FORMAT_VERSION,
-            training_dataset_id: plan.training_dataset_id,
-            source_lineage: plan.request.source_lineage.clone(),
-            cohort_manifest: plan.request.cohort_manifest.clone(),
-            model_spec_id: plan.request.model_spec_id,
-            model_family: plan.model_family,
-            model_spec_definition_hash: plan.model_spec_definition_hash,
-            trade_policy_artifact_id: plan.trade_policy_artifact_id,
-            trade_policy_hash: plan.trade_policy_hash,
-            window_start: plan.request.window_start,
-            window_end: plan.request.window_end,
-            purpose: plan.request.purpose,
-            knowledge_lag_secs: plan.request.knowledge_lag_secs,
-            sample_interval_secs: plan.request.sample_interval_secs,
-            horizons_secs: plan.request.horizons_secs.clone(),
-            feature_schema_version: plan.request.feature_schema_version,
-            feature_schema_hash: schema_hashes.feature,
-            factor_serving_plane: plan.factor_serving_plane.clone(),
-            label_schema_hash: schema_hashes.label,
-            semantic_dataset_hash: dataset_hash,
-            source_fingerprint: dataset_source_fingerprint(examples)?,
-            sample_count,
-        };
-        let manifest_hash = manifest
-            .content_hash()
-            .map_err(|detail| ResearchError::DatasetBuild { detail })?;
-        let parquet_bytes = DatasetParquetCodec::encode(examples, &manifest)?;
-        let artifact_bytes_hash = CanonicalDigest::content_hash_bytes(&parquet_bytes);
+        memory_lease: &OfflineMemoryLease,
+        cancel: &CancellationToken,
+    ) -> QuantResult<VerifiedDatasetArtifact> {
+        Self::require_active(cancel, "before Parquet encoding")?;
+        let encoded = self
+            .compute
+            .run_leased_cancellable(memory_lease, cancel, move || {
+                let sample_count =
+                    u64::try_from(examples.len()).map_err(|error| ResearchError::DatasetBuild {
+                        detail: format!("dataset sample count conversion failed: {error}"),
+                    })?;
+                let manifest = DatasetManifest {
+                    format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+                    training_dataset_id: plan.training_dataset_id,
+                    source_lineage: plan.request.source_lineage.clone(),
+                    cohort_manifest: plan.request.cohort_manifest.clone(),
+                    model_spec_id: plan.request.model_spec_id,
+                    model_family: plan.model_family,
+                    model_spec_definition_hash: plan.model_spec_definition_hash,
+                    trade_policy_artifact_id: plan.trade_policy_artifact_id,
+                    trade_policy_hash: plan.trade_policy_hash,
+                    window_start: plan.request.window_start,
+                    window_end: plan.request.window_end,
+                    purpose: plan.request.purpose,
+                    knowledge_lag_secs: plan.request.knowledge_lag_secs,
+                    sample_interval_secs: plan.request.sample_interval_secs,
+                    horizons_secs: plan.request.horizons_secs.clone(),
+                    feature_schema_version: plan.request.feature_schema_version,
+                    feature_schema_hash: schema_hashes.feature,
+                    factor_serving_plane: plan.factor_serving_plane.clone(),
+                    label_schema_hash: schema_hashes.label,
+                    semantic_dataset_hash: dataset_hash,
+                    source_fingerprint: dataset_source_fingerprint(&examples)?,
+                    sample_count,
+                };
+                let manifest_hash = manifest
+                    .content_hash()
+                    .map_err(|detail| ResearchError::DatasetBuild { detail })?;
+                let parquet_bytes = DatasetParquetCodec::encode(&examples, &manifest)?;
+                let artifact_bytes_hash = CanonicalDigest::content_hash_bytes(&parquet_bytes);
+                Ok(EncodedDatasetArtifact {
+                    plan,
+                    examples,
+                    manifest,
+                    manifest_hash,
+                    parquet_bytes,
+                    artifact_bytes_hash,
+                })
+            })
+            .await?;
+        Self::require_active(cancel, "after Parquet encoding")?;
         let key = ArtifactKey::new(
             ArtifactNamespace::Dataset,
-            plan.training_dataset_id.as_uuid().to_string(),
+            encoded.plan.training_dataset_id.as_uuid().to_string(),
             "parquet",
         )?;
-        let parquet_uri = self.artifact_store.put(key, &parquet_bytes).await?;
+        let parquet_uri = self.artifact_store.put(key, &encoded.parquet_bytes).await?;
         let persisted_bytes = self.artifact_store.get(&parquet_uri).await?;
-        let persisted_hash = CanonicalDigest::content_hash_bytes(&persisted_bytes);
-        if persisted_hash != artifact_bytes_hash {
-            return Err(ResearchError::DatasetBuild {
-                detail: format!(
-                    "dataset artifact byte hash changed after persistence: encoded {artifact_bytes_hash}, persisted {persisted_hash}"
-                ),
-            }
-            .into());
-        }
-        let decoded = DatasetParquetCodec::decode_with_manifest(&persisted_bytes)?;
-        let decoded_manifest_hash = decoded
-            .manifest
-            .content_hash()
-            .map_err(|detail| ResearchError::DatasetBuild { detail })?;
-        if decoded.manifest != manifest || decoded_manifest_hash != manifest_hash {
-            return Err(ResearchError::DatasetBuild {
-                detail: "dataset manifest changed during Parquet persistence".to_owned(),
-            }
-            .into());
-        }
-        Ok(PersistedDatasetArtifact {
-            manifest,
-            artifact_bytes_hash,
-            parquet_uri,
-        })
+        Self::require_active(cancel, "before Parquet verification")?;
+        let verified = self
+            .compute
+            .run_leased_cancellable(memory_lease, cancel, move || {
+                let persisted_hash = CanonicalDigest::content_hash_bytes(&persisted_bytes);
+                if persisted_hash != encoded.artifact_bytes_hash {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "dataset artifact byte hash changed after persistence: encoded {}, persisted {persisted_hash}",
+                            encoded.artifact_bytes_hash
+                        ),
+                    }
+                    .into());
+                }
+                let decoded = DatasetParquetCodec::decode_with_manifest(&persisted_bytes)?;
+                let decoded_manifest_hash = decoded
+                    .manifest
+                    .content_hash()
+                    .map_err(|detail| ResearchError::DatasetBuild { detail })?;
+                if decoded.manifest != encoded.manifest
+                    || decoded_manifest_hash != encoded.manifest_hash
+                {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: "dataset manifest changed during Parquet persistence".to_owned(),
+                    }
+                    .into());
+                }
+                Ok(VerifiedDatasetArtifact {
+                    plan: encoded.plan,
+                    examples: encoded.examples,
+                    persisted: PersistedDatasetArtifact {
+                        manifest: encoded.manifest,
+                        artifact_bytes_hash: encoded.artifact_bytes_hash,
+                        parquet_uri,
+                    },
+                })
+            })
+            .await?;
+        Self::require_active(cancel, "after Parquet verification")?;
+        Ok(verified)
     }
 }
 
@@ -2937,9 +3007,127 @@ fn dataset_feature_state_counts(examples: &[TrainingExample]) -> DatasetFeatureS
     counts
 }
 
+#[derive(Clone, Copy)]
 struct DatasetSchemaHashes {
     feature: ContentHash,
     label: ContentHash,
+}
+
+struct DatasetFinalization {
+    schema_hashes: DatasetSchemaHashes,
+    integrity: DatasetIntegrityOutcome,
+    dataset_hash: ContentHash,
+}
+
+/// Owned resident state kept under one offline-memory reservation throughout
+/// CPU kernels, repository checks, artifact I/O, and the terminal ledger write.
+struct ResidentDataset {
+    builder: ConfiguredFeatureBuilder,
+    plan: DatasetPlan,
+    examples: Vec<TrainingExample>,
+    coverage: DatasetCoverage,
+}
+
+impl ResidentDataset {
+    fn verify_leakage(self) -> QuantResult<Self> {
+        assert_no_future_leakage(&self.examples)?;
+        Ok(self)
+    }
+
+    fn complete_integrity(
+        mut self,
+        model_spec: &ModelSpecInfo,
+        bias_table_hash: Option<ContentHash>,
+    ) -> QuantResult<Self> {
+        let target_label =
+            LabelName::new(model_spec.training_contract.target.label_name().to_owned());
+        self.coverage.bias_table_hash = bias_table_hash;
+        self.coverage.feature_state_counts = dataset_feature_state_counts(&self.examples);
+        self.coverage.matrix_probe = Some(probe_matrix_coverage(
+            &self.examples,
+            self.builder.schema(),
+            &model_spec.input_contract,
+            &target_label,
+            model_spec.training_contract.target.label_horizon_secs(),
+        )?);
+        Ok(self)
+    }
+
+    fn finalize(self) -> QuantResult<FinalizedDataset> {
+        let Self {
+            builder,
+            plan,
+            examples,
+            coverage,
+        } = self;
+        let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
+        if feature_schema_hash != plan.feature_schema_hash
+            || plan
+                .factor_serving_plane
+                .definitions()
+                .iter()
+                .any(|definition| {
+                    definition.feature_contract_hash() != feature_schema_hash
+                        || definition.input_schema_version() != plan.request.feature_schema_version
+                })
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: "frozen factor plane does not bind the materialized feature contract"
+                    .to_owned(),
+            }
+            .into());
+        }
+        let label_schema_hash = ResearchHasher::label_schema(&plan.label_names)?;
+        let integrity = dataset_integrity_outcome(&coverage)?;
+        let dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
+            DatasetHashContract {
+                model_spec_id: &plan.request.model_spec_id,
+                model_family: plan.model_family,
+                window_start: plan.request.window_start,
+                window_end: plan.request.window_end,
+                purpose: plan.request.purpose,
+                feature_schema_hash: &feature_schema_hash,
+                factor_serving_plane: &plan.factor_serving_plane,
+                label_schema_hash: &label_schema_hash,
+            },
+            &examples,
+        )?;
+        Ok(FinalizedDataset {
+            plan,
+            examples,
+            coverage,
+            finalization: DatasetFinalization {
+                schema_hashes: DatasetSchemaHashes {
+                    feature: feature_schema_hash,
+                    label: label_schema_hash,
+                },
+                integrity,
+                dataset_hash,
+            },
+        })
+    }
+}
+
+struct FinalizedDataset {
+    plan: DatasetPlan,
+    examples: Vec<TrainingExample>,
+    coverage: DatasetCoverage,
+    finalization: DatasetFinalization,
+}
+
+struct EncodedDatasetArtifact {
+    plan: DatasetPlan,
+    examples: Vec<TrainingExample>,
+    manifest: DatasetManifest,
+    manifest_hash: ContentHash,
+    parquet_bytes: Vec<u8>,
+    artifact_bytes_hash: ContentHash,
+}
+
+struct VerifiedDatasetArtifact {
+    plan: DatasetPlan,
+    examples: Vec<TrainingExample>,
+    persisted: PersistedDatasetArtifact,
 }
 
 struct PersistedDatasetArtifact {
@@ -3185,14 +3373,19 @@ async fn run_historical_spine(
             processed_sections,
             total_sections,
         ));
+        let boundary = replay_boundary(
+            as_of,
+            params.context.knowledge_lag_secs,
+            params.domain.crypto.availability_lag_secs,
+            params.domain.weather.availability_lag_secs,
+        )?;
         let replay_group = pit_selected_replay_group(PitSelectionReplayParams {
             pit_selector: &pit_selector,
-            as_of,
+            boundary: &boundary,
             group: &group,
             pit: params.pit,
             prefetched: params.prefetched,
             domain: params.domain,
-            knowledge_lag_secs: params.request.knowledge_lag_secs,
             coverage: &mut coverage,
         })
         .await?;
@@ -3209,11 +3402,10 @@ async fn run_historical_spine(
                 finalized_execution_evidence: ReplayExecutionSource::Materialized {
                     available_by: params.request.source_lineage.pit_cutoff,
                 },
-                decision_at: as_of,
+                boundary: &boundary,
                 group: &replay_group,
                 required_features: &required_features,
                 category_scope: factor_engine.category_scope(),
-                knowledge_lag: params.context.knowledge_lag,
             },
         )
         .await?
@@ -3249,12 +3441,11 @@ async fn run_historical_spine(
 /// folding exclusions into `coverage` and returning the surviving samples.
 struct PitSelectionReplayParams<'a> {
     pit_selector: &'a OfflinePitSelector,
-    as_of: DateTime<Utc>,
+    boundary: &'a DecisionBoundary,
     group: &'a [&'a SamplePlan],
     pit: &'a dyn PointInTimeSnapshotSource,
     prefetched: &'a Prefetched,
     domain: &'a DomainConfig,
-    knowledge_lag_secs: u64,
     coverage: &'a mut DatasetCoverage,
 }
 
@@ -3270,15 +3461,9 @@ async fn pit_selected_replay_group(
     // domain-observation window `build_domain_slice_inputs` already uses for
     // this build's actual feature computation for parity verification.
     let domain_source = PrefetchedDomainAvailabilitySource::new(params.prefetched, params.domain);
-    let boundary = replay_boundary(
-        params.as_of,
-        params.knowledge_lag_secs,
-        params.domain.crypto.availability_lag_secs,
-        params.domain.weather.availability_lag_secs,
-    )?;
     let selection = params
         .pit_selector
-        .select_at(&boundary, &market_ids, params.pit, &domain_source)
+        .select_at(params.boundary, &market_ids, params.pit, &domain_source)
         .await?;
     params.coverage.pit_selection_candidates += market_ids.len() as u64;
     params.coverage.pit_selection_included += selection.included.len() as u64;
@@ -3538,6 +3723,7 @@ struct BuildTail<'a> {
     clob_market_info: &'a [ClobMarketInfoVersion],
     context: &'a ReplayContext,
     sink: &'a dyn JobProgressSink,
+    cancel: &'a CancellationToken,
 }
 
 struct LabelBuildParams<'a> {
@@ -3602,7 +3788,7 @@ struct ExampleBuildSink<'a> {
 /// Derived replay parameters for one dataset build (shared across cross-sections).
 #[derive(Clone, Copy)]
 struct ReplayContext {
-    knowledge_lag: Duration,
+    knowledge_lag_secs: u64,
     lookback: Duration,
     max_horizon_secs: u64,
     feature_contract: ResearchFeatureContract,
@@ -3628,7 +3814,7 @@ impl ReplayContext {
             .resolve_builtin_research_profile()
             .map_err(|detail| ResearchError::DatasetPlan { detail })?;
         Ok(Self {
-            knowledge_lag: Duration::from_secs(plan.request.knowledge_lag_secs),
+            knowledge_lag_secs: plan.request.knowledge_lag_secs,
             lookback: Duration::from_secs(features.max_lookback_secs()),
             max_horizon_secs,
             feature_contract: profile.spec.feature_contract,
@@ -3659,7 +3845,7 @@ impl ReplayContext {
                 }))
                 .collect(),
             lookback: self.lookback,
-            knowledge_lag: self.knowledge_lag,
+            knowledge_lag: Duration::from_secs(self.knowledge_lag_secs),
             max_horizon_secs: self.max_horizon_secs,
             domain: domain.clone(),
             feature_contract: self.feature_contract,
@@ -3705,6 +3891,12 @@ fn lot_cross_section_index(
 async fn materialize_lot_cross_section(
     input: LotCrossSectionMaterialize<'_>,
 ) -> QuantResult<Option<ReplayCrossSection>> {
+    let boundary = replay_boundary(
+        input.as_of,
+        input.context.knowledge_lag_secs,
+        input.replay_config.domain.crypto.availability_lag_secs,
+        input.replay_config.domain.weather.availability_lag_secs,
+    )?;
     let replay_group: Vec<ReplaySample> = input
         .group
         .iter()
@@ -3726,11 +3918,10 @@ async fn materialize_lot_cross_section(
             finalized_execution_evidence: ReplayExecutionSource::Materialized {
                 available_by: input.execution_history_available_by,
             },
-            decision_at: input.as_of,
+            boundary: &boundary,
             group: &replay_group,
             required_features: input.required_features,
             category_scope: input.category_scope,
-            knowledge_lag: input.context.knowledge_lag,
         },
     )
     .await
@@ -4090,7 +4281,7 @@ mod pit_fee_tests {
                 },
             ],
             tick_size: TickSize::Hundredth,
-            minimum_order_size: dec!(1),
+            minimum_order_size: Shares::new(dec!(1)),
             neg_risk: false,
             taker_order_delay_enabled: false,
             minimum_order_age_secs: None,

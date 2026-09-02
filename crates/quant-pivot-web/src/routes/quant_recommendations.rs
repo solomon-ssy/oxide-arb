@@ -6,6 +6,8 @@
 //! |--------|------|------------|---------|
 //! | GET | `/quant/recommendations/{id}` | `quant_report:read` | One recommendation |
 //! | GET | `/quant/recommendations/{id}/evidence` | `quant_report:read` | Replay handles |
+//! | GET | `/quant/recommendations/{id}/economic-outcome` | `quant_report:read` | Optional realized outcome |
+//! | GET | `/quant/recommendations/{id}/execution-comparison` | `quant_report:read` | Optional plan-vs-execution comparison |
 //! | GET | `/quant/recommendations/{id}/entry-condition` | `quant_report:read` | Durable condition state and tree |
 //! | GET | `/quant/recommendations/{id}/entry-condition/audits` | `quant_report:read` | WORM condition timeline |
 //!
@@ -23,7 +25,8 @@ use quant_pivot_models::{
         EntryConditionArtifactView, EntryConditionAuditView, EntryConditionDetailView,
         EntryConditionEvaluationView, EntryConditionInstanceSummaryView,
         EntryConditionLeafEvidenceView, EntryConditionSourceCheckpointView, QuantEvidenceView,
-        QuantRecommendationView,
+        QuantRecommendationView, RecommendationEconomicOutcomeView,
+        RecommendationExecutionComparisonView,
     },
     enums::{
         quant::EntryConditionState,
@@ -57,6 +60,18 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         ),
         spec(
             Method::GET,
+            "/quant/recommendations/{id}/economic-outcome",
+            Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
+            economic_outcome,
+        ),
+        spec(
+            Method::GET,
+            "/quant/recommendations/{id}/execution-comparison",
+            Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
+            execution_comparison,
+        ),
+        spec(
+            Method::GET,
             "/quant/recommendations/{id}/entry-condition",
             Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
             entry_condition,
@@ -68,6 +83,24 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             entry_condition_audits,
         ),
     ]
+}
+
+pub async fn economic_outcome(
+    state: Data<AppState>,
+    id: Path<RecommendationId>,
+) -> Result<WebResponse<Option<RecommendationEconomicOutcomeView>>, WebError> {
+    Ok(WebResponse::ok(
+        state.economic_feedback.recommendation_outcome(&id).await?,
+    ))
+}
+
+pub async fn execution_comparison(
+    state: Data<AppState>,
+    id: Path<RecommendationId>,
+) -> Result<WebResponse<Option<RecommendationExecutionComparisonView>>, WebError> {
+    Ok(WebResponse::ok(
+        state.economic_feedback.execution_comparison(&id).await?,
+    ))
 }
 
 /// Durable recommendation-owned condition state and immutable artifact.
@@ -304,11 +337,31 @@ pub async fn evidence(
 #[cfg(test)]
 mod tests {
     use quant_pivot_models::{
-        domain::api::EntryConditionSourceCheckpointView, types::ConditionLeafEvidence,
+        domain::api::{
+            EntryConditionSourceCheckpointView, RecommendationEconomicOutcomeView,
+            RecommendationExecutionComparisonView,
+        },
+        types::ConditionLeafEvidence,
     };
     use serde_json::json;
 
     use super::evidence_metadata;
+    use crate::response::WebResponse;
+
+    #[test]
+    fn optional_feedback_returns_null() {
+        let outcome =
+            serde_json::to_value(WebResponse::ok(None::<RecommendationEconomicOutcomeView>))
+                .expect("optional outcome response");
+        let comparison = serde_json::to_value(WebResponse::ok(
+            None::<RecommendationExecutionComparisonView>,
+        ))
+        .expect("optional comparison response");
+        assert_eq!(outcome["code"], 200);
+        assert!(outcome["data"].is_null());
+        assert_eq!(comparison["code"], 200);
+        assert!(comparison["data"].is_null());
+    }
 
     #[test]
     fn price_evidence_exposes_checkpoint() {

@@ -39,7 +39,16 @@ use std::fs::Permissions;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-pub use db::{ClickHouseConfig, DatabaseConfig, PostgresConfig};
+pub use db::{
+    CLICKHOUSE_BULK_ACK_MAX_MS, CLICKHOUSE_CANONICAL_PUBLICATION_TIMEOUT_MS,
+    CLICKHOUSE_CRITICAL_ATTEMPT_MAX_MS, CLICKHOUSE_DERIVED_FACT_FLUSH_MS,
+    CLICKHOUSE_DURABLE_ACK_TIMEOUT_MS, CLICKHOUSE_DURABLE_ADMISSION_TIMEOUT_MS,
+    CLICKHOUSE_DURABLE_SCHEDULING_MARGIN_MS, CLICKHOUSE_DURABLE_SHUTDOWN_STAGE_SECS,
+    CLICKHOUSE_FLUSH_INTERVAL_MAX_SECS, CLICKHOUSE_INSERT_MAX_ATTEMPTS,
+    CLICKHOUSE_INSERT_RETRY_BACKOFF_BASE_MS, CLICKHOUSE_INSERT_RETRY_BACKOFF_TOTAL_MS,
+    ClickHouseConfig, ClickHouseInsertIoConfig, ClickHouseIoConfig, ClickHouseResourceGovernance,
+    DatabaseConfig, PostgresConfig,
+};
 pub use deployment::DeploymentConfig;
 pub use descriptor::{
     DEPLOY_CONFIG_EXPECTED_LEAF_COUNT, DEPLOY_SECRET_PATHS, DeployApplyEffect,
@@ -60,8 +69,9 @@ pub use domain_sources::{
 };
 pub use keys::KeysConfig;
 pub use market_data::{
-    DataApiConfig, ExchangeHistoryAttestorConfig, FinalizedExchangeHistoryConfig, GammaConfig,
-    HyperSyncConfig, MarketDataDeployConfig, WebSocketConfig,
+    DataApiConfig, EXCHANGE_HISTORY_MAX_BLOCKS_PER_CHUNK, EXCHANGE_HISTORY_MAX_BLOCKS_PER_TICK,
+    ExchangeHistoryAttestorConfig, FinalizedExchangeHistoryConfig, GammaConfig, HyperSyncConfig,
+    MarketDataDeployConfig, WebSocketConfig,
 };
 #[cfg(unix)]
 use nix::{fcntl::OFlag, unistd::Uid};
@@ -411,7 +421,7 @@ impl OpenedDeployConfig {
 }
 
 impl DeployConfig {
-    /// Run the mode-agnostic validation and fail closed on errors.
+    /// Run deployment-invariant validation and fail closed on errors.
     ///
     /// Warnings are streamed to `tracing::warn` as a side effect so callers
     /// get uniform telemetry. Also used by [`Self::load`].
@@ -545,7 +555,7 @@ mod tests {
     #[test]
     fn execution_requires_credentials() {
         // production account reads is not dry-run: it reads the real venue account, so a
-        // missing private key / funder fails closed in every mode.
+        // missing private key / funder fails closed for every report and execution path.
         let deploy = DeployConfig::default();
         assert!(deploy.validate_execution().has_errors());
     }

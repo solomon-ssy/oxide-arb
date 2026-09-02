@@ -35,8 +35,8 @@ use quant_pivot_models::{
         },
         pagination::Paginated,
         quant::{
-            CalibrationArtifactInfo, FeatureVectorInfo, ModelScoreCalibrationCommit,
-            ModelScoreCalibrationCommitOutcome, NewCalibrationArtifact, NewFeatureVector,
+            CalibrationArtifactInfo, FeatureVectorInfo, ModelScoreCalibrationCommitOutcome,
+            NewCalibrationArtifact, NewFeatureVector, VerifiedModelScoreCalibrationCommit,
         },
     },
     enums::{
@@ -44,6 +44,7 @@ use quant_pivot_models::{
         clickhouse::ChFeatureCellState,
         common::{CategorySet, MarketCategory, TickSize},
         market::{EventStatus, MarketStatus},
+        quant::DataQualityStatus,
     },
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
     types::{
@@ -224,7 +225,7 @@ impl CalibrationArtifactRepository for EmptyCalibrationArtifactRepo {
 
     async fn commit_model_score(
         &self,
-        _commit: ModelScoreCalibrationCommit,
+        _commit: VerifiedModelScoreCalibrationCommit,
     ) -> Result<ModelScoreCalibrationCommitOutcome, StorageError> {
         unimplemented!("feature-plane test does not commit calibration artifacts")
     }
@@ -601,6 +602,11 @@ pub async fn insufficient_vectors_audited_input() {
     );
     assert_eq!(result.rejected.len(), 1);
     assert_eq!(result.rejected[0].market_id.as_str(), CATALOG.market_id);
+    assert_eq!(
+        result.rejected[0].data_quality,
+        DataQualityStatus::Insufficient,
+        "rejection must retain its aggregate data-quality evidence"
+    );
     assert!(
         !result.rejected[0].missing_required.is_empty(),
         "rejection must report the missing required features"

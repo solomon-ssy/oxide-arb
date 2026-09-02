@@ -363,6 +363,7 @@ fn assemble_preimage_services(
         },
     ));
     let serving = Arc::new(ModelServingPreimageService::new(ModelServingPreimageDeps {
+        compute: Arc::clone(deps.compute),
         model_registry_repo: Arc::clone(model_registry),
         dataset_repo: Arc::clone(&offline.training_dataset),
         source_slice_repo: Arc::clone(&repos.source_slice) as Arc<dyn SourceSliceRepository>,

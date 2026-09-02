@@ -3,11 +3,13 @@
 use std::cmp::Ordering;
 
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
     domain::quant::{
+        RecommendationEconomicOutcomeError, RecommendationEconomicOutcomeInfo,
         RecommendationEconomics, RecommendationExecutionRollupContractError,
         RecommendationExecutionRollupInfo, RecommendationInfo, RecommendationReportInfo,
         RecommendationResolutionOutcomeContractError, RecommendationResolutionOutcomeInfo,
@@ -17,8 +19,8 @@ use crate::{
         common::MarketCategory,
         quant::{
             CohortCensorReason, CohortExclusionReason, FeedbackCohort, OutcomeSide,
-            RecommendationReportStatus, RecommendationResolutionKind, RecommendationStatus,
-            ReportKind,
+            RecommendationEconomicOutcomeState, RecommendationReportStatus,
+            RecommendationResolutionKind, RecommendationStatus, ReportKind,
         },
     },
     runtime_config::BuyModelRoute,
@@ -575,6 +577,7 @@ pub struct FeedbackCohortCandidate {
     context: FeedbackRecommendationContext,
     resolution_outcome: Option<RecommendationResolutionOutcomeInfo>,
     execution_rollup: Option<RecommendationExecutionRollupInfo>,
+    economic_outcome: Option<RecommendationEconomicOutcomeInfo>,
 }
 
 impl FeedbackCohortCandidate {
@@ -583,11 +586,16 @@ impl FeedbackCohortCandidate {
         context: FeedbackRecommendationContext,
         resolution_outcome: Option<RecommendationResolutionOutcomeInfo>,
         execution_rollup: Option<RecommendationExecutionRollupInfo>,
+        economic_outcome: Option<RecommendationEconomicOutcomeInfo>,
     ) -> Result<Self, FeedbackCohortContractError> {
         let plane_is_valid = match cohort {
-            FeedbackCohort::ModelLearning => execution_rollup.is_none(),
+            FeedbackCohort::ModelLearning => {
+                execution_rollup.is_none() && economic_outcome.is_none()
+            }
             FeedbackCohort::ModelScoreLearning => false,
-            FeedbackCohort::ExecutionLearning => resolution_outcome.is_none(),
+            FeedbackCohort::ExecutionLearning => {
+                resolution_outcome.is_none() && economic_outcome.is_none()
+            }
             FeedbackCohort::PolicyEvaluation => true,
         };
         if !plane_is_valid {
@@ -598,6 +606,7 @@ impl FeedbackCohortCandidate {
             context,
             resolution_outcome,
             execution_rollup,
+            economic_outcome,
         })
     }
 
@@ -619,6 +628,11 @@ impl FeedbackCohortCandidate {
     #[must_use]
     pub const fn execution_rollup(&self) -> Option<&RecommendationExecutionRollupInfo> {
         self.execution_rollup.as_ref()
+    }
+
+    #[must_use]
+    pub const fn economic_outcome(&self) -> Option<&RecommendationEconomicOutcomeInfo> {
+        self.economic_outcome.as_ref()
     }
 
     #[must_use]
@@ -708,6 +722,16 @@ pub struct FeedbackExecutionEvidence {
     pub rollup_hash: ContentHash,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackEconomicEvidence {
+    pub state: RecommendationEconomicOutcomeState,
+    pub horizon_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+    pub net_return_bps: Option<Decimal>,
+    pub evidence_hash: ContentHash,
+}
+
 /// Cohort-specific evidence carried only after eligibility succeeds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "cohort", content = "evidence")]
@@ -715,6 +739,7 @@ pub enum FeedbackCohortEvidence {
     ModelLearning(FeedbackResolutionEvidence),
     ExecutionLearning(FeedbackExecutionEvidence),
     PolicyEvaluation {
+        economic: FeedbackEconomicEvidence,
         execution_state: Option<FeedbackExecutionState>,
         resolution_outcome_hash: Option<ContentHash>,
         execution_rollup_hash: Option<ContentHash>,
@@ -814,6 +839,12 @@ pub enum FeedbackCohortContractError {
     ExecutionTerminalBeforePublication,
     #[error("execution rollup count cannot be represented by the feedback contract")]
     ExecutionCountOverflow,
+    #[error("visible economic outcome failed its immutable contract")]
+    InvalidEconomicOutcome(#[source] RecommendationEconomicOutcomeError),
+    #[error("economic outcome recommendation identity mismatch")]
+    EconomicRecommendationMismatch,
+    #[error("economic horizon is not forward-looking from the recommendation decision")]
+    EconomicHorizonNotForwardLooking,
 }
 
 #[cfg(test)]
@@ -975,6 +1006,7 @@ mod tests {
             page_context(available_at),
             None,
             None,
+            None,
         )
     }
 
@@ -1129,6 +1161,7 @@ mod tests {
                 page_context(available_at),
                 None,
                 Some(rollup.clone()),
+                None,
             ),
             Err(FeedbackCohortContractError::InvalidCandidateTruthPlane {
                 cohort: FeedbackCohort::ModelLearning,
@@ -1140,6 +1173,7 @@ mod tests {
                 page_context(available_at),
                 None,
                 Some(rollup),
+                None,
             )
             .is_ok()
         );
@@ -1149,6 +1183,7 @@ mod tests {
                 page_context(available_at),
                 None,
                 None,
+                None,
             )
             .is_ok()
         );
@@ -1158,6 +1193,7 @@ mod tests {
                 page_context(available_at),
                 None,
                 None,
+                None,
             )
             .is_ok()
         );
@@ -1165,6 +1201,7 @@ mod tests {
             FeedbackCohortCandidate::try_new(
                 FeedbackCohort::PolicyEvaluation,
                 page_context(available_at),
+                None,
                 None,
                 None,
             )
@@ -1207,6 +1244,7 @@ mod tests {
         let execution = FeedbackCohortCandidate::try_new(
             FeedbackCohort::ExecutionLearning,
             page_context(second_at + Duration::seconds(1)),
+            None,
             None,
             None,
         )

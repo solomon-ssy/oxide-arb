@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{io::Error as IoError, mem, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
@@ -8,22 +8,31 @@ use aws_sdk_s3::{
     presigning::PresigningConfig,
     types::ObjectLockRetentionMode,
 };
+use bytes::Bytes;
 use chrono::Utc;
 use futures_util::StreamExt;
 use object_store::{
-    Error, GetOptions, ObjectMeta, ObjectStore, ObjectStoreExt, Result, WriteMultipart,
+    Error, GetOptions, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutPayload,
+    PutPayloadMut, PutResult, Result,
     aws::{AmazonS3, AmazonS3Builder},
     path::Path,
 };
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{config::ArtifactStoreDeployConfig, types::ArtifactUri};
-use tokio::sync::OnceCell;
+use tokio::{sync::OnceCell, task::JoinSet};
+use tracing::error;
 use url::Url;
 
 use super::{
     ArtifactByteStream, ArtifactDurability, ArtifactKey, ArtifactObjectMetadata, ArtifactStore,
     S3StaticCredentials,
 };
+
+// WORM artifacts are control-plane evidence, not a latency hot path. Keep one
+// fixed-size multipart PUT in flight and explicitly abort failed uploads. The
+// bound applies to S3 parts, independently of upstream stream chunk sizes.
+const MULTIPART_PART_SIZE: usize = 5 * 1024 * 1024;
+const MULTIPART_WRITE_CONCURRENCY: usize = 1;
 
 /// S3-compatible streaming artifact store using standard AWS credential sources.
 pub struct S3ArtifactStore {
@@ -42,6 +51,72 @@ pub struct S3ArtifactStore {
 struct S3ObjectRef {
     path: Path,
     version_id: Option<String>,
+}
+
+struct BoundedMultipartWriter {
+    upload: Box<dyn MultipartUpload>,
+    buffer: PutPayloadMut,
+    in_flight: JoinSet<Result<()>>,
+}
+
+impl BoundedMultipartWriter {
+    fn new(upload: Box<dyn MultipartUpload>) -> Self {
+        Self {
+            upload,
+            buffer: PutPayloadMut::new(),
+            in_flight: JoinSet::new(),
+        }
+    }
+
+    async fn write(&mut self, mut bytes: Bytes) -> Result<()> {
+        while !bytes.is_empty() {
+            let remaining = MULTIPART_PART_SIZE - self.buffer.content_length();
+            let take = remaining.min(bytes.len());
+            self.buffer.push(bytes.split_to(take));
+            if self.buffer.content_length() == MULTIPART_PART_SIZE {
+                let payload = mem::take(&mut self.buffer).into();
+                self.enqueue(payload).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn enqueue(&mut self, payload: PutPayload) -> Result<()> {
+        while self.in_flight.len() >= MULTIPART_WRITE_CONCURRENCY {
+            self.await_one().await?;
+        }
+        self.in_flight.spawn(self.upload.put_part(payload));
+        Ok(())
+    }
+
+    async fn await_one(&mut self) -> Result<()> {
+        let joined = self
+            .in_flight
+            .join_next()
+            .await
+            .ok_or_else(|| Error::NotSupported {
+                source: Box::new(IoError::other(
+                    "multipart task set became empty while awaiting capacity",
+                )),
+            })?;
+        joined.map_err(|source| Error::JoinError { source })?
+    }
+
+    async fn finish(&mut self) -> Result<PutResult> {
+        if !self.buffer.is_empty() {
+            let payload = mem::take(&mut self.buffer).into();
+            self.enqueue(payload).await?;
+        }
+        while !self.in_flight.is_empty() {
+            self.await_one().await?;
+        }
+        self.upload.complete().await
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        self.in_flight.shutdown().await;
+        self.upload.abort().await
+    }
 }
 
 impl S3ArtifactStore {
@@ -208,6 +283,38 @@ impl S3ArtifactStore {
         }
     }
 
+    fn with_abort_detail(&self, path: &Path, error: QuantError, abort_error: &Error) -> QuantError {
+        match error {
+            QuantError::Research(ResearchError::ArtifactTransport { uri, detail }) => {
+                ResearchError::ArtifactTransport {
+                    uri,
+                    detail: format!(
+                        "{detail}; aborting the incomplete multipart upload also failed: {abort_error}"
+                    ),
+                }
+                .into()
+            }
+            QuantError::Research(ResearchError::ArtifactIo { uri, detail }) => {
+                ResearchError::ArtifactIo {
+                    uri,
+                    detail: format!(
+                        "{detail}; aborting the incomplete multipart upload also failed: {abort_error}"
+                    ),
+                }
+                .into()
+            }
+            error => {
+                error!(
+                    uri = %format_args!("s3://{}/{}", self.bucket, path),
+                    primary_code = error.code(),
+                    abort_error = %abort_error,
+                    "incomplete artifact multipart abort failed after a non-storage error"
+                );
+                error
+            }
+        }
+    }
+
     async fn control_client(&self) -> &S3ControlClient {
         self.control_client
             .get_or_init(|| async {
@@ -273,6 +380,36 @@ impl S3ArtifactStore {
             .await
             .map(|result| result.meta)
     }
+
+    async fn write_multipart(
+        &self,
+        path: &Path,
+        upload: Box<dyn MultipartUpload>,
+        mut stream: ArtifactByteStream,
+    ) -> QuantResult<PutResult> {
+        let mut writer = BoundedMultipartWriter::new(upload);
+        let result: QuantResult<PutResult> = async {
+            while let Some(chunk) = stream.next().await {
+                writer
+                    .write(chunk?)
+                    .await
+                    .map_err(|error| self.store_error(path, &error))?;
+            }
+            let completed = writer
+                .finish()
+                .await
+                .map_err(|error| self.store_error(path, &error))?;
+            Ok(completed)
+        }
+        .await;
+        match result {
+            Ok(completed) => Ok(completed),
+            Err(error) => match writer.abort().await {
+                Ok(()) => Err(error),
+                Err(abort_error) => Err(self.with_abort_detail(path, error, &abort_error)),
+            },
+        }
+    }
 }
 
 #[async_trait]
@@ -280,7 +417,7 @@ impl ArtifactStore for S3ArtifactStore {
     async fn put_stream(
         &self,
         key: ArtifactKey,
-        mut stream: ArtifactByteStream,
+        stream: ArtifactByteStream,
     ) -> QuantResult<ArtifactUri> {
         let path = self.object_path(&key);
         let upload = self
@@ -288,18 +425,7 @@ impl ArtifactStore for S3ArtifactStore {
             .put_multipart(&path)
             .await
             .map_err(|error| self.store_error(&path, &error))?;
-        let mut writer = WriteMultipart::new(upload);
-        while let Some(chunk) = stream.next().await {
-            writer
-                .wait_for_capacity(4)
-                .await
-                .map_err(|error| self.store_error(&path, &error))?;
-            writer.put(chunk?);
-        }
-        let completed = writer
-            .finish()
-            .await
-            .map_err(|error| self.store_error(&path, &error))?;
+        let completed = self.write_multipart(&path, upload, stream).await?;
         if self.require_versioning && completed.version.is_none() {
             return Err(ResearchError::ArtifactIo {
                 uri: format!("s3://{}/{}", self.bucket, path),
@@ -426,5 +552,210 @@ impl ArtifactStore for S3ArtifactStore {
     async fn exists_by_key(&self, key: &ArtifactKey) -> QuantResult<bool> {
         self.exists(&self.uri_for_path(&self.object_path(key), None)?)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::Error as IoError,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures_util::stream;
+    use object_store::{
+        Error, Extensions, MultipartUpload, PutPayload, PutResult, Result as ObjectStoreResult,
+        UploadPart, path::Path,
+    };
+    use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+    use quant_pivot_models::config::{ArtifactStoreDeployConfig, ArtifactStoreKind};
+
+    use super::{ArtifactByteStream, MULTIPART_PART_SIZE, S3ArtifactStore, S3StaticCredentials};
+
+    #[derive(Debug, Default)]
+    struct UploadProbe {
+        aborted: AtomicBool,
+        active: AtomicUsize,
+        completed: AtomicBool,
+        max_active: AtomicUsize,
+        parts: Mutex<Vec<(usize, Bytes)>>,
+    }
+
+    #[derive(Debug)]
+    struct ProbedUpload {
+        abort_fails: bool,
+        fail_part: Option<usize>,
+        next_part: usize,
+        probe: Arc<UploadProbe>,
+    }
+
+    impl ProbedUpload {
+        fn new(probe: Arc<UploadProbe>, fail_part: Option<usize>, abort_fails: bool) -> Self {
+            Self {
+                abort_fails,
+                fail_part,
+                next_part: 0,
+                probe,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MultipartUpload for ProbedUpload {
+        fn put_part(&mut self, data: PutPayload) -> UploadPart {
+            let part = self.next_part;
+            self.next_part += 1;
+            let fails = self.fail_part == Some(part);
+            let probe = Arc::clone(&self.probe);
+            Box::pin(async move {
+                let active = probe.active.fetch_add(1, Ordering::AcqRel) + 1;
+                probe.max_active.fetch_max(active, Ordering::AcqRel);
+                tokio::task::yield_now().await;
+                probe.active.fetch_sub(1, Ordering::AcqRel);
+                if fails {
+                    return Err(Error::Generic {
+                        store: "probe",
+                        source: Box::new(IoError::other("injected multipart failure")),
+                    });
+                }
+                probe
+                    .parts
+                    .lock()
+                    .expect("upload probe lock")
+                    .push((part, Bytes::from(data)));
+                Ok(())
+            })
+        }
+
+        async fn complete(&mut self) -> ObjectStoreResult<PutResult> {
+            self.probe.completed.store(true, Ordering::Release);
+            Ok(PutResult {
+                e_tag: Some("probe-etag".to_owned()),
+                version: Some("probe-version".to_owned()),
+                extensions: Extensions::default(),
+            })
+        }
+
+        async fn abort(&mut self) -> ObjectStoreResult<()> {
+            self.probe.aborted.store(true, Ordering::Release);
+            if self.abort_fails {
+                Err(Error::Generic {
+                    store: "probe",
+                    source: Box::new(IoError::other("injected multipart abort failure")),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl S3ArtifactStore {
+        fn probe() -> QuantResult<Self> {
+            let config = ArtifactStoreDeployConfig {
+                kind: ArtifactStoreKind::S3,
+                bucket: "multipart-probe".to_owned(),
+                prefix: "artifacts".to_owned(),
+                region: "us-east-1".to_owned(),
+                endpoint: Some("http://127.0.0.1:1".to_owned()),
+                path_style: true,
+                require_object_lock: true,
+                require_versioning: true,
+            };
+            Self::new_with_credentials(
+                &config,
+                S3StaticCredentials::new("probe-access", "probe-secret")?,
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn large_chunk_stays_bounded() -> QuantResult<()> {
+        let store = S3ArtifactStore::probe()?;
+        let probe = Arc::new(UploadProbe::default());
+        let payload = Bytes::from(vec![0x5a; MULTIPART_PART_SIZE * 2 + 17]);
+        let stream: ArtifactByteStream = Box::pin(stream::iter([Ok(payload.clone())]));
+        let path = Path::from("artifacts/large.json");
+
+        store
+            .write_multipart(
+                &path,
+                Box::new(ProbedUpload::new(Arc::clone(&probe), None, false)),
+                stream,
+            )
+            .await?;
+
+        let mut parts = probe.parts.lock().expect("upload probe lock").clone();
+        parts.sort_by_key(|(part, _)| *part);
+        assert_eq!(probe.max_active.load(Ordering::Acquire), 1);
+        assert!(probe.completed.load(Ordering::Acquire));
+        assert!(!probe.aborted.load(Ordering::Acquire));
+        assert_eq!(
+            parts
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .collect::<Vec<_>>(),
+            [MULTIPART_PART_SIZE, MULTIPART_PART_SIZE, 17]
+        );
+        let rebuilt = parts
+            .into_iter()
+            .flat_map(|(_, bytes)| bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(rebuilt, payload);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_part_is_aborted() -> QuantResult<()> {
+        let store = S3ArtifactStore::probe()?;
+        let probe = Arc::new(UploadProbe::default());
+        let payload = Bytes::from(vec![0x7b; MULTIPART_PART_SIZE * 2 + 17]);
+        let stream: ArtifactByteStream = Box::pin(stream::iter([Ok(payload)]));
+        let path = Path::from("artifacts/failure.json");
+
+        let result = store
+            .write_multipart(
+                &path,
+                Box::new(ProbedUpload::new(Arc::clone(&probe), Some(1), false)),
+                stream,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(probe.max_active.load(Ordering::Acquire), 1);
+        assert!(probe.aborted.load(Ordering::Acquire));
+        assert!(!probe.completed.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_abort_keeps_transport() -> QuantResult<()> {
+        let store = S3ArtifactStore::probe()?;
+        let probe = Arc::new(UploadProbe::default());
+        let payload = Bytes::from(vec![0x4c; MULTIPART_PART_SIZE * 2 + 17]);
+        let stream: ArtifactByteStream = Box::pin(stream::iter([Ok(payload)]));
+        let path = Path::from("artifacts/abort-failure.json");
+
+        let error = store
+            .write_multipart(
+                &path,
+                Box::new(ProbedUpload::new(Arc::clone(&probe), Some(1), true)),
+                stream,
+            )
+            .await
+            .expect_err("injected multipart transport failure");
+
+        let QuantError::Research(ResearchError::ArtifactTransport { detail, .. }) = &error else {
+            panic!("multipart transport classification changed: {error}")
+        };
+        assert!(detail.contains("injected multipart failure"));
+        assert!(detail.contains("injected multipart abort failure"));
+        assert!(probe.aborted.load(Ordering::Acquire));
+        assert!(!probe.completed.load(Ordering::Acquire));
+        Ok(())
     }
 }

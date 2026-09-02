@@ -5,10 +5,12 @@ services:
     ports:
       - "8123:8123"
       - "9000:9000"
+      - "9363:9363"
     env_file:
       - .env
     volumes:
       - oxide_ch_data:/var/lib/clickhouse
+      - ./config.d/quant-pivot-governance.xml:/etc/clickhouse-server/config.d/quant-pivot-governance.xml:ro
     ulimits:
       nofile:
         soft: 262144

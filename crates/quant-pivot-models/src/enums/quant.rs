@@ -1,6 +1,30 @@
 //! Quant-pivot runtime and report domain enums.
 
 pg_enum! {
+    type_name = "qp_recommendation_economic_outcome_state",
+    @derive(schemars::JsonSchema)
+    pub enum RecommendationEconomicOutcomeState {
+        EntryNotTriggered => "entry_not_triggered",
+        EntryUnfilled => "entry_unfilled",
+        PolicyExited => "policy_exited",
+        HorizonLiquidated => "horizon_liquidated",
+        ResolvedBeforeHorizon => "resolved_before_horizon",
+        Censored => "censored",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_route_economic_health_state",
+    @derive(schemars::JsonSchema)
+    pub enum RouteEconomicHealthState {
+        InsufficientEvidence => "insufficient_evidence",
+        Healthy => "healthy",
+        Degraded => "degraded",
+        DataIncomplete => "data_incomplete",
+    }
+}
+
+pg_enum! {
     type_name = "qp_entry_authorization_policy",
     /// Runtime authority for creating and authorizing new entry intents.
     /// Report generation and kill-switch restrictions are independent.
@@ -388,6 +412,11 @@ impl FeedbackCohort {
     pub const fn requires_execution(self) -> bool {
         matches!(self, Self::ExecutionLearning | Self::PolicyEvaluation)
     }
+
+    #[must_use]
+    pub const fn requires_economic_outcome(self) -> bool {
+        matches!(self, Self::PolicyEvaluation)
+    }
 }
 
 wire_enum! {
@@ -602,7 +631,7 @@ pg_enum! {
 pg_enum! {
     type_name = "qp_data_quality_status",
     /// Point-in-time data quality classification.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum DataQualityStatus {
         #[default]
         Fresh => "fresh",
@@ -1493,6 +1522,7 @@ wire_enum! {
     pub enum CohortCensorReason {
         ResolutionUnavailableAtCutoff => "resolution_unavailable_at_cutoff",
         ExecutionOutcomeUnavailableAtCutoff => "execution_outcome_unavailable_at_cutoff",
+        EconomicOutcomeUnavailableAtCutoff => "economic_outcome_unavailable_at_cutoff",
     }
 }
 
@@ -1775,6 +1805,10 @@ mod tests {
                 CohortCensorReason::ExecutionOutcomeUnavailableAtCutoff,
                 "execution_outcome_unavailable_at_cutoff",
             ),
+            (
+                CohortCensorReason::EconomicOutcomeUnavailableAtCutoff,
+                "economic_outcome_unavailable_at_cutoff",
+            ),
         ] {
             let exhaustive_wire = match reason {
                 CohortCensorReason::ResolutionUnavailableAtCutoff => {
@@ -1782,6 +1816,9 @@ mod tests {
                 }
                 CohortCensorReason::ExecutionOutcomeUnavailableAtCutoff => {
                     "execution_outcome_unavailable_at_cutoff"
+                }
+                CohortCensorReason::EconomicOutcomeUnavailableAtCutoff => {
+                    "economic_outcome_unavailable_at_cutoff"
                 }
             };
             assert_eq!(wire, exhaustive_wire);

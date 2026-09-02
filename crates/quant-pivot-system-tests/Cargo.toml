@@ -10,7 +10,7 @@ publish = false
 quant-pivot-allocator = { workspace = true }
 quant-pivot-compute = { workspace = true }
 quant-pivot-api = { workspace = true }
-quant-pivot-core = { workspace = true }
+quant-pivot-core = { workspace = true, features = ["ml-classical"] }
 quant-pivot-error = { workspace = true, features = ["storage"] }
 quant-pivot-migration = { workspace = true }
 quant-pivot-models = { workspace = true }
@@ -18,17 +18,20 @@ quant-pivot-repository = { workspace = true }
 quant-pivot-research = { workspace = true, default-features = false, features = ["research-jobs"] }
 quant-pivot-storage = { workspace = true }
 anyhow = { workspace = true }
+alloy = { workspace = true }
 async-trait = { workspace = true }
 aws-config = { workspace = true }
 aws-sdk-s3 = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
+chrono-tz = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 clickhouse = { workspace = true }
 flume = { workspace = true }
 futures-util = { workspace = true }
 hdrhistogram = { workspace = true }
 hex = { workspace = true }
+hypersync-net-types = { workspace = true }
 num-traits = { workspace = true }
 prometheus = { workspace = true }
 reqwest = { workspace = true }
@@ -55,7 +58,7 @@ casbin = { workspace = true }
 redis = { workspace = true }
 sea-orm-migration = { workspace = true }
 sqlx = { workspace = true }
-url = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

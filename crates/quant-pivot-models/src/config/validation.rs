@@ -10,7 +10,10 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use super::{
-    DeployConfig, DomainSourcesConfig, PolygonRpcEndpoint, ResearchJobsConfig,
+    CLICKHOUSE_BULK_ACK_MAX_MS, CLICKHOUSE_CRITICAL_ATTEMPT_MAX_MS,
+    CLICKHOUSE_DURABLE_ACK_TIMEOUT_MS, CLICKHOUSE_FLUSH_INTERVAL_MAX_SECS, DeployConfig,
+    DomainSourcesConfig, EXCHANGE_HISTORY_MAX_BLOCKS_PER_CHUNK,
+    EXCHANGE_HISTORY_MAX_BLOCKS_PER_TICK, PolygonRpcEndpoint, ResearchJobsConfig,
     TornadoRegionScopeConfig, WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
     WeatherHistoricalBindingKind,
 };
@@ -21,8 +24,8 @@ use crate::{
 };
 
 impl DeployConfig {
-    /// Mode-agnostic deploy validation: structural and platform invariants that
-    /// must hold regardless of quant runtime mode.
+    /// Deployment-invariant validation: structural and platform invariants that
+    /// must hold regardless of entry authorization.
     #[must_use]
     pub fn validate_deploy_common(&self) -> ConfigValidationReport {
         let mut report = ConfigValidationReport::default();
@@ -535,13 +538,37 @@ fn validate_databases(deploy: &DeployConfig, report: &mut ConfigValidationReport
     }
 
     let clickhouse = &deploy.db.clickhouse;
-    if clickhouse.batch_size == 0
-        || clickhouse.flush_interval_secs == 0
-        || clickhouse.max_concurrent_inserts == 0
+    if !(1..=5_000).contains(&clickhouse.batch_size)
+        || !(1..=CLICKHOUSE_FLUSH_INTERVAL_MAX_SECS).contains(&clickhouse.flush_interval_secs)
+        || clickhouse.max_concurrent_inserts < 2
+        || !(1_048_576..=1_073_741_824).contains(&clickhouse.max_inflight_write_bytes)
+        || !(1..=32).contains(&clickhouse.max_concurrent_reads)
+        || !(1..=64).contains(&clickhouse.max_threads_per_query)
+        || !(1..=300_000).contains(&clickhouse.io.query_timeout_ms)
+        || !(1..=600_000).contains(&clickhouse.io.maintenance_timeout_ms)
+        || !clickhouse.io.critical_insert.budgets_fit()
+        || !clickhouse.io.bulk_insert.budgets_fit()
+        || clickhouse.io.critical_insert.attempt_timeout_ms > CLICKHOUSE_CRITICAL_ATTEMPT_MAX_MS
+        || clickhouse
+            .io
+            .critical_insert
+            .retry_window_ms()
+            .is_none_or(|value| value >= CLICKHOUSE_DURABLE_ACK_TIMEOUT_MS)
+        || clickhouse
+            .io
+            .bulk_insert
+            .retry_window_ms()
+            .is_none_or(|value| value >= CLICKHOUSE_DURABLE_ACK_TIMEOUT_MS)
+        || clickhouse
+            .derived_ack_window_ms()
+            .is_none_or(|value| value > CLICKHOUSE_DURABLE_ACK_TIMEOUT_MS)
+        || clickhouse
+            .bulk_ack_window_ms()
+            .is_none_or(|value| value > CLICKHOUSE_BULK_ACK_MAX_MS)
     {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "db.clickhouse",
-            detail: "batch_size, flush_interval_secs, max_concurrent_inserts must be > 0".into(),
+            detail: "batch_size must be between 1 and 5000; flush_interval_secs must be between 1 and 5; max_concurrent_inserts must be >= 2; max_inflight_write_bytes must be between 1048576 and 1073741824; max_concurrent_reads must be between 1 and 32; max_threads_per_query must be between 1 and 64; query_timeout_ms must be between 1 and 300000; maintenance_timeout_ms must be between 1 and 600000; insert send plus end timeout must fit within its attempt timeout; critical attempt must be <= 1900ms; each three-attempt insert retry window plus fixed backoff must remain below the 12000ms durability ceiling; one-second derived flush plus bulk retry plus scheduling margin must fit the 12000ms receipt deadline; configured flush plus bulk retry plus scheduling margin must remain within the bounded shutdown capacity budget".into(),
         });
     }
     if postgres.user.trim().is_empty() {
@@ -1061,20 +1088,25 @@ fn validate_market_data(deploy: &DeployConfig, report: &mut ConfigValidationRepo
     if history.connect_timeout_ms == 0
         || history.request_timeout_ms < history.connect_timeout_ms
         || history.attestor.max_blocks_per_log_request == 0
+        || history.attestor.max_blocks_per_log_request > EXCHANGE_HISTORY_MAX_BLOCKS_PER_CHUNK
         || !(1..=32).contains(&history.attestor.max_concurrent_log_requests)
-        || !(1_048_576..=536_870_912).contains(&history.max_response_bytes)
+        || !(1_048_576..=536_870_912).contains(&history.max_hypersync_response_body_bytes)
+        || !(1_048_576..=536_870_912).contains(&history.max_rpc_response_body_bytes)
+        || !(1_048_576..=536_870_912).contains(&history.max_canonical_chunk_bytes)
         || history.min_blocks_per_chunk == 0
         || history.max_blocks_per_chunk < history.min_blocks_per_chunk
+        || history.max_blocks_per_chunk > EXCHANGE_HISTORY_MAX_BLOCKS_PER_CHUNK
         || history.retry_initial_ms == 0
         || history.retry_max_ms < history.retry_initial_ms
         || !(1..=32).contains(&history.retry_max_attempts)
-        || history.hot_window_blocks_per_tick == 0
-        || history.full_history_blocks_per_tick == 0
+        || !(1..=EXCHANGE_HISTORY_MAX_BLOCKS_PER_TICK).contains(&history.hot_window_blocks_per_tick)
+        || !(1..=EXCHANGE_HISTORY_MAX_BLOCKS_PER_TICK)
+            .contains(&history.full_history_blocks_per_tick)
         || history.batch_size == 0
     {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "market_data.finalized_exchange_history",
-            detail: "timeouts, attestor request span/concurrency, response bytes, adaptive logical chunks, retry bounds, worker budgets, and batches are invalid".into(),
+            detail: "timeouts, provider-body/canonical-chunk bytes, attestor request span/concurrency, adaptive logical chunks, retry bounds, worker budgets, and batches are invalid".into(),
         });
     }
     if history.model_confirmation_blocks != 12
@@ -1215,6 +1247,111 @@ mod tests {
         let deploy = DeployConfig::default();
         let report = deploy.validate_deploy_common();
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
+    }
+
+    #[test]
+    fn clickhouse_threads_bounded() {
+        for invalid in [0, 65] {
+            let mut deploy = DeployConfig::default();
+            deploy.db.clickhouse.max_threads_per_query = invalid;
+            let report = deploy.validate_deploy_common();
+            assert!(report.errors.iter().any(|error| {
+                error
+                    .to_string()
+                    .contains("max_threads_per_query must be between 1 and 64")
+            }));
+        }
+    }
+
+    #[test]
+    fn clickhouse_reads_bounded() {
+        for invalid in [0, 33] {
+            let mut deploy = DeployConfig::default();
+            deploy.db.clickhouse.max_concurrent_reads = invalid;
+            let report = deploy.validate_deploy_common();
+            assert!(report.errors.iter().any(|error| {
+                error
+                    .to_string()
+                    .contains("max_concurrent_reads must be between 1 and 32")
+            }));
+        }
+    }
+
+    #[test]
+    fn clickhouse_io_bounded() {
+        let mut deploy = DeployConfig::default();
+        deploy.db.clickhouse.io.critical_insert.attempt_timeout_ms = 2_000;
+        let report = deploy.validate_deploy_common();
+        assert!(report.errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("critical attempt must be <= 1900ms")
+        }));
+
+        let mut deploy = DeployConfig::default();
+        deploy.db.clickhouse.io.bulk_insert.attempt_timeout_ms = 4_000;
+        let report = deploy.validate_deploy_common();
+        assert!(report.errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("three-attempt insert retry window")
+        }));
+
+        let mut deploy = DeployConfig::default();
+        deploy.db.clickhouse.io.bulk_insert.send_timeout_ms = 2_000;
+        deploy.db.clickhouse.io.bulk_insert.end_timeout_ms = 2_000;
+        let report = deploy.validate_deploy_common();
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.to_string().contains("send plus end timeout must fit") })
+        );
+
+        let mut deploy = DeployConfig::default();
+        deploy.db.clickhouse.io.bulk_insert.attempt_timeout_ms = 3_401;
+        let report = deploy.validate_deploy_common();
+        assert!(report.errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("derived flush plus bulk retry plus scheduling margin")
+        }));
+    }
+
+    #[test]
+    fn clickhouse_bytes_bounded() {
+        let mut deploy = DeployConfig::default();
+        deploy.db.clickhouse.max_inflight_write_bytes = 1_048_575;
+        let report = deploy.validate_deploy_common();
+        assert!(report.errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("max_inflight_write_bytes must be between")
+        }));
+    }
+
+    #[test]
+    fn clickhouse_flush_bounded() {
+        let mut deploy = DeployConfig::default();
+        deploy.db.clickhouse.flush_interval_secs = 6;
+        let report = deploy.validate_deploy_common();
+        assert!(report.errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("flush_interval_secs must be between 1 and 5")
+        }));
+    }
+
+    #[test]
+    fn clickhouse_batches_bounded() {
+        let mut deploy = DeployConfig::default();
+        deploy.db.clickhouse.batch_size = 5_001;
+        let report = deploy.validate_deploy_common();
+        assert!(report.errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("batch_size must be between 1 and 5000")
+        }));
     }
 
     #[test]
@@ -1468,6 +1605,30 @@ mod tests {
             .finalized_exchange_history
             .max_blocks_per_chunk = 0;
         assert!(deploy.validate_deploy_common().has_errors());
+    }
+
+    #[test]
+    fn history_work_is_bounded() {
+        let mut chunk = DeployConfig::default();
+        chunk
+            .market_data
+            .finalized_exchange_history
+            .max_blocks_per_chunk = EXCHANGE_HISTORY_MAX_BLOCKS_PER_CHUNK + 1;
+        assert!(chunk.validate_deploy_common().has_errors());
+
+        let mut activation = DeployConfig::default();
+        activation
+            .market_data
+            .finalized_exchange_history
+            .hot_window_blocks_per_tick = EXCHANGE_HISTORY_MAX_BLOCKS_PER_TICK + 1;
+        assert!(activation.validate_deploy_common().has_errors());
+
+        let mut retention = DeployConfig::default();
+        retention
+            .market_data
+            .finalized_exchange_history
+            .full_history_blocks_per_tick = EXCHANGE_HISTORY_MAX_BLOCKS_PER_TICK + 1;
+        assert!(retention.validate_deploy_common().has_errors());
     }
 
     #[test]

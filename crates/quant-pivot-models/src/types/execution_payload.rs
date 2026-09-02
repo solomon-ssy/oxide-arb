@@ -18,13 +18,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::market::fee::{BuilderFeeAttribution, FrozenMakerRebateSchedule},
     enums::{
-        common::{OrderType, Side},
+        common::{OrderType, Side, TickSize},
         quant::{AuthorizationKind, ExitSettlementMode, RedeemPolicy},
     },
     types::{
-        Bps, ContentHash, DecisionPolicySnapshotId, ModelVersionId, OpportunisticExitPolicy, Price,
-        Probability, ResearchProfileRef, ScaleOutTarget, Shares, ThesisInvalidationPolicy, TokenId,
-        TrailingStopPolicy, Usd, UserId,
+        Bps, ContentHash, DecisionPolicySnapshotId, MarketId, ModelVersionId,
+        OpportunisticExitPolicy, Price, Probability, ResearchProfileRef, ScaleOutTarget, Shares,
+        ThesisInvalidationPolicy, TokenId, TrailingStopPolicy, Usd, UserId,
     },
 };
 
@@ -86,7 +86,7 @@ pub enum OrderAmount {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "unit", content = "value")]
 pub enum VenueOrderAmount {
-    GrossUsd(Usd),
+    PrincipalUsd(Usd),
     Shares(Shares),
 }
 
@@ -148,18 +148,28 @@ pub struct PreparedFeeSchedule {
 #[serde(deny_unknown_fields)]
 pub struct PreparedVenueOrder {
     pub profile_ref: ResearchProfileRef,
+    pub market_id: MarketId,
     pub token_id: TokenId,
+    pub tick_size: TickSize,
+    pub minimum_order_size: Shares,
+    pub neg_risk: bool,
     pub side: Side,
     pub order_type: OrderType,
     pub post_only: bool,
-    pub worst_price: Price,
+    /// Exact signed limit price persisted to the execution-order WAL.
+    pub limit_price: Price,
+    /// Worst fill price predicted from the frozen PIT book. This is economic
+    /// evidence only and never replaces the signed limit.
+    pub expected_worst_fill_price: Price,
     pub cash_budget: Option<Usd>,
     pub venue_amount: VenueOrderAmount,
+    /// Canonical signed share leg persisted to the execution-order WAL.
+    pub requested_shares: Shares,
     pub expected_fee: Usd,
     pub total_cash_delta: Decimal,
     pub expected_filled_shares: Shares,
     pub book_hash: ContentHash,
-    pub clob_market_info_hash: ContentHash,
+    pub clob_market_info_payload_hash: ContentHash,
     pub fee_schedule: PreparedFeeSchedule,
     /// Decision-time route applicability and Gamma terms.
     pub maker_rebate_terms: EntryMakerRebateTerms,
@@ -216,9 +226,9 @@ impl OrderAmount {
 
 impl VenueOrderAmount {
     #[must_use]
-    pub const fn gross_usd(self) -> Option<Usd> {
+    pub const fn principal_usd(self) -> Option<Usd> {
         match self {
-            Self::GrossUsd(value) => Some(value),
+            Self::PrincipalUsd(value) => Some(value),
             Self::Shares(_) => None,
         }
     }
@@ -227,7 +237,7 @@ impl VenueOrderAmount {
     pub const fn shares(self) -> Option<Shares> {
         match self {
             Self::Shares(value) => Some(value),
-            Self::GrossUsd(_) => None,
+            Self::PrincipalUsd(_) => None,
         }
     }
 }

@@ -49,7 +49,7 @@ info_from_model!(StrategyPositionLot, crate::entities::quant_strategy_position_l
 });
 
 /// Insert payload for `quant_strategy_position_lot`.
-#[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_strategy_position_lot::ActiveModel")]
 pub struct NewStrategyPositionLot {
     pub strategy_position_lot_id: StrategyPositionLotId,
@@ -107,6 +107,16 @@ pub struct CumulativePositionFill {
     pub cumulative_cost_usd: Usd,
     pub observed_at: DateTime<Utc>,
     pub source: AccountSource,
+}
+
+/// Increment between the previously committed and newly observed cumulative
+/// entry fill. Applying this delta preserves any exits already reflected in the
+/// current remaining lot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PositionFillReconciliation {
+    pub cumulative: CumulativePositionFill,
+    pub shares_delta: Shares,
+    pub cost_delta_usd: Usd,
 }
 
 /// Exit fact used to reduce or close an existing position.

@@ -5,6 +5,8 @@
 
 pub mod account_chain_projector;
 pub mod account_pause;
+pub mod account_recovery_reconciler;
+pub mod account_recovery_service;
 pub mod admission;
 pub mod breaker;
 pub mod dispatch_wake;
@@ -38,6 +40,7 @@ pub use account_chain_projector::{
     AccountChainExecutionProjector, AccountChainExecutionProjectorDeps,
 };
 pub use account_pause::AccountPauseCoordinator;
+pub use account_recovery_service::{AccountRecoveryService, AccountRecoveryServiceDeps};
 pub use admission::{
     AdmissionCheck, AdmissionCheckTrace, AdmissionDecision, AdmissionExposureState, AdmissionInput,
     AdmissionInputBuilder, AdmissionInputBuilderDeps, AdmissionModelState, AdmissionSeams,
@@ -76,7 +79,8 @@ pub use outcome_reconciliation::{
 pub use reconciliation::{
     ClobReconciliationReader, CollectedReconciliation, EvidenceCollector,
     OperatorReconcileResolution, ReconcileFacts, ReconciliationDecision, ReconciliationService,
-    ReconciliationServiceDeps, VenueEvidenceCollector, VenuePresence, VenueReconciliationReader,
+    ReconciliationServiceDeps, ShareSettlementBasis, ShareSettlementProjection,
+    VenueEvidenceCollector, VenuePresence, VenueReconciliationReader,
 };
 pub use settlement_lifecycle::SettlementLifecyclePublisher;
 pub use trade_policy_guard::require_frozen_trade_policy;

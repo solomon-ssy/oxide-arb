@@ -42,13 +42,13 @@ pub struct SystemStatus {
     pub active_markets: u32,
     /// Market-catalog warmup state; report generation is gated until `Ready`.
     pub catalog: CatalogState,
-    /// Authoritative operator lifecycle for report and optional execution modes.
+    /// Authoritative operator lifecycle for reports and governed optional execution.
     pub operational_phase: OperationalPhase,
     /// CLOB websocket market-data readiness snapshot.
     pub market_data: MarketDataConnectivity,
     /// Kill-switch projection from the atomic runtime-control snapshot.
     pub kill_switch: KillSwitchView,
-    /// Lightweight auto-execution recovery playbook summary.
+    /// Lightweight execution-recovery playbook summary.
     pub execution_recovery: ExecutionRecoverySummary,
     pub checked_at: DateTime<Utc>,
 }

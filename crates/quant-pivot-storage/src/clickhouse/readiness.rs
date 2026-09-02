@@ -42,7 +42,7 @@ impl ClickHousePool {
         validate_raw_history_binding(spec)?;
         let range_sql = raw_history_range_sql(spec)?;
         let range_query = CLICKHOUSE_RAW_HISTORY_READINESS
-            .query(self.client(), &range_sql)
+            .query(self, &range_sql)
             .bind(as_of.timestamp_millis());
         let range = if let Some(filter) = &spec.filter {
             range_query
@@ -54,7 +54,7 @@ impl ClickHousePool {
         };
         let parts = CLICKHOUSE_RAW_HISTORY_READINESS
             .query(
-                self.client(),
+                self,
                 "SELECT sum(bytes_on_disk) AS active_bytes, \
                  uniqExact(partition) AS active_partition_count FROM system.parts \
                  WHERE active AND database = currentDatabase() AND table = ?",
@@ -64,7 +64,7 @@ impl ClickHousePool {
             .await?;
         let metadata = CLICKHOUSE_RAW_HISTORY_READINESS
             .query(
-                self.client(),
+                self,
                 "SELECT partition_key, create_table_query FROM system.tables \
                  WHERE database = currentDatabase() AND name = ?",
             )
@@ -89,7 +89,7 @@ impl ClickHousePool {
     ) -> Result<BookLatencyObservation, StorageError> {
         let row = CLICKHOUSE_BOOK_LATENCY_READINESS
             .query(
-                self.client(),
+                self,
                 "SELECT count() AS event_count, \
                  toUInt64(quantileExact(0.50)(greatest(0, dateDiff('millisecond', venue_event_time, ingress_time)))) AS age_p50_ms, \
                  toUInt64(quantileExact(0.95)(greatest(0, dateDiff('millisecond', venue_event_time, ingress_time)))) AS age_p95_ms, \

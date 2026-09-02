@@ -2,13 +2,16 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    domain::market::{
-        book::BookLevel,
-        fee::{
-            BuilderFeeAttribution, DeferredVenueIncentive, FrozenMakerRebateSchedule,
-            ImmediateExecutionCost, MakerRebateEligibility, MakerRebateUnavailableReason,
-            MarketFeeSchedule, MarketMakerRebateEvidence, MarketMakerRebateSchedule,
+    domain::{
+        market::{
+            book::BookLevel,
+            fee::{
+                BuilderFeeAttribution, DeferredVenueIncentive, FrozenMakerRebateSchedule,
+                ImmediateExecutionCost, MakerRebateEligibility, MakerRebateUnavailableReason,
+                MarketFeeSchedule, MarketMakerRebateEvidence, MarketMakerRebateSchedule,
+            },
         },
+        order::{PolymarketOrderRules, VenueOrderRuleError},
     },
     enums::{
         common::{Side, TickSize},
@@ -30,7 +33,7 @@ use uuid::Uuid;
 use crate::precision::quantize_venue_amount;
 
 /// Versioned identity of the shared book-walk, queue, and fee semantics.
-pub const EXECUTION_SEMANTICS_VERSION: &str = "polymarket_execution_semantics_v2";
+pub const EXECUTION_SEMANTICS_VERSION: &str = "polymarket_execution_semantics_v3";
 
 /// Full-depth book evidence is the only publishable fidelity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -530,12 +533,13 @@ pub struct ResolutionBuySettlement {
     pub realized_return_bps: Bps,
 }
 
-/// Worst-price limit for an aggressive BUY relative to the visible best ask.
-#[must_use]
-pub fn aggressive_buy_limit(best_ask: Price, max_slippage_bps: Bps) -> Price {
-    Price::new(
-        (best_ask.inner() * (Decimal::ONE + max_slippage_bps.to_fraction())).min(Decimal::ONE),
-    )
+/// Tick-aligned worst-price limit for an aggressive BUY.
+pub fn aggressive_buy_limit(
+    best_ask: Price,
+    max_slippage_bps: Bps,
+    order_rules: PolymarketOrderRules,
+) -> Result<Price, VenueOrderRuleError> {
+    order_rules.aggressive_buy_limit(best_ask, max_slippage_bps)
 }
 
 /// Post-only BUY price resolved from the same placement semantics used by OOS replay.
@@ -705,7 +709,15 @@ fn shares_affordable_with_cash(
     }
 
     let share_quantum = Decimal::new(1, 6);
-    let affordable = (low / share_quantum).floor() * share_quantum;
+    let mut affordable = (low / share_quantum).floor() * share_quantum;
+    let next = (affordable + share_quantum).min(available.inner());
+    if next > affordable {
+        let next_shares = Shares::new(next);
+        let next_cash = next * price.inner() + fees.fee(role, price, next_shares, fill_at)?.inner();
+        if next_cash <= cash {
+            affordable = next;
+        }
+    }
     Ok(Shares::new(affordable.max(Decimal::ZERO)))
 }
 
@@ -938,7 +950,11 @@ mod tests {
                 MarketMakerRebateSchedule,
             },
         },
-        enums::{common::Side, quant::FillRequirement},
+        domain::order::PolymarketOrderRules,
+        enums::{
+            common::{Side, TickSize},
+            quant::FillRequirement,
+        },
         types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId, Price, Shares, Usd},
     };
     use rust_decimal::Decimal;
@@ -948,11 +964,23 @@ mod tests {
     use super::{
         BookWalkOutcome, FeeError, LiquidityRole, PassiveQueueState, PassiveTrade, PitFeeSchedule,
         PitMakerRebateEvidence, PitMakerRebateSchedule, PitMakerRebateUnavailableReason,
-        PitMarketExecutionEconomics, walk_buy_cash_budget, walk_sell_exact_shares,
+        PitMarketExecutionEconomics, aggressive_buy_limit, walk_buy_cash_budget,
+        walk_sell_exact_shares,
     };
 
     fn level(price: Decimal, size: Decimal) -> BookLevel {
         BookLevel::from_decimal_unchecked(Price::new(price), Shares::new(size))
+    }
+
+    #[test]
+    fn aggressive_limit_uses_grid() {
+        let rules =
+            PolymarketOrderRules::new(TickSize::QuarterCent, Shares::new(dec!(5))).expect("rules");
+        let limit = aggressive_buy_limit(Price::new(dec!(0.5125)), Bps::new(dec!(50)), rules)
+            .expect("aligned aggressive cap");
+
+        assert_eq!(limit, Price::new(dec!(0.515)));
+        assert!(limit.inner() <= dec!(0.5125) * dec!(1.005));
     }
 
     impl PitFeeSchedule {
@@ -1003,6 +1031,26 @@ mod tests {
         assert_eq!(fak.outcome, BookWalkOutcome::Partial);
         assert_eq!(fak.immediate_cost.principal_usd, Usd::new(dec!(5)));
         assert!(fak.immediate_cost.cash_outlay_usd.inner() <= dec!(10));
+    }
+
+    #[test]
+    fn cash_walk_exact_boundary() {
+        let mut fees = PitFeeSchedule::semantics_fixture();
+        fees.platform_rate = Decimal::ZERO;
+        let asks = [level(dec!(0.5), dec!(100))];
+        let fill = walk_buy_cash_budget(
+            &asks,
+            Usd::new(dec!(2)),
+            Price::new(dec!(0.5)),
+            FillRequirement::AllowPartial,
+            &fees,
+            LiquidityRole::Taker,
+            fees.effective_at,
+        )
+        .expect("exact-boundary cash walk");
+
+        assert_eq!(fill.filled_shares, Shares::new(dec!(4)));
+        assert_eq!(fill.immediate_cost.cash_outlay_usd, Usd::new(dec!(2)));
     }
 
     #[test]

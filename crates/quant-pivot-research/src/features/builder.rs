@@ -108,7 +108,9 @@ impl RawFeature {
 }
 
 /// One neg-risk sibling leg resolved point-in-time at the SAME `as_of` as the
-/// primary market. Online and offline both resolve through
+/// primary market.
+///
+/// Online and offline both resolve through
 /// [`PointInTimeSnapshotSource::book_at_boundary`], so the structural full-leg aggregates are
 /// byte-identical across backends.
 pub struct ResolvedLeg {

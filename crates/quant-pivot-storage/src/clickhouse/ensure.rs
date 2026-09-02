@@ -2,16 +2,20 @@
 //!
 //! Connects to the fixed maintenance catalog (`default`), checks
 //! `system.databases`, and issues `CREATE DATABASE` when the configured target
-//! is missing. Idempotent and safe under concurrent first-start races.
+//! is missing. A concurrent creator fails closed instead of sharing bootstrap ownership.
 
 use clickhouse::Client;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::config::ClickHouseConfig;
 use tracing::info;
 
-use crate::clickhouse::query_limits::{
-    CLICKHOUSE_DATABASE_BOOTSTRAP, CLICKHOUSE_DATABASE_OBJECT_COUNT,
-    CLICKHOUSE_PREPRODUCTION_INSPECT, CLICKHOUSE_PREPRODUCTION_RESET,
+use crate::clickhouse::{
+    deadline::ClickHouseIoDeadlines,
+    query::ClickHouseMaintenanceClient,
+    query_limits::{
+        CLICKHOUSE_DATABASE_BOOTSTRAP, CLICKHOUSE_DATABASE_OBJECT_COUNT,
+        CLICKHOUSE_PREPRODUCTION_INSPECT, CLICKHOUSE_PREPRODUCTION_RESET,
+    },
 };
 
 /// Maintenance catalog used for `CREATE DATABASE` bootstrap.
@@ -26,32 +30,19 @@ pub(super) async fn ensure_database(config: &ClickHouseConfig) -> Result<(), Sto
 
     validate_ch_identifier(&config.database, "database")?;
 
-    let client = Client::default()
-        .with_url(&config.url)
-        .with_database(MAINTENANCE_DATABASE)
-        .with_user(&config.user)
-        .with_password(config.password.expose_secret());
+    let client = maintenance_client(config);
 
     if database_exists(config).await? {
         info!(database = %config.database, "ClickHouse database already exists");
         return Ok(());
     }
 
-    let create_sql = format!(
-        "CREATE DATABASE IF NOT EXISTS {}",
-        quote_ident(&config.database),
-    );
+    let create_sql = format!("CREATE DATABASE {}", quote_ident(&config.database));
 
     CLICKHOUSE_DATABASE_BOOTSTRAP
-        .query(&client, &create_sql)
+        .maintenance_query(&client, &create_sql)
         .execute()
-        .await
-        .map_err(|e| {
-            StorageError::Connection(format!(
-                "Failed to CREATE DATABASE {}: {e}",
-                config.database
-            ))
-        })?;
+        .await?;
 
     info!(database = %config.database, "ClickHouse database created");
     Ok(())
@@ -62,39 +53,29 @@ pub(super) async fn database_exists(config: &ClickHouseConfig) -> Result<bool, S
         return Ok(true);
     }
     validate_ch_identifier(&config.database, "database")?;
-    let client = Client::default()
-        .with_url(&config.url)
-        .with_database(MAINTENANCE_DATABASE)
-        .with_user(&config.user)
-        .with_password(config.password.expose_secret());
-    CLICKHOUSE_DATABASE_BOOTSTRAP
-        .query(
+    let client = maintenance_client(config);
+    let count = CLICKHOUSE_DATABASE_BOOTSTRAP
+        .maintenance_query(
             &client,
             "SELECT count() FROM system.databases WHERE name = ?",
         )
         .bind(&config.database)
         .fetch_one::<u64>()
-        .await
-        .map(|count| count == 1)
-        .map_err(|error| {
-            StorageError::Connection(format!(
-                "ClickHouse maintenance connection failed ({MAINTENANCE_DATABASE}): {error}"
-            ))
-        })
+        .await?;
+    Ok(count == 1)
 }
 
 pub async fn database_object_count(config: &ClickHouseConfig) -> Result<u64, StorageError> {
     validate_preproduction_target(config)?;
     let client = maintenance_client(config);
     CLICKHOUSE_DATABASE_OBJECT_COUNT
-        .query(
+        .maintenance_query(
             &client,
             "SELECT count() FROM system.tables WHERE database = ?",
         )
         .bind(&config.database)
         .fetch_one::<u64>()
         .await
-        .map_err(Into::into)
 }
 
 /// Count active project queries and any server-wide mutation that makes a
@@ -105,7 +86,7 @@ pub async fn active_preproduction_query_count(
     validate_preproduction_target(config)?;
     let client = maintenance_client(config);
     CLICKHOUSE_PREPRODUCTION_INSPECT
-        .query(
+        .maintenance_query(
             &client,
             "SELECT count() FROM system.processes \
              WHERE query_id != currentQueryID() AND is_initial_query = 1 \
@@ -115,7 +96,6 @@ pub async fn active_preproduction_query_count(
         .bind(&config.database)
         .fetch_one::<u64>()
         .await
-        .map_err(Into::into)
 }
 
 pub async fn reset_preproduction_database(config: &ClickHouseConfig) -> Result<(), StorageError> {
@@ -132,25 +112,19 @@ pub async fn reset_preproduction_database(config: &ClickHouseConfig) -> Result<(
     }
     let client = maintenance_client(config);
     CLICKHOUSE_PREPRODUCTION_RESET
-        .query(&client, "DROP DATABASE IF EXISTS `quant_pivot` SYNC")
+        .maintenance_query(&client, "DROP DATABASE IF EXISTS `quant_pivot` SYNC")
         .execute()
-        .await
-        .map_err(|error| {
-            StorageError::Migration(format!("drop ClickHouse preproduction database: {error}"))
-        })?;
+        .await?;
     CLICKHOUSE_PREPRODUCTION_RESET
-        .query(&client, "CREATE DATABASE `quant_pivot`")
+        .maintenance_query(&client, "CREATE DATABASE `quant_pivot`")
         .execute()
-        .await
-        .map_err(|error| {
-            StorageError::Migration(format!("create ClickHouse preproduction database: {error}"))
-        })?;
+        .await?;
     Ok(())
 }
 
 fn validate_preproduction_target(config: &ClickHouseConfig) -> Result<(), StorageError> {
     if config.database != PREPRODUCTION_DATABASE {
-        return Err(StorageError::Migration(format!(
+        return Err(StorageError::Schema(format!(
             "preproduction reset only permits ClickHouse database `{PREPRODUCTION_DATABASE}`; configured `{}`",
             config.database
         )));
@@ -158,12 +132,16 @@ fn validate_preproduction_target(config: &ClickHouseConfig) -> Result<(), Storag
     validate_ch_identifier(&config.database, "database")
 }
 
-fn maintenance_client(config: &ClickHouseConfig) -> Client {
-    Client::default()
+fn maintenance_client(config: &ClickHouseConfig) -> ClickHouseMaintenanceClient {
+    let client = Client::default()
         .with_url(&config.url)
         .with_database(MAINTENANCE_DATABASE)
         .with_user(&config.user)
-        .with_password(config.password.expose_secret())
+        .with_password(config.password.expose_secret());
+    ClickHouseMaintenanceClient::new(
+        client,
+        ClickHouseIoDeadlines::from(&config.io).maintenance(),
+    )
 }
 
 /// Validate a `ClickHouse` unquoted identifier before embedding in DDL.

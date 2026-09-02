@@ -37,15 +37,19 @@ pub const WHALE_FIXTURE_EXECUTION_COUNT: usize = 25;
 /// Immutable activation head used by hermetic online feature/report fixtures.
 #[must_use]
 pub fn live_activation_head() -> HistoryServingHeadSeal {
-    live_history_head(ExchangeHistoryFrontier::Activation)
+    live_history_head(ExchangeHistoryFrontier::Activation, None, Utc::now())
 }
 
-fn live_history_head(frontier: ExchangeHistoryFrontier) -> HistoryServingHeadSeal {
-    let chunk = live_chunk(frontier);
-    HistoryServingHeadSeal {
+fn live_history_head(
+    frontier: ExchangeHistoryFrontier,
+    through_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+) -> HistoryServingHeadSeal {
+    let chunk = live_chunk(frontier, through_at, created_at);
+    let mut head = HistoryServingHeadSeal {
         seal: HistoryServingHeadSealInfo {
             serving_head_seal_id: Uuid::from_u128(8).into(),
-            seal_hash: ContentHash::from_bytes([8; 32]),
+            seal_hash: ContentHash::from_bytes([0; 32]),
             plan_id: Uuid::from_u128(9),
             frontier,
             previous_seal_id: None,
@@ -66,7 +70,11 @@ fn live_history_head(frontier: ExchangeHistoryFrontier) -> HistoryServingHeadSea
             from_block: chunk.from_block,
             to_block: chunk.to_block,
         }],
-    }
+    };
+    head.seal.seal_hash = head
+        .derive_hash()
+        .expect("canonical fixture serving-head hash");
+    head
 }
 
 /// Build bilateral on-chain participant rows with concentrated maker notional.
@@ -184,14 +192,32 @@ fn bilateral_execution_rows(
 /// Accepted-frontier repository used by in-memory feature fixtures.
 pub struct LiveExchangeHistoryRepo {
     head_available: bool,
+    through_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
 }
 
-fn live_chunk(frontier: ExchangeHistoryFrontier) -> ExchangeHistoryChunkInfo {
-    let now = Utc::now();
-    let through = Utc
-        .with_ymd_and_hms(2099, 1, 1, 0, 0, 0)
-        .single()
-        .expect("fixture history timestamp");
+impl LiveExchangeHistoryRepo {
+    /// Freeze a finalized-history watermark instead of using the open fixture horizon.
+    #[must_use]
+    pub fn through(through_at: DateTime<Utc>) -> Self {
+        Self {
+            head_available: true,
+            through_at: Some(through_at),
+            created_at: Utc::now(),
+        }
+    }
+}
+
+fn live_chunk(
+    frontier: ExchangeHistoryFrontier,
+    through_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+) -> ExchangeHistoryChunkInfo {
+    let through = through_at.unwrap_or_else(|| {
+        Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0)
+            .single()
+            .expect("fixture history timestamp")
+    });
     let digest = ContentHash::from_bytes([7_u8; 32]);
     let block_hash =
         EvmBlockHash::parse(format!("0x{}", "a".repeat(64))).expect("fixture block hash");
@@ -214,9 +240,9 @@ fn live_chunk(frontier: ExchangeHistoryFrontier) -> ExchangeHistoryChunkInfo {
         continuity_hash: Some(block_hash),
         effective_through_at: Some(through),
         state_revision: Some(1),
-        accepted_at: Some(now),
-        created_at: now,
-        updated_at: now,
+        accepted_at: Some(created_at),
+        created_at,
+        updated_at: created_at,
     }
 }
 
@@ -262,14 +288,18 @@ impl ExchangeHistoryRepository for LiveExchangeHistoryRepo {
         &self,
         frontier: ExchangeHistoryFrontier,
     ) -> Result<Option<ExchangeHistoryChunkInfo>, StorageError> {
-        Ok(self.head_available.then(|| live_chunk(frontier)))
+        Ok(self
+            .head_available
+            .then(|| live_chunk(frontier, self.through_at, self.created_at)))
     }
 
     async fn earliest_accepted(
         &self,
         frontier: ExchangeHistoryFrontier,
     ) -> Result<Option<ExchangeHistoryChunkInfo>, StorageError> {
-        Ok(self.head_available.then(|| live_chunk(frontier)))
+        Ok(self
+            .head_available
+            .then(|| live_chunk(frontier, self.through_at, self.created_at)))
     }
 
     async fn accepted_from(
@@ -383,7 +413,9 @@ impl ExchangeHistoryRepository for LiveExchangeHistoryRepo {
         &self,
         frontier: ExchangeHistoryFrontier,
     ) -> Result<Option<HistoryServingHeadSeal>, StorageError> {
-        Ok(self.head_available.then(|| live_history_head(frontier)))
+        Ok(self
+            .head_available
+            .then(|| live_history_head(frontier, self.through_at, self.created_at)))
     }
 
     async fn serving_head_at(
@@ -429,6 +461,8 @@ impl ExchangeHistoryRepository for LiveExchangeHistoryRepo {
 pub fn live_history_repo() -> Arc<dyn ExchangeHistoryRepository> {
     Arc::new(LiveExchangeHistoryRepo {
         head_available: true,
+        through_at: None,
+        created_at: Utc::now(),
     })
 }
 
@@ -437,6 +471,8 @@ pub fn live_history_repo() -> Arc<dyn ExchangeHistoryRepository> {
 pub fn unavailable_history_repo() -> Arc<dyn ExchangeHistoryRepository> {
     Arc::new(LiveExchangeHistoryRepo {
         head_available: false,
+        through_at: None,
+        created_at: Utc::now(),
     })
 }
 
@@ -663,5 +699,66 @@ impl QuantFactReadRepository for ConfigurableFactRead {
         self.inner
             .observed_markets_between(from_ms, to_ms, decision_at_ms)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::{Duration, Utc};
+    use quant_pivot_error::storage::StorageError;
+    use quant_pivot_models::domain::data_plane::ExchangeHistoryFrontier;
+    use quant_pivot_repository::traits::ExchangeHistoryRepository;
+
+    use super::{LiveExchangeHistoryRepo, live_history_repo};
+
+    #[tokio::test]
+    async fn repository_metadata_stays_frozen() -> Result<(), StorageError> {
+        let through = Utc::now() - Duration::minutes(1);
+        for repo in [
+            Arc::new(LiveExchangeHistoryRepo::through(through))
+                as Arc<dyn ExchangeHistoryRepository>,
+            live_history_repo(),
+        ] {
+            let decision_at = Utc::now();
+            let first_head = repo
+                .latest_serving_head(ExchangeHistoryFrontier::Activation)
+                .await?
+                .expect("fixture activation head");
+            let first_chunk = repo
+                .latest_accepted(ExchangeHistoryFrontier::Activation)
+                .await?
+                .expect("fixture accepted chunk");
+            let validated = repo
+                .validate_serving_head(
+                    first_head.seal.serving_head_seal_id,
+                    first_head.seal.seal_hash,
+                )
+                .await?;
+            let second_head = repo
+                .serving_head_at(ExchangeHistoryFrontier::Activation, decision_at)
+                .await?
+                .expect("same decision-time activation head");
+            let second_chunk = repo
+                .earliest_accepted(ExchangeHistoryFrontier::Activation)
+                .await?
+                .expect("same accepted chunk");
+
+            assert_eq!(first_head, validated);
+            assert_eq!(
+                first_head
+                    .derive_hash()
+                    .expect("canonical fixture commitment"),
+                first_head.seal.seal_hash,
+            );
+            assert_eq!(first_head, second_head);
+            assert_eq!(first_chunk, second_chunk);
+            assert!(first_head.seal.created_at <= decision_at);
+            assert_eq!(first_head.seal.created_at, first_chunk.created_at);
+            assert_eq!(first_chunk.accepted_at, Some(first_chunk.created_at));
+            assert_eq!(first_chunk.updated_at, first_chunk.created_at);
+        }
+        Ok(())
     }
 }

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Deserializer, Serialize, de::Error};
 
@@ -89,7 +90,7 @@ impl FinalizedExecutionEvidence {
 }
 
 /// Why a feature value is absent. Missing values are never silently zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NullReason {
     SourceUnavailable,

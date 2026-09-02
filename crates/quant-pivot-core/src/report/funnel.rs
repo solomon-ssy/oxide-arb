@@ -88,7 +88,7 @@ pub fn build_report_market_funnel(
     let rejected_tiers = input
         .tier_rejections
         .iter()
-        .map(|rejection| (rejection.economic_tier_id, rejection.code))
+        .map(|rejection| (rejection.economic_tier_id, rejection))
         .collect::<HashMap<_, _>>();
     let tier_build_rejections = input
         .tier_build_rejections
@@ -150,7 +150,7 @@ struct IncludedFunnelState<'a> {
     feature_vector_id: Option<FeatureVectorId>,
     model_decision: Option<&'a ModelMarketDecision>,
     tiers: &'a [&'a ExecutableEconomicTier],
-    rejected_tiers: &'a HashMap<EconomicTierId, TierAdmissionRejectionCode>,
+    rejected_tiers: &'a HashMap<EconomicTierId, &'a ReportTierRejection>,
     tier_build_rejection: Option<&'a EconomicTierBuildRejection>,
     recommendation: Option<&'a PublishedRecommendationRef>,
 }
@@ -197,40 +197,53 @@ impl IncludedFunnelState<'_> {
             recommendation_id: outcome.recommendation_id,
         })
     }
+
+    fn published_row(
+        self,
+        route: BuyModelRoute,
+        published: &PublishedRecommendationRef,
+    ) -> QuantResult<ReportMarketFunnelRow> {
+        if published.route != route
+            || published.report_route_run_id != self.route_run.report_route_run_id
+        {
+            return Err(ReportError::InvariantViolation {
+                stage: "report_funnel",
+                detail: format!(
+                    "published market {} disagrees with Route lineage",
+                    self.market.market_id
+                ),
+            }
+            .into());
+        }
+        self.sealed(IncludedRowOutcome {
+            terminal_stage: ReportFunnelStage::Published,
+            primary_reason: ReportFunnelReason::Published,
+            diagnostics: ReportFunnelDiagnostics::None {},
+            signal_candidate_id: self
+                .model_decision
+                .map(|decision| decision.signal_candidate_id),
+            recommendation_id: Some(published.recommendation_id),
+        })
+    }
 }
 
 fn included_row(state: IncludedFunnelState<'_>) -> QuantResult<ReportMarketFunnelRow> {
     let route = state.validated_route()?;
+    if let Some(published) = state.recommendation {
+        return state.published_row(route, published);
+    }
 
     let mut signal_candidate_id = state
         .model_decision
         .map(|decision| decision.signal_candidate_id);
     let (terminal_stage, primary_reason, diagnostics, recommendation_id) =
-        if let Some(published) = state.recommendation {
-            if published.route != route
-                || published.report_route_run_id != state.route_run.report_route_run_id
-            {
-                return Err(ReportError::InvariantViolation {
-                    stage: "report_funnel",
-                    detail: format!(
-                        "published market {} disagrees with Route lineage",
-                        state.market.market_id
-                    ),
-                }
-                .into());
-            }
-            (
-                ReportFunnelStage::Published,
-                ReportFunnelReason::Published,
-                ReportFunnelDiagnostics::None {},
-                Some(published.recommendation_id),
-            )
-        } else if let Some(rejected) = state.rejected_feature {
+        if let Some(rejected) = state.rejected_feature {
             (
                 ReportFunnelStage::FeatureReady,
                 ReportFunnelReason::FeatureDataQualityRejected,
                 ReportFunnelDiagnostics::FeatureDataQuality {
-                    missing: rejected
+                    status: rejected.data_quality,
+                    missing_required: rejected
                         .missing_required
                         .iter()
                         .map(|(feature_name, reason)| MissingFeatureDiagnostic {
@@ -294,7 +307,7 @@ fn included_row(state: IncludedFunnelState<'_>) -> QuantResult<ReportMarketFunne
                     },
                     None,
                 ),
-                None => (
+                Some(EconomicTierBuildRejection::BelowMinimumOrderSize { .. }) | None => (
                     ReportFunnelStage::PolicyReady,
                     ReportFunnelReason::ExecutableEntryUnavailable,
                     ReportFunnelDiagnostics::None {},
@@ -318,11 +331,11 @@ fn included_row(state: IncludedFunnelState<'_>) -> QuantResult<ReportMarketFunne
                     None,
                 )
             } else {
-                let code = state
+                let rejection = state
                     .tiers
                     .iter()
                     .filter_map(|tier| state.rejected_tiers.get(&tier.economic_tier_id).copied())
-                    .min_by_key(|code| tier_rejection_rank(*code))
+                    .min_by_key(|rejection| tier_rejection_rank(rejection.code))
                     .ok_or_else(|| ReportError::InvariantViolation {
                         stage: "report_funnel",
                         detail: format!(
@@ -330,11 +343,12 @@ fn included_row(state: IncludedFunnelState<'_>) -> QuantResult<ReportMarketFunne
                             state.market.market_id
                         ),
                     })?;
+                let code = rejection.code;
                 let reason = tier_rejection_reason(code);
                 (
                     ReportFunnelStage::SizingEligible,
                     reason,
-                    rejection_diagnostics(reason, code),
+                    rejection_diagnostics(reason, rejection)?,
                     None,
                 )
             }
@@ -631,20 +645,93 @@ const fn tier_rejection_reason(code: TierAdmissionRejectionCode) -> ReportFunnel
 
 fn rejection_diagnostics(
     reason: ReportFunnelReason,
-    code: TierAdmissionRejectionCode,
-) -> ReportFunnelDiagnostics {
-    ReportFunnelDiagnostics::PlannerRejection {
-        detail: format!(
-            "global tier admission rejected with {} ({code:?})",
-            reason.as_str()
-        ),
+    rejection: &ReportTierRejection,
+) -> QuantResult<ReportFunnelDiagnostics> {
+    rejection
+        .validate()
+        .map_err(|detail| ReportError::InvariantViolation {
+            stage: "report_funnel",
+            detail: format!(
+                "tier {} has invalid rejection diagnostics: {detail}",
+                rejection.economic_tier_id
+            ),
+        })?;
+    match (&rejection.diagnostics, rejection.code) {
+        (Some(diagnostics), TierAdmissionRejectionCode::ProfitProbabilityFloor) => {
+            diagnostics
+                .validate_for(reason)
+                .map_err(|detail| ReportError::InvariantViolation {
+                    stage: "report_funnel",
+                    detail: format!(
+                        "tier {} has diagnostics for the wrong reason: {detail}",
+                        rejection.economic_tier_id
+                    ),
+                })?;
+            Ok(diagnostics.clone())
+        }
+        (None, TierAdmissionRejectionCode::ProfitProbabilityFloor) => {
+            Err(ReportError::InvariantViolation {
+                stage: "report_funnel",
+                detail: format!(
+                    "tier {} has no probability rejection diagnostics",
+                    rejection.economic_tier_id
+                ),
+            }
+            .into())
+        }
+        (Some(_), _) => Err(ReportError::InvariantViolation {
+            stage: "report_funnel",
+            detail: format!(
+                "tier {} has diagnostics for non-probability rejection {:?}",
+                rejection.economic_tier_id, rejection.code
+            ),
+        }
+        .into()),
+        (None, code) => Ok(ReportFunnelDiagnostics::PlannerRejection {
+            detail: format!(
+                "global tier admission rejected with {} ({code:?})",
+                reason.as_str()
+            ),
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::model_gate_reason;
-    use quant_pivot_models::types::ReportFunnelReason;
+    use quant_pivot_models::types::{
+        Bps, ContentHash, EconomicTierId, MarketId, PortfolioScenarioArtifactId,
+        ReportFunnelDiagnostics, ReportFunnelReason, Usd,
+    };
+    use quant_pivot_research::portfolio::TierAdmissionRejectionCode;
+    use rust_decimal_macros::dec;
+
+    use super::{ReportTierRejection, model_gate_reason, rejection_diagnostics};
+
+    impl ReportTierRejection {
+        fn probability_fixture() -> Self {
+            let economic_tier_id = EconomicTierId::from_v7();
+            let scenario_artifact_hash = ContentHash::from_bytes([7; 32]);
+            Self {
+                economic_tier_id,
+                market_id: MarketId::new("probability-rejection-market"),
+                code: TierAdmissionRejectionCode::ProfitProbabilityFloor,
+                diagnostics: Some(ReportFunnelDiagnostics::ProfitProbabilityFloor {
+                    economic_tier_id,
+                    scenario_artifact_id: PortfolioScenarioArtifactId::from_content_hash(
+                        &scenario_artifact_hash,
+                    ),
+                    scenario_artifact_hash,
+                    nominal_profit_probability_bps: Bps::new(dec!(5175)),
+                    lower_profit_probability_bps: 5_100,
+                    minimum_profit_probability_bps: 5_200,
+                    probability_interval_width_bps: 75,
+                    maximum_probability_interval_width_bps: 2_000,
+                    nominal_expected_net_usd: Usd::new(dec!(4.2)),
+                    robust_expected_net_usd: Usd::new(dec!(2.8)),
+                }),
+            }
+        }
+    }
 
     #[test]
     fn model_gate_mapping_stable() {
@@ -655,6 +742,49 @@ mod tests {
         assert_eq!(
             model_gate_reason(Some("low_confidence")),
             ReportFunnelReason::LowConfidence
+        );
+    }
+
+    #[test]
+    fn probability_rejection_is_structured() {
+        let rejection = ReportTierRejection::probability_fixture();
+        assert!(rejection.validate().is_ok());
+        assert!(matches!(
+            rejection_diagnostics(ReportFunnelReason::ProfitProbabilityBelowFloor, &rejection)
+                .expect("valid probability diagnostics"),
+            ReportFunnelDiagnostics::ProfitProbabilityFloor { .. }
+        ));
+
+        let mut generic = rejection.clone();
+        generic.diagnostics = Some(ReportFunnelDiagnostics::PlannerRejection {
+            detail: "must not impersonate a probability rejection".to_owned(),
+        });
+        assert!(generic.validate().is_err());
+        assert!(
+            rejection_diagnostics(ReportFunnelReason::ProfitProbabilityBelowFloor, &generic)
+                .is_err()
+        );
+
+        let mut missing = rejection.clone();
+        missing.diagnostics = None;
+        assert!(missing.validate().is_err());
+
+        let mut mismatched_tier = rejection.clone();
+        let Some(ReportFunnelDiagnostics::ProfitProbabilityFloor {
+            economic_tier_id, ..
+        }) = &mut mismatched_tier.diagnostics
+        else {
+            panic!("probability fixture changed diagnostics kind");
+        };
+        *economic_tier_id = EconomicTierId::from_v7();
+        assert!(mismatched_tier.validate().is_err());
+
+        let mut wrong_code = rejection;
+        wrong_code.code = TierAdmissionRejectionCode::RobustExpectedNetFloor;
+        assert!(wrong_code.validate().is_err());
+        assert!(
+            rejection_diagnostics(ReportFunnelReason::RobustExpectedNetBelowFloor, &wrong_code)
+                .is_err()
         );
     }
 }

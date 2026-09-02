@@ -15,7 +15,7 @@
 //! 2. data stale → manual (never guess a price)
 //! 3. market abnormal → manual
 //! 4. stop-loss (+ trailing folded into the effective stop)
-//! 5. thesis invalidated (model re-inference; auto-execution intents only)
+//! 5. thesis invalidated (model re-inference; active-policy-authorized intents only)
 //!    - a `HoldToResolution` lot short-circuits to hold here: the protective
 //!      tiers above still fire, but the take-gains / timeout tiers below are skipped.
 //! 6. time exit
@@ -180,7 +180,7 @@ pub trait ExitSignalEvaluator: Send + Sync {
 /// **holds** does opportunistic scoring run. A `ThesisInvalidated` short-circuits
 /// (the ladder forces a full exit), and an `Indeterminate` also short-circuits —
 /// this includes the case where re-inference is disabled or the intent is not
-/// auto-execution — so opportunistic advisory selling is gated on thesis
+/// active-policy-authorized — so opportunistic advisory selling is gated on thesis
 /// validity being checkable and holding. Fail-safe throughout: neither path can
 /// error, and any inability to evaluate resolves to Hold.
 pub struct CompositeExitSignalEvaluator {
@@ -259,6 +259,9 @@ pub enum ExitDecision {
 pub struct ExitMonitorInput {
     /// The open position lot (price truth: `avg_price`, `shares`, `opened_at`).
     pub lot: StrategyPositionLot,
+    /// Current venue minimum. A positive remainder below it is settlement-owned
+    /// dust and is held without attempting another order submission.
+    pub minimum_order_size: Shares,
     /// The intent's frozen exit contract.
     pub exit_policy: ExitPolicySpec,
     /// Current sell-side mark (best bid); `None` when the book is unreadable.
@@ -326,6 +329,10 @@ fn sell_order(
     }
 }
 
+fn dust_decision(shares: Shares, minimum_order_size: Shares) -> Option<ExitDecision> {
+    (shares.is_positive() && shares < minimum_order_size).then_some(ExitDecision::Hold)
+}
+
 /// Resolve a submit-or-manual decision for a triggered non-emergency exit:
 /// gated by `allows_auto_exit` (manual when frozen) and by a readable mark
 /// (manual when the sell cannot be priced — never guess).
@@ -335,6 +342,9 @@ fn submit_or_manual(
     shares: Shares,
     limit: Option<Price>,
 ) -> ExitDecision {
+    if let Some(decision) = dust_decision(shares, input.minimum_order_size) {
+        return decision;
+    }
     if !input.kill_switch.allows_auto_exit() {
         return ExitDecision::RequireManualReview { reason };
     }
@@ -356,6 +366,13 @@ impl ExitMonitorInput {
         let lot = &self.lot;
         let policy = &self.exit_policy;
         let shares = lot.shares;
+
+        // A positive remainder below the venue minimum cannot be represented as
+        // an order. Settlement/lot accounting retains ownership; the monitor
+        // must not manufacture a permanently failing submit loop.
+        if let Some(decision) = dust_decision(shares, self.minimum_order_size) {
+            return decision;
+        }
 
         // 1. Kill-switch emergency — overrides the auto-exit gate, applies policy.
         if self.kill_switch.requires_emergency_exit() {
@@ -508,6 +525,9 @@ fn submit_or_manual_opportunistic(
     shares: Shares,
     target_cumulative_exit_pct: Decimal,
 ) -> ExitDecision {
+    if let Some(decision) = dust_decision(shares, input.minimum_order_size) {
+        return decision;
+    }
     if !input.kill_switch.allows_auto_exit() {
         return ExitDecision::RequireManualReview {
             reason: ExitReason::Opportunistic,
@@ -536,6 +556,9 @@ fn submit_target_exit(
     limit: Option<Price>,
     pending_scale_out: PendingScaleOut,
 ) -> ExitDecision {
+    if let Some(decision) = dust_decision(shares, input.minimum_order_size) {
+        return decision;
+    }
     if !input.kill_switch.allows_auto_exit() {
         return ExitDecision::RequireManualReview { reason };
     }
@@ -566,5 +589,29 @@ impl ExitMonitorInput {
                 target_cumulative_exit_pct: projection.target_cumulative_exit_pct,
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_models::types::Shares;
+    use rust_decimal_macros::dec;
+
+    use super::{ExitDecision, dust_decision};
+
+    #[test]
+    fn dust_remainder_is_held() {
+        assert_eq!(
+            dust_decision(Shares::new(dec!(4.999)), Shares::new(dec!(5))),
+            Some(ExitDecision::Hold)
+        );
+    }
+
+    #[test]
+    fn exact_minimum_can_submit() {
+        assert_eq!(
+            dust_decision(Shares::new(dec!(5)), Shares::new(dec!(5))),
+            None
+        );
     }
 }

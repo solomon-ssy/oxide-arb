@@ -39,6 +39,7 @@ pub mod web_services;
 
 mod bundles;
 mod clob_market_info_worker;
+mod crypto_fact_persistence;
 
 use std::sync::Arc;
 

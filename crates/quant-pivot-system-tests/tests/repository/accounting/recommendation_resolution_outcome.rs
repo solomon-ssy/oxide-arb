@@ -363,7 +363,7 @@ pub async fn reconciliation_candidates_terminal_aware() {
             .expect("mark resolution candidate terminal");
     }
     let repository = PgRecommendationResolutionOutcomeRepository::new(db.clone());
-    let cutoff = db.statement_time().await;
+    let cutoff = db.statement_time().await + Duration::seconds(30);
     let old_cutoff = cutoff - Duration::days(1);
     assert_eq!(
         repository

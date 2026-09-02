@@ -1090,11 +1090,10 @@ fn validate_new_run(run: &NewFeatureParityRun) -> Result<(), StorageError> {
     if run.reason.trim().is_empty()
         || run.acting_role.as_str().trim().is_empty()
         || run.triggered_by.trim().is_empty()
-        || run.feature_contract_hash.is_none()
     {
         return Err(StorageError::invariant_violation(
             Some(QUANT_FEATURE_PARITY_RUN),
-            "reason, acting_role, triggered_by, and feature_contract_hash are required",
+            "reason, acting_role, and triggered_by are required",
         ));
     }
     if run.total_count != 0
@@ -1142,12 +1141,6 @@ fn validate_completion(
         return Err(StorageError::invariant_violation(
             Some(QUANT_FEATURE_PARITY_RUN),
             "compared_count must equal matched_count + mismatched_count and total_count must equal compared_count + pending_materialization_count",
-        ));
-    }
-    if result.feature_contract_hash.is_none() {
-        return Err(StorageError::invariant_violation(
-            Some(QUANT_FEATURE_PARITY_RUN),
-            "feature_contract_hash is required for every parity result",
         ));
     }
     match result.status {
@@ -1226,7 +1219,6 @@ fn validate_recovery_run(run: &FeatureParityRunInfo) -> Result<(), StorageError>
         || run.matched_count != run.total_count
         || run.mismatched_count != 0
         || run.pending_materialization_count != 0
-        || run.feature_contract_hash.is_none()
         || run.transform_hash.is_none()
         || run.finished_at.is_none()
     {
@@ -1726,7 +1718,7 @@ mod tests {
             matched_count: i64::from(status == FeatureParityRunStatus::Passed) * 2,
             mismatched_count: i64::from(status == FeatureParityRunStatus::Mismatched),
             pending_materialization_count: 0,
-            feature_contract_hash: Some(hash()),
+            feature_contract_hash: hash(),
             transform_hash: (status == FeatureParityRunStatus::Passed).then(hash),
             failure_code: (status == FeatureParityRunStatus::Failed)
                 .then(|| DiagnosticCode::new("integrity_failure")),
@@ -1781,7 +1773,7 @@ mod tests {
             matched_count: 1,
             mismatched_count: 0,
             pending_materialization_count: 0,
-            feature_contract_hash: Some(hash()),
+            feature_contract_hash: hash(),
             transform_hash,
             failure_code: None,
             failure_detail: None,
@@ -1797,7 +1789,7 @@ mod tests {
                 transform_required: false,
             },
         )
-        .expect("report-only parity stops before model-input transformation");
+        .expect("analysis-only parity stops before model-input transformation");
 
         let model_error = validate_completion(
             &passed_completion(None),
@@ -1928,10 +1920,6 @@ mod tests {
         assert!(validate_recovery_run(&recovery).is_err());
 
         recovery.pending_materialization_count = 0;
-        recovery.feature_contract_hash = None;
-        assert!(validate_recovery_run(&recovery).is_err());
-
-        recovery.feature_contract_hash = Some(hash());
         recovery.finished_at = None;
         assert!(validate_recovery_run(&recovery).is_err());
     }

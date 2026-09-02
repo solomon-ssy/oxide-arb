@@ -1,10 +1,11 @@
 //! `ClickHouse` DDL statements for `MergeTree` tables and materialized views.
 
-/// Complete boot schema generated from the reviewed semantic manifest.
+/// Complete fresh-boot schema generated from the reviewed semantic manifest.
 ///
-/// The project has not entered production, so `ClickHouse` owns one clean-slate
-/// migration instead of replaying historical ALTER/data-repair waves.
-pub(super) const BOOTSTRAP_SOURCES: &[&str] = &[include_str!("sql/bootstrap.sql")];
+/// This project has no production data or deployed schema history. Structural
+/// changes replace this sole bootstrap directly; prior schemas are never
+/// adopted, upgraded, or resumed.
+pub(super) const BOOTSTRAP_SQL: &str = include_str!("sql/bootstrap.sql");
 
 pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 31] = [
     "book_microstructure_1m",
@@ -169,26 +170,47 @@ const fn is_identifier_continue(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BOOTSTRAP_SOURCES, extract_table_ttl, split_statements};
+    use super::{BOOTSTRAP_SQL, REQUIRED_SCHEMA_OBJECTS, extract_table_ttl, split_statements};
+
+    #[test]
+    fn all_managed_tables_dedup() {
+        const MANAGED_ENGINES: [&str; 3] = [
+            " ENGINE = MergeTree",
+            " ENGINE = ReplacingMergeTree",
+            " ENGINE = AggregatingMergeTree",
+        ];
+
+        let mut managed_table_count = 0;
+        for statement in split_statements(BOOTSTRAP_SQL) {
+            let normalized = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !normalized.starts_with("CREATE TABLE ")
+                || !MANAGED_ENGINES
+                    .iter()
+                    .any(|engine| normalized.contains(engine))
+            {
+                continue;
+            }
+
+            managed_table_count += 1;
+            assert!(
+                normalized.contains("non_replicated_deduplication_window = 10000"),
+                "managed ClickHouse table lacks retry deduplication: {normalized}"
+            );
+        }
+
+        assert_eq!(managed_table_count, REQUIRED_SCHEMA_OBJECTS.len() - 1);
+    }
 
     #[test]
     fn microstructure_rollup_preserves_availability() {
-        let ddl = BOOTSTRAP_SOURCES
-            .iter()
-            .flat_map(|source| split_statements(source))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let ddl = split_statements(BOOTSTRAP_SQL).join("\n");
         assert!(ddl.contains("book_microstructure_1m_mv"));
         assert!(ddl.contains("max(available_at) AS available_at"));
     }
 
     #[test]
     fn market_resolution_uses_vectors() {
-        let ddl = BOOTSTRAP_SOURCES
-            .iter()
-            .flat_map(|source| split_statements(source))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let ddl = split_statements(BOOTSTRAP_SQL).join("\n");
         let normalized_ddl = ddl.split_whitespace().collect::<Vec<_>>().join(" ");
 
         assert!(normalized_ddl.contains("`token_ids` Array(String)"));
@@ -199,13 +221,9 @@ mod tests {
 
     #[test]
     fn execution_facts_are_canonical() {
-        let ddl = BOOTSTRAP_SOURCES
-            .iter()
-            .flat_map(|source| split_statements(source))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let ddl = split_statements(BOOTSTRAP_SQL).join("\n");
         let normalized_ddl = ddl.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(normalized_ddl.contains("CREATE TABLE IF NOT EXISTS quant_market_execution"));
+        assert!(normalized_ddl.contains("CREATE TABLE quant_market_execution"));
         assert!(normalized_ddl.contains("`model_available_at` DateTime64(3, 'UTC')"));
         assert!(normalized_ddl.contains("`availability_basis` Enum8('BlockConfirmation' = 1)"));
         assert!(normalized_ddl.contains(

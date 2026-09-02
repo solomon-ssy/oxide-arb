@@ -13,13 +13,15 @@ use quant_pivot_error::storage::{
 use quant_pivot_models::{
     domain::{
         governance::NewOperationLog,
+        order::PolymarketOrderRules,
         quant::{
             ApproveOrderIntentOutcome, AuthorizeOrderIntent, CapitalReconcileSettlement,
             CapitalSettlement, CumulativePositionFill, ExecutionIdentityEnrichment,
             ExecutionIdentityRefs, ExecutionTradeObservation, ExitLedgerWrite,
             NewCapitalAllocation, NewExecutionOrder, NewFeatureParityState, NewMarketSelection,
             NewOrderIntent, NewReconciliation, NewReportTransaction, PositionExit, PositionFill,
-            ReconciliationLedgerWrite, ReportRunClaim, SubmissionLedgerWrite,
+            PositionFillReconciliation, ReconciliationLedgerWrite, ReportRunClaim,
+            SubmissionLedgerWrite,
         },
     },
     entities::{
@@ -32,7 +34,7 @@ use quant_pivot_models::{
         quant_report_run::ActiveModel,
     },
     enums::{
-        common::{MarketCategory, OrderType, Side},
+        common::{MarketCategory, OrderType, Side, TickSize},
         execution::{
             CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, OrderTypeKind,
             PositionLedgerState, ReconciliationEvidenceKind, ReconciliationResult,
@@ -85,9 +87,9 @@ use quant_pivot_system_tests::{
         catalog_fixtures::{make_event, make_market},
         execution_pg_seed,
         execution_pg_seed::{
-            ExecutionTxnIds, ReportBuildOptions, ReportSeedConfig, SharedDemoInfra,
-            build_custom_report_transaction, claim_entry_for_test, enable_test_admission,
-            entry_claim_for_test, fixture_profile_ref, prepared_order, seed_price_report,
+            ExecutionTxnIds, PreparedOrderFixture, ReportBuildOptions, ReportSeedConfig,
+            SharedDemoInfra, build_custom_report_transaction, claim_entry_for_test,
+            enable_test_admission, entry_claim_for_test, fixture_profile_ref, seed_price_report,
             seed_shared_demo_infra,
         },
         policy_fixtures::bootstrap_default_policy_bundle,
@@ -834,6 +836,62 @@ pub async fn out_order_verification_candidate() {
     assert_eq!(current.recommendation_report_id, newer.report);
 }
 
+pub async fn superseded_announcement_releases() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let predecessor = seed_report_fixture(&db).await;
+    let reports = PgRecommendationReportRepository::new(db.clone());
+    let stale_worker = WorkerId::from_v7();
+    let claimed = reports
+        .claim_fact_announcement(stale_worker, 600)
+        .await
+        .expect("claim predecessor announcement")
+        .expect("predecessor announcement must be claimable");
+    assert_eq!(claimed.recommendation_report_id, predecessor.report);
+
+    let (successor, delivery_worker) = seed_successor_prepared(&db, &predecessor).await;
+    reports
+        .verify_and_publish_report(&successor.report, delivery_worker, Utc::now())
+        .await
+        .expect("publish successor")
+        .into_applied()
+        .expect("successor delivery claim must remain held");
+
+    let predecessor_report = reports
+        .find_by_id(&predecessor.report)
+        .await
+        .expect("load superseded predecessor")
+        .expect("superseded predecessor");
+    assert_eq!(
+        predecessor_report.status,
+        RecommendationReportStatus::Superseded
+    );
+    let stale = reports
+        .acknowledge_fact_announcement(&predecessor.report, stale_worker)
+        .await
+        .expect("terminal announcement is a typed claim loss")
+        .into_applied()
+        .expect_err("supersession must release the predecessor claim");
+    assert!(stale.claim_owner.is_none());
+    assert!(stale.lease_expires_at.is_none());
+    assert!(stale.announced_at.is_none());
+
+    let successor_worker = WorkerId::from_v7();
+    let successor_claim = reports
+        .claim_fact_announcement(successor_worker, 600)
+        .await
+        .expect("claim successor announcement")
+        .expect("published successor announcement must remain claimable");
+    assert_eq!(successor_claim.recommendation_report_id, successor.report);
+    let acknowledged = reports
+        .acknowledge_fact_announcement(&successor.report, successor_worker)
+        .await
+        .expect("acknowledge successor announcement")
+        .into_applied()
+        .expect("successor announcement claim must remain held");
+    assert!(acknowledged.announced_at.is_some());
+}
+
 pub async fn cancelled_delivery_returns_lost() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -1109,6 +1167,10 @@ pub async fn partial_fill_splits_locked() {
         .expect("create");
 
     let partial_cost = Usd::new(dec!(30)); // 50 shares * 0.6
+    let mut partial_reconciliation = reconciliation_row(&order.execution_order_id, &intent_id);
+    partial_reconciliation.result = ReconciliationResult::PartiallyFilled;
+    partial_reconciliation.venue_filled_shares = Some(Shares::new(dec!(50)));
+    partial_reconciliation.venue_avg_price = Some(Price::new(dec!(0.6)));
     submission
         .record_submission_result(
             &order.execution_order_id,
@@ -1140,7 +1202,7 @@ pub async fn partial_fill_splits_locked() {
                     filled_at: Utc::now(),
                     source: AccountSource::Polymarket,
                 }),
-                reconciliation: Some(reconciliation_row(&order.execution_order_id, &intent_id)),
+                reconciliation: Some(partial_reconciliation),
             },
         )
         .await
@@ -1232,7 +1294,10 @@ pub async fn full_fill_writes_position() {
                     spent_usd: Usd::new(NOTIONAL),
                 },
                 fill: Some(position_fill(&ids, &intent_id)),
-                reconciliation: Some(reconciliation_row(&order.execution_order_id, &intent_id)),
+                reconciliation: Some(filled_reconciliation_row(
+                    &order.execution_order_id,
+                    &intent_id,
+                )),
             },
         )
         .await
@@ -2130,7 +2195,7 @@ pub async fn reconcile_unresolvable_impairs_ambiguous() {
             .has_unresolvable()
             .await
             .expect("has_unresolvable"),
-        "an unresolvable verdict must block auto execution",
+        "an unresolvable verdict must block policy-automatic execution",
     );
 }
 
@@ -2207,6 +2272,52 @@ pub async fn reconcile_partial_writes_position() {
     assert_eq!(position.shares, Shares::new(PARTIAL_SHARES));
 }
 
+pub async fn reconcile_fill_preserves_exits() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    let (intent_id, _) = ambiguous_order(&db, &submission, &ids).await;
+    let repository = PgStrategyPositionLotRepository::new(db.clone());
+    let initial = position_fill(&ids, &intent_id);
+    repository
+        .apply_fill(initial.clone())
+        .await
+        .expect("initial entry fill");
+    repository
+        .apply_exit(
+            &intent_id,
+            PositionExit {
+                shares: Shares::new(dec!(60)),
+                avg_price: Price::new(dec!(0.7)),
+                proceeds_usd: Usd::new(dec!(42)),
+                realized_pnl_usd: Usd::new(dec!(6)),
+                exited_at: Utc::now(),
+                reason: ExitReason::PartialExit,
+            },
+        )
+        .await
+        .expect("intervening exit");
+
+    let mut cumulative = cumulative_position_fill(&ids, &intent_id);
+    cumulative.cumulative_shares = Shares::new(dec!(110));
+    cumulative.cumulative_cost_usd = Usd::new(dec!(66));
+    let reconciled = PgStrategyPositionLotRepository::reconcile_fill(
+        &db,
+        PositionFillReconciliation {
+            cumulative,
+            shares_delta: Shares::new(dec!(10)),
+            cost_delta_usd: Usd::new(dec!(6)),
+        },
+    )
+    .await
+    .expect("incremental entry reconciliation");
+
+    assert_eq!(reconciled.shares, Shares::new(dec!(50)));
+    assert_eq!(reconciled.cost_usd, Usd::new(dec!(30)));
+    assert_eq!(reconciled.state, PositionLedgerState::Open);
+}
+
 pub async fn reconcile_correction_is_idempotent() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -2266,6 +2377,34 @@ pub async fn reconcile_correction_is_idempotent() {
         .await
         .expect_err("a terminal replay with a different result must fail closed");
     assert!(matches!(error, StorageError::StateConflict { .. }));
+}
+
+pub async fn reconcile_concurrent_is_idempotent() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let setup_submission = PgExecutionSubmissionRepository::new(db.clone());
+    let (intent_id, order_id) = ambiguous_order(&db, &setup_submission, &ids).await;
+    let mut write = filled_write();
+    write.cumulative_fill = Some(cumulative_position_fill(&ids, &intent_id));
+    let replay = write.clone();
+    let first = PgExecutionSubmissionRepository::new(db.clone());
+    let second = PgExecutionSubmissionRepository::new(db.clone());
+
+    let (first_result, second_result) = tokio::join!(
+        first.apply_reconciliation(&order_id, write),
+        second.apply_reconciliation(&order_id, replay),
+    );
+    first_result.expect("first concurrent reconciliation");
+    second_result.expect("idempotent concurrent reconciliation");
+
+    let position = PgStrategyPositionLotRepository::new(db)
+        .find_by_intent(&intent_id)
+        .await
+        .expect("position")
+        .expect("position row");
+    assert_eq!(position.shares, Shares::new(dec!(100)));
+    assert_eq!(position.cost_usd, Usd::new(NOTIONAL));
 }
 
 pub async fn operator_resolve_impaired_capital() {
@@ -2352,15 +2491,24 @@ fn new_execution_order(intent_id: &OrderIntentId, ids: &TxnIds) -> NewExecutionO
         price: Price::new(dec!(0.6)),
         shares: Shares::new(dec!(100)),
         cost_usd: Usd::new(NOTIONAL),
-        prepared_order_json: prepared_order(
-            TokenId::new("token-1"),
-            Side::Buy,
-            OrderType::Gtc,
-            VenueOrderAmount::Shares(Shares::new(dec!(100))),
-            Usd::ZERO,
-            Shares::new(dec!(100)),
-            Price::new(dec!(0.6)),
-        ),
+        prepared_order_json: PreparedOrderFixture {
+            market_id: MarketId::new(&ids.market),
+            token_id: TokenId::new("token-1"),
+            side: Side::Buy,
+            order_type: OrderType::Gtc,
+            venue_amount: VenueOrderAmount::Shares(Shares::new(dec!(100))),
+            expected_fee: Usd::ZERO,
+            expected_filled_shares: Shares::new(dec!(100)),
+            limit_price: Price::new(dec!(0.6)),
+            order_rules: PolymarketOrderRules::new(TickSize::Hundredth, Shares::ONE)
+                .expect("fixture order rules"),
+            book_hash: content_hash('b'),
+            clob_market_info_payload_hash: content_hash('c'),
+            prepared_at: Utc::now(),
+            valid_until: Utc::now() + Duration::hours(1),
+        }
+        .build()
+        .expect("canonical entry fixture order"),
         venue_order_id: None,
         venue_status: None,
         state: ExecutionOrderState::Submitted,
@@ -2432,6 +2580,17 @@ fn reconciliation_row(
         resolved_by: None,
         resolved_at: None,
     }
+}
+
+fn filled_reconciliation_row(
+    execution_order_id: &ExecutionOrderId,
+    intent_id: &OrderIntentId,
+) -> NewReconciliation {
+    let mut reconciliation = reconciliation_row(execution_order_id, intent_id);
+    reconciliation.result = ReconciliationResult::Filled;
+    reconciliation.venue_filled_shares = Some(Shares::new(dec!(100)));
+    reconciliation.venue_avg_price = Some(Price::new(dec!(0.6)));
+    reconciliation
 }
 
 // ── Fixture chain (self-contained; mirrors pg_account_capital) ────────────────
@@ -2955,7 +3114,10 @@ async fn fill_entry_lot(
                     spent_usd: Usd::new(NOTIONAL),
                 },
                 fill: Some(position_fill(ids, intent_id)),
-                reconciliation: Some(reconciliation_row(&order.execution_order_id, intent_id)),
+                reconciliation: Some(filled_reconciliation_row(
+                    &order.execution_order_id,
+                    intent_id,
+                )),
             },
         )
         .await
@@ -3000,15 +3162,24 @@ fn exit_order(
         price: Price::new(price),
         shares: Shares::new(shares),
         cost_usd: Shares::new(shares) * Price::new(price),
-        prepared_order_json: prepared_order(
-            TokenId::new("token-1"),
-            Side::Sell,
-            OrderType::Gtc,
-            VenueOrderAmount::Shares(Shares::new(shares)),
-            Usd::ZERO,
-            Shares::new(shares),
-            Price::new(price),
-        ),
+        prepared_order_json: PreparedOrderFixture {
+            market_id: MarketId::new(&ids.market),
+            token_id: TokenId::new("token-1"),
+            side: Side::Sell,
+            order_type: OrderType::Gtc,
+            venue_amount: VenueOrderAmount::Shares(Shares::new(shares)),
+            expected_fee: Usd::ZERO,
+            expected_filled_shares: Shares::new(shares),
+            limit_price: Price::new(price),
+            order_rules: PolymarketOrderRules::new(TickSize::Hundredth, Shares::ONE)
+                .expect("fixture order rules"),
+            book_hash: content_hash('b'),
+            clob_market_info_payload_hash: content_hash('c'),
+            prepared_at: Utc::now(),
+            valid_until: Utc::now() + Duration::hours(1),
+        }
+        .build()
+        .expect("canonical exit fixture order"),
         venue_order_id: None,
         venue_status: None,
         state: ExecutionOrderState::Submitted,

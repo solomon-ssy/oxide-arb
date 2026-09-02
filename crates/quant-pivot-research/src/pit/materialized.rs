@@ -201,9 +201,9 @@ impl PointInTimeSnapshotSource for MaterializedPitEngine {
             },
             boundary,
         )?;
-        resolved.context.fee_schedule = self
-            .visible_market_info(market_id, boundary)
-            .map(ClobMarketInfoVersion::fee_schedule);
+        if let Some(market_info) = self.visible_market_info(market_id, boundary) {
+            resolved.apply_market_info(market_info)?;
+        }
         Ok(Some(resolved))
     }
 }
@@ -360,7 +360,7 @@ mod tests {
                 },
             ],
             tick_size: TickSize::Hundredth,
-            minimum_order_size: Decimal::ONE,
+            minimum_order_size: Shares::ONE,
             neg_risk: false,
             taker_order_delay_enabled: false,
             minimum_order_age_secs: None,
@@ -606,6 +606,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn market_rules_reject_mismatch() {
+        let market_id = MarketId::new("rule-mismatch");
+        let at = Utc.timestamp_millis_opt(1_000).single().expect("ts");
+        let mut info = market_info(&market_id, at, at, Decimal::ZERO);
+        info.tick_size = TickSize::HalfCent;
+        let engine = MaterializedPitEngine::new(
+            HashMap::new(),
+            catalog_window(&market_id, &[(at, MarketStatus::Active)]),
+            vec![info],
+            Duration::seconds(60),
+        )
+        .expect("engine");
+        let boundary = DecisionClock::new(0).boundary(at).expect("boundary");
+
+        let error = engine
+            .market_snapshot_at(&market_id, &boundary)
+            .await
+            .expect_err("catalog/CLOB tick drift must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("catalog/CLOB order-rule mismatch")
+        );
+    }
+
+    #[tokio::test]
     async fn market_fee_resolves_bitemporally() {
         let market_id = MarketId::new("fee-market");
         let other_market_id = MarketId::new("other-market");
@@ -651,15 +677,17 @@ mod tests {
         let before_delayed_available = DecisionClock::new(0)
             .boundary(Utc.timestamp_millis_opt(6_000).single().expect("boundary"))
             .expect("boundary");
-        let first = engine
+        let first_context = engine
             .market_snapshot_at(&market_id, &before_delayed_available)
             .await
             .expect("market")
             .expect("snapshot")
-            .context
-            .fee_schedule
-            .expect("fee schedule");
+            .context;
+        let first = first_context.fee_schedule.expect("fee schedule");
         assert_eq!(first.platform_rate, Decimal::new(1, 2));
+        let first_rules = first_context.order_rules.expect("order rules");
+        assert_eq!(first_rules.tick_size, TickSize::Hundredth);
+        assert_eq!(first_rules.minimum_order_size, Shares::ONE);
 
         let after_delayed_available = DecisionClock::new(0)
             .boundary(Utc.timestamp_millis_opt(7_500).single().expect("boundary"))

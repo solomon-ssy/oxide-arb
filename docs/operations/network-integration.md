@@ -1,64 +1,47 @@
-# Network integration tests
+# Network integration verification
 
-Live tests for `quant-pivot-api` require outbound HTTPS/WSS to Polymarket and (optionally) Polygon mainnet RPC. They are **ignored by default** so `cargo test` stays deterministic in CI.
+The current `quant-pivot-api` tests are deterministic client, protocol, retry, and
+credential-file contracts. The crate has no ignored live-authentication, FOK, or
+WebSocket probe. Do not interpret `--ignored` as a command for live-venue acceptance.
 
-## Run all live tests
-
-```bash
-export QUANT_PIVOT_TEST_POLYGON_RPC_URL="https://polygon-rpc.com"
-export QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID="0x..."   # see CTF section below
-
-cargo test -p quant-pivot-api -- --ignored --test-threads=1
-```
-
-Optional overrides:
-
-| Variable | Purpose |
-|----------|---------|
-| `QUANT_PIVOT_TEST_TOKEN_ID` | CLOB decimal token id for WS book test (skips Gamma discovery) |
-| `QUANT_PIVOT_TEST_POLYGON_RPC_URL` | Alias for Polygon RPC if you prefer not to use `QUANT_PIVOT__*` |
-| `QUANT_PIVOT_TEST_PRIVATE_KEY_FILE` | 0400/0600 non-symlink credential file for the ignored CLOB auth/FOK probe |
-
-## Polygon RPC (Alchemy)
-
-**Yes — Alchemy is supported.** Use a Polygon **Mainnet** HTTPS endpoint:
-
-```text
-https://polygon-mainnet.g.alchemy.com/v2/<API_KEY>
-```
-
-1. [Alchemy Dashboard](https://dashboard.alchemy.com/) → Create app → Chain: **Polygon** → Network: **Mainnet**
-2. Provision the full authenticated URL as a protected credential when exercising
-   account-dependent flows. Public deterministic CTF reads may use the public endpoint:
+## Deterministic contracts
 
 ```bash
-export QUANT_PIVOT_TEST_POLYGON_RPC_URL="https://polygon-rpc.com"
+cargo test -p quant-pivot-api
+cargo test --workspace
 ```
 
-Do not place an Alchemy/API key in shell history, TOML, documentation, or a process
-environment. Live-account acceptance uses the deployment credential-file path.
+Provider contracts use owned loopback fixtures. The workspace also runs system
+tests with disposable PostgreSQL, Redis, ClickHouse, object storage, and the real
+production binary. Their success proves the exercised implementation contracts,
+not connectivity to a current production deployment or permission to move money.
 
-No contract allowlisting is required for the view calls used by `CtfOracleSource` (`payoutNumerators`, `payoutDenominator` on `CTF_ADDRESS`).
+The two ignored `vertical_readiness_evidence` tests in `quant-pivot-system-tests`
+require explicitly pinned evidence artifacts and current deployment inputs.
+They are readiness evidence generators, not live-money canaries; running them
+does not grant Operational Activation.
 
-## CTF oracle fixture (`QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID`)
+## Implementation Closure and Operational Activation
 
-This must be a **condition_id** (66-char `0x` + 32 bytes), **not** a CLOB decimal `token_id`.
+The [Phase 12 acceptance contract](../plans/quant-pivot/phase-12/12.0-execution-authority-account-recovery-fast-feedback.md#9-验收)
+separately requires the retained disposable feedback-closure rehearsal, two fresh
+UI runs, and the documented static/test gates. Default workspace test success does
+not replace those independent results. Recover current status only from the
+[implementation ledger](../plans/quant-pivot/phase-12/12.1-implementation-ledger.md).
 
-How to obtain one:
-
-1. **Gamma API** — fetch a closed market: `GET https://gamma-api.polymarket.com/markets?closed=true&limit=1` and read `conditionId`.
-2. **Polymarket UI** — open a settled market; condition id appears in network payloads to Gamma/CLOB.
-3. **Polygonscan** — search interactions with [CTF contract](https://polygonscan.com/address/0x4D97DCd97eC945f40cF65F87097ACe5EA0476045) after resolution.
-
-Verify on-chain: `payoutDenominator(conditionId) > 0`.
-
-## WebSocket book test
-
-`tests/integration/ws_book.rs` subscribes via `ClobWsManager` and waits for a `BookSnapshot` with depth. Token id is discovered from Gamma unless `QUANT_PIVOT_TEST_TOKEN_ID` is set.
+Real venue orders, chain approval/redeem, relayer requests, and governed canaries
+belong to the independent [Operational Activation checklist](./runbook.md).
+They require authorization for the exact account, route, action, amount, and
+deployment digest, together with the specified preflight and recovery evidence.
+Neither a local test result nor a generic ignored-test command authorizes them.
 
 ## CI
 
-The `network-integration` job in `.github/workflows/ci.yml` runs ignored tests on `main` when repository secrets are configured (`POLYGON_RPC_URL`, `RESOLVED_CONDITION_ID`).
+The current [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) has no
+credentialed `network-integration` job. Deterministic provider contracts run in
+the Rust unit/contract partition, and disposable infrastructure contracts run in
+the system partition. Claim only the exact commands and evidence that actually
+completed; do not report these partitions as production or real-money validation.
 
 ## Related
 

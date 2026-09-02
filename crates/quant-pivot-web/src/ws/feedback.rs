@@ -403,7 +403,7 @@ mod tests {
         let outbox = Arc::new(FakeOutbox::new(vec![entry]));
         let (registry, hub, shutdown) = test_registry();
         let recovery = recovery_metric();
-        let hub_task = tokio::spawn(hub.run(shutdown.clone()));
+        let hub_task = tokio::spawn(hub.run(shutdown.clone(), shutdown.clone()));
         let (outbound, mut receiver) = mpsc::channel(8);
         let session_id = registry
             .register(SessionRegistration {
@@ -459,7 +459,7 @@ mod tests {
         let outbox = Arc::new(FakeOutbox::new(vec![outbox_entry(9, "")]));
         let (registry, hub, shutdown) = test_registry();
         let recovery = recovery_metric();
-        let hub_task = tokio::spawn(hub.run(shutdown.clone()));
+        let hub_task = tokio::spawn(hub.run(shutdown.clone(), shutdown.clone()));
         assert!(
             FeedbackOutboxWorker::try_new(
                 Arc::clone(&outbox) as Arc<dyn FeedbackOutboxRepository>,

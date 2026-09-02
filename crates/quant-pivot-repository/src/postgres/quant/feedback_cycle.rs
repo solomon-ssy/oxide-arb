@@ -1270,6 +1270,24 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             .transpose()
     }
 
+    async fn find_cycles(
+        &self,
+        cycle_ids: &[FeedbackCycleId],
+    ) -> Result<Vec<FeedbackCycleInfo>, StorageError> {
+        if cycle_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        CycleEntity::find()
+            .filter(CycleColumn::FeedbackCycleId.is_in(cycle_ids.iter().copied()))
+            .order_by_asc(CycleColumn::FeedbackCycleId)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(Self::cycle_info)
+            .collect()
+    }
+
     async fn list_trigger_events(
         &self,
         cycle_id: &FeedbackCycleId,
@@ -1801,6 +1819,26 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
     ) -> Result<Vec<FeedbackStageEventInfo>, StorageError> {
         StageEntity::find()
             .filter(StageColumn::FeedbackCycleId.eq(*cycle_id))
+            .order_by_asc(StageColumn::EventSequence)
+            .order_by_asc(StageColumn::FeedbackStageEventId)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(Self::stage_info)
+            .collect()
+    }
+
+    async fn find_stage_events(
+        &self,
+        cycle_ids: &[FeedbackCycleId],
+    ) -> Result<Vec<FeedbackStageEventInfo>, StorageError> {
+        if cycle_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        StageEntity::find()
+            .filter(StageColumn::FeedbackCycleId.is_in(cycle_ids.iter().copied()))
+            .order_by_asc(StageColumn::FeedbackCycleId)
             .order_by_asc(StageColumn::EventSequence)
             .order_by_asc(StageColumn::FeedbackStageEventId)
             .all(&self.db)

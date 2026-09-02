@@ -13,6 +13,7 @@ use crate::{
 pub struct CryptoPriceReportRow {
     pub source_id: DomainSourceId,
     pub instrument_key: DomainInstrumentKey,
+    pub gap_generation: u64,
     pub source_sequence: u64,
     pub price: ChDecimal64,
     pub quantity: Option<ChDecimal64>,

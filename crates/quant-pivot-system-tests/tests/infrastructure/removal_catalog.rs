@@ -1,12 +1,14 @@
-//! Canonical catalog probes for objects removed by clean-break migrations.
+//! Canonical catalog probes for objects excluded from fresh schemas.
 
 pub const CLICKHOUSE_REMOVED_TABLES_QUERY: &str = "\
     SELECT count() FROM system.tables \
     WHERE database = currentDatabase() \
-      AND name IN ( \
+      AND (name IN ( \
         'quant_recommendation_attribution_event', \
         'quant_book_l2_event', \
-        'quant_book_l2_checkpoint')";
+        'quant_book_l2_checkpoint', \
+        'quant_pivot_schema_migration') \
+        OR startsWith(name, 'quant_pivot_schema_migration_claim_'))";
 
 pub const POSTGRES_REMOVED_OBJECTS_QUERY: &str = "\
     SELECT 'relation' AS object_kind, c.relname AS object_name \

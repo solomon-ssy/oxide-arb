@@ -50,6 +50,15 @@ impl RateLimiter {
             ))),
         );
 
+        // GET /clob-markets/{condition_id}: 10 requests/second. Final order
+        // preparation uses this full-payload identity in addition to `/book`.
+        limiters.insert(
+            "GET /clob-markets/{condition_id}",
+            Arc::new(GovLimiter::direct(Quota::per_second(
+                NonZeroU32::new(10).expect("nonzero"),
+            ))),
+        );
+
         // GET /orders: 10 requests/second
         limiters.insert(
             "GET /orders",
@@ -58,7 +67,8 @@ impl RateLimiter {
             ))),
         );
 
-        // GET /balance-allowance: 5 requests/second (reconciliation only, not hot path)
+        // GET /balance-allowance: 5 requests/second for admission, final order
+        // preparation, account snapshots, and reconciliation.
         limiters.insert(
             "GET /balance-allowance",
             Arc::new(GovLimiter::direct(Quota::per_second(
@@ -100,5 +110,7 @@ mod tests {
         let rl = RateLimiter::new();
         rl.acquire("POST /order").await;
         rl.acquire("GET /book").await;
+        rl.acquire("GET /clob-markets/{condition_id}").await;
+        rl.acquire("GET /balance-allowance").await;
     }
 }

@@ -18,7 +18,7 @@
 //! alone is sufficient evidence the check applies; no separate oracle lookup
 //! is needed here.
 
-use std::{collections::HashMap, hash::BuildHasher};
+use std::{borrow::Borrow, collections::HashMap, hash::BuildHasher};
 
 use quant_pivot_models::{
     domain::quant::NewBasisAlert,
@@ -36,11 +36,15 @@ use rust_decimal::Decimal;
 /// Scan `accepted` vectors for a basis exceedance and build the alert rows to
 /// persist. Pure and side-effect-free — the caller persists + alerts.
 #[must_use]
-pub fn detect_basis_alerts<S: BuildHasher>(
+pub fn detect_basis_alerts<S, V>(
     accepted: &[FeatureVector],
-    domain_inputs: &HashMap<MarketId, DomainSliceInputs, S>,
+    domain_inputs: &HashMap<MarketId, V, S>,
     domain: &DomainConfig,
-) -> Vec<NewBasisAlert> {
+) -> Vec<NewBasisAlert>
+where
+    S: BuildHasher,
+    V: Borrow<DomainSliceInputs>,
+{
     let threshold_bps = Bps::new(Decimal::from(domain.crypto.cross_check.max_basis_bps));
     accepted
         .iter()
@@ -51,7 +55,7 @@ pub fn detect_basis_alerts<S: BuildHasher>(
             if basis.abs() <= threshold_bps.inner() {
                 return None;
             }
-            let inputs = domain_inputs.get(&vector.market_id)?;
+            let inputs = domain_inputs.get(&vector.market_id)?.borrow();
             let oracle_key = oracle_instrument(&inputs.binding)?;
             let feature = source_binding(&inputs.binding, LinkageSourceRole::Feature)?;
             Some(NewBasisAlert {
@@ -259,7 +263,8 @@ mod tests {
     fn missing_domain_returns_error() {
         let domain = DomainConfig::default();
         let vec = vector(Some(FeatureValue::Bps(dec!(999))));
-        let alerts = detect_basis_alerts(&[vec], &HashMap::new(), &domain);
+        let domain_inputs = HashMap::<MarketId, DomainSliceInputs>::new();
+        let alerts = detect_basis_alerts(&[vec], &domain_inputs, &domain);
         assert!(alerts.is_empty());
     }
 

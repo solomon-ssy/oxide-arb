@@ -1,7 +1,6 @@
 //! Append-only `clob_market_info_version` entity.
 
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 
 use super::market;
@@ -9,7 +8,7 @@ use crate::{
     enums::common::TickSize,
     types::{
         ClobFeeDetails, ClobMarketInfoVersionId, ClobTokenSet, ContentHash, ExternalJsonDocument,
-        MarketId,
+        MarketId, Shares,
     },
 };
 
@@ -23,7 +22,7 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub tokens_json: ClobTokenSet,
     pub tick_size: TickSize,
-    pub minimum_order_size: Decimal,
+    pub minimum_order_size: Shares,
     pub neg_risk: bool,
     pub taker_order_delay_enabled: bool,
     pub minimum_order_age_secs: Option<i64>,

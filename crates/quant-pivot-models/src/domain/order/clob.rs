@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     enums::{
-        common::{OrderType, Side},
+        common::{OrderType, Side, TickSize},
         execution::VenueOrderStatus,
     },
     types::{
-        EvmTransactionHash, MarketId, OrderId, Price, Shares, TokenId, Usd, VenueOrderAmount,
-        VenueTradeId,
+        ContentHash, EvmTransactionHash, MarketId, OrderId, Price, Shares, TokenId, Usd,
+        VenueOrderAmount, VenueTradeId,
     },
 };
 
@@ -19,6 +19,10 @@ use crate::{
 pub struct OrderRequest {
     pub market_id: MarketId,
     pub token_id: TokenId,
+    pub expected_tick_size: TickSize,
+    pub expected_minimum_order_size: Shares,
+    pub expected_neg_risk: bool,
+    pub expected_clob_market_info_payload_hash: ContentHash,
     pub side: Side,
     pub amount: VenueOrderAmount,
     /// Exact fee frozen by final execution admission for this venue order.

@@ -1,6 +1,79 @@
 //! API layer errors — HTTP, CLOB, Gamma, and SDK interaction failures.
 
+use std::fmt::{Display, Formatter, Result as FmtResult};
+
 use thiserror::Error;
+
+/// A valid CLOB funding snapshot that cannot authorize the requested order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClobFundingDeficit {
+    MissingAllowance,
+    InsufficientBalance,
+    InsufficientAllowance,
+}
+
+impl Display for ClobFundingDeficit {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        formatter.write_str(match self {
+            Self::MissingAllowance => "missing_allowance",
+            Self::InsufficientBalance => "insufficient_balance",
+            Self::InsufficientAllowance => "insufficient_allowance",
+        })
+    }
+}
+
+/// Typed failures while validating live CLOB order metadata, funding, and the
+/// exact unsigned V2 payload. All variants occur before a money-changing POST.
+#[derive(Debug, Error)]
+pub enum ClobOrderError {
+    #[error("malformed CLOB {context} snapshot: {detail}")]
+    MalformedSnapshot {
+        context: &'static str,
+        detail: String,
+    },
+
+    #[error("CLOB {field} is not a canonical uint256 `{value}`: {detail}")]
+    MalformedUint256 {
+        field: &'static str,
+        value: String,
+        detail: String,
+    },
+
+    #[error("CLOB {field} uint256 `{value}` exceeds the human-scale decimal domain")]
+    HumanScaleOverflow { field: &'static str, value: String },
+
+    #[error("CLOB order identity mismatch for {field}: expected `{expected}`, got `{actual}`")]
+    IdentityMismatch {
+        field: &'static str,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("CLOB V2 exchange spender is unavailable for chain {chain_id}, neg_risk={neg_risk}")]
+    SpenderUnavailable { chain_id: u64, neg_risk: bool },
+
+    #[error("CLOB order rules rejected the request: {detail}")]
+    RuleViolation { detail: String },
+
+    #[error(
+        "CLOB funding unavailable ({deficit}) for {asset} spender {spender}: required={required}, balance={balance}, allowance={allowance}"
+    )]
+    FundingUnavailable {
+        deficit: ClobFundingDeficit,
+        asset: &'static str,
+        spender: String,
+        required: String,
+        balance: String,
+        allowance: String,
+    },
+
+    #[error("unsigned CLOB V2 payload mismatch for {field}: expected `{expected}`, got `{actual}`")]
+    PayloadMismatch {
+        field: &'static str,
+        expected: String,
+        actual: String,
+    },
+}
 
 /// Errors from Polymarket API interactions (CLOB REST, Gamma, SDK).
 #[derive(Debug, Error)]
@@ -63,6 +136,9 @@ pub enum ApiError {
 
     #[error("SDK error: {0}")]
     Sdk(String),
+
+    #[error(transparent)]
+    ClobOrder(#[from] ClobOrderError),
 }
 
 impl ApiError {
@@ -74,7 +150,10 @@ impl ApiError {
             | Self::UpstreamPayload { retryable, .. } => *retryable,
             Self::RateLimited { .. } | Self::Timeout { .. } => true,
             Self::Gamma { status, .. } => *status == 0 || *status == 429 || *status >= 500,
-            Self::ClockSkew { .. } | Self::Deserialize { .. } | Self::Sdk(_) => false,
+            Self::ClockSkew { .. }
+            | Self::Deserialize { .. }
+            | Self::Sdk(_)
+            | Self::ClobOrder(_) => false,
         }
     }
 

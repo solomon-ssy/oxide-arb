@@ -12,8 +12,8 @@ use quant_pivot_models::{
         pagination::{PageWindow, Paginated},
         quant::{
             CalibrationArtifactInfo, CalibrationArtifactPayload, ModelRunInfo,
-            ModelScoreCalibrationCommit, ModelScoreCalibrationCommitOutcome,
-            NewCalibrationArtifact,
+            ModelScoreCalibrationCommitOutcome, NewCalibrationArtifact,
+            VerifiedModelScoreCalibrationCommit,
         },
     },
     entities::{
@@ -52,6 +52,30 @@ use crate::{
 /// Postgres-backed unified calibration-artifact ledger repository.
 pub struct PgCalibrationArtifactRepository {
     db: DatabaseConnection,
+}
+
+struct ModelScoreCommitIdentity {
+    kind: CalibrationKind,
+    payload_kind: CalibrationKind,
+    content_hash: ContentHash,
+    fit_window_start: DateTime<Utc>,
+    fit_window_end: DateTime<Utc>,
+    calibration_split_hash: ContentHash,
+    sample_count: i64,
+}
+
+impl From<&NewCalibrationArtifact> for ModelScoreCommitIdentity {
+    fn from(artifact: &NewCalibrationArtifact) -> Self {
+        Self {
+            kind: artifact.kind,
+            payload_kind: artifact.payload.kind(),
+            content_hash: artifact.content_hash,
+            fit_window_start: artifact.fit_window_start,
+            fit_window_end: artifact.fit_window_end,
+            calibration_split_hash: artifact.calibration_split_hash,
+            sample_count: artifact.sample_count,
+        }
+    }
 }
 
 impl PgCalibrationArtifactRepository {
@@ -160,23 +184,17 @@ impl PgCalibrationArtifactRepository {
         Ok(*calibration.dataset_hash)
     }
 
-    async fn verify_existing_model_score<C>(
-        &self,
-        db: &C,
+    fn verify_existing_identity(
         stored: &CalibrationArtifactInfo,
-        requested: &NewCalibrationArtifact,
-    ) -> Result<(), StorageError>
-    where
-        C: ConnectionTrait,
-    {
-        let payload = stored.verify_model_score().map_err(invariant)?;
+        requested: &ModelScoreCommitIdentity,
+    ) -> Result<(), StorageError> {
         if stored.kind != requested.kind
+            || stored.payload.kind() != requested.payload_kind
             || stored.content_hash != requested.content_hash
             || stored.fit_window_start != requested.fit_window_start
             || stored.fit_window_end != requested.fit_window_end
             || stored.calibration_split_hash != requested.calibration_split_hash
             || stored.sample_count != requested.sample_count
-            || stored.payload != requested.payload
         {
             return Err(StorageError::state_conflict(
                 QUANT_CALIBRATION_ARTIFACT,
@@ -184,23 +202,16 @@ impl PgCalibrationArtifactRepository {
                 "content-addressed calibration collision is not an exact immutable replay",
             ));
         }
-        Box::pin(self.validate_model_score_lineage(
-            db,
-            payload,
-            stored.fit_window_start,
-            stored.fit_window_end,
-            stored.sample_count,
-        ))
-        .await
-        .map(drop)
+        Ok(())
     }
 
     fn validate_run(
         run: &ModelRunModel,
-        commit: &ModelScoreCalibrationCommit,
+        commit: &VerifiedModelScoreCalibrationCommit,
         payload: &ModelScoreCalibrationPayload,
         dataset_hash: ContentHash,
     ) -> Result<bool, StorageError> {
+        let artifact = commit.artifact();
         let exact_subject = run.run_kind == ModelRunKind::Calibration
             && run.model_version_id == Some(payload.fit_contract.model.model_version_id)
             && run.decision_policy_snapshot_id
@@ -209,13 +220,13 @@ impl PgCalibrationArtifactRepository {
                     .policy_snapshot
                     .decision_policy_snapshot_id
             && run.market_selection_id.is_none()
-            && run.window_start == commit.artifact.fit_window_start
-            && run.window_end == commit.artifact.fit_window_end
+            && run.window_start == artifact.fit_window_start
+            && run.window_end == artifact.fit_window_end
             && run.input_hash == dataset_hash;
         if !exact_subject {
             return Err(StorageError::state_conflict(
                 QUANT_MODEL_RUN,
-                Some(&commit.model_run_id),
+                Some(&commit.model_run_id()),
                 "Calibration run differs from the canonical artifact subject",
             ));
         }
@@ -229,7 +240,7 @@ impl PgCalibrationArtifactRepository {
                 Ok(false)
             }
             ModelRunStatus::Succeeded
-                if run.output_hash == Some(commit.artifact.content_hash)
+                if run.output_hash == Some(artifact.content_hash)
                     && run.error_code.is_none()
                     && run.error_message.is_none()
                     && run.finished_at.is_some()
@@ -241,7 +252,7 @@ impl PgCalibrationArtifactRepository {
             }
             _ => Err(StorageError::state_conflict(
                 QUANT_MODEL_RUN,
-                Some(&commit.model_run_id),
+                Some(&commit.model_run_id()),
                 "Calibration run is neither Running nor an exact Succeeded replay",
             )),
         }
@@ -302,30 +313,32 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
 
     async fn commit_model_score(
         &self,
-        commit: ModelScoreCalibrationCommit,
+        commit: VerifiedModelScoreCalibrationCommit,
     ) -> Result<ModelScoreCalibrationCommitOutcome, StorageError> {
-        let payload = commit.artifact.verify_model_score().map_err(invariant)?;
+        let payload = commit.payload().ok_or_else(|| {
+            invariant("verified model-score commit lost its payload discriminator")
+        })?;
+        let artifact = commit.artifact();
+        let identity = ModelScoreCommitIdentity::from(artifact);
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let run = ModelRunEntity::find_by_id(commit.model_run_id)
+        let run = ModelRunEntity::find_by_id(commit.model_run_id())
             .lock_exclusive()
             .one(&transaction)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| StorageError::not_found(QUANT_MODEL_RUN, commit.model_run_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_MODEL_RUN, commit.model_run_id()))?;
         let dataset_hash = Box::pin(self.validate_model_score_lineage(
             &transaction,
             payload,
-            commit.artifact.fit_window_start,
-            commit.artifact.fit_window_end,
-            commit.artifact.sample_count,
+            artifact.fit_window_start,
+            artifact.fit_window_end,
+            artifact.sample_count,
         ))
         .await?;
         let already_succeeded = Self::validate_run(&run, &commit, payload, dataset_hash)?;
         if already_succeeded {
-            let stored =
-                Self::load_by_content_hash(&transaction, commit.artifact.content_hash).await?;
-            Box::pin(self.verify_existing_model_score(&transaction, &stored, &commit.artifact))
-                .await?;
+            let stored = Self::load_by_content_hash(&transaction, artifact.content_hash).await?;
+            Self::verify_existing_identity(&stored, &identity)?;
             let model_run = ModelRunInfo::from(run);
             transaction.commit().await.map_err(StorageError::from)?;
             return Ok(ModelScoreCalibrationCommitOutcome::ExistingExact {
@@ -334,7 +347,8 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
             });
         }
 
-        let insert = Entity::insert(commit.artifact.clone().into_active_model())
+        let (_, artifact) = commit.into_parts();
+        let insert = Entity::insert(artifact.into_active_model())
             .on_conflict(OnConflict::new().do_nothing().to_owned())
             .try_insert()
             .exec_without_returning(&transaction)
@@ -354,8 +368,8 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
                 ));
             }
         };
-        let stored = Self::load_by_content_hash(&transaction, commit.artifact.content_hash).await?;
-        Box::pin(self.verify_existing_model_score(&transaction, &stored, &commit.artifact)).await?;
+        let stored = Self::load_by_content_hash(&transaction, identity.content_hash).await?;
+        Self::verify_existing_identity(&stored, &identity)?;
 
         let finished_at = primitives::statement_timestamp(&transaction).await?;
         let mut terminal: ModelRunActiveModel = run.into_active_model();

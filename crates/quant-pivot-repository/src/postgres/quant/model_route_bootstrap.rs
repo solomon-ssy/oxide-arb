@@ -171,7 +171,7 @@ impl PgModelRouteBootstrapRepository {
             || runtime.revision != preflight.expected_runtime_revision()
         {
             return Err(Self::conflict(
-                "runtime mode or runtime-control revision changed before bootstrap",
+                "entry-authorization policy or runtime-control revision changed before bootstrap",
             ));
         }
         Ok(())

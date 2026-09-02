@@ -24,7 +24,7 @@ use quant_pivot_models::{
 /// middleware, so they take no log row).
 #[async_trait::async_trait]
 pub trait OrderIntentRepository: Send + Sync {
-    /// Create an intent (`PendingApproval` or `ApprovedByPolicy`) and reserve its
+    /// Create an intent (`PendingAuthorization` or `Authorized`) and reserve its
     /// capital (`Allocated`) atomically.
     async fn create_with_allocation(
         &self,
@@ -32,7 +32,7 @@ pub trait OrderIntentRepository: Send + Sync {
         allocation: NewCapitalAllocation,
     ) -> Result<OrderIntentInfo, StorageError>;
 
-    /// Approve a `PendingApproval` intent. Re-reads recommendation, report,
+    /// Approve a `PendingAuthorization` intent. Re-reads recommendation, report,
     /// runtime config, and kill-switch state **inside the same transaction**
     /// (after row lock) before transitioning. When `entry_override` /
     /// `allocated_override` are present the entry is narrowed and the reserved
@@ -47,7 +47,7 @@ pub trait OrderIntentRepository: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<ApproveOrderIntentOutcome, StorageError>;
 
-    /// Reject a `PendingApproval` intent and release its capital atomically.
+    /// Reject a `PendingAuthorization` intent and release its capital atomically.
     async fn reject(
         &self,
         intent_id: &OrderIntentId,
@@ -96,7 +96,7 @@ pub trait OrderIntentRepository: Send + Sync {
         intent_ids: &[OrderIntentId],
     ) -> Result<Vec<OrderIntentInfo>, StorageError>;
 
-    /// Page intents filtered by status / mode / recommendation / `created_at`.
+    /// Page intents filtered by status / authorization kind / recommendation / `created_at`.
     async fn page(
         &self,
         query: OrderIntentListQuery,

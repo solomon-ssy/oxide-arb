@@ -5,6 +5,7 @@ use crate::enums::common::OrderType;
 pg_enum! {
     type_name = "qp_account_chain_execution_role",
     /// Whether the account-owned order was resting, active, or self-matched.
+    @derive(schemars::JsonSchema)
     pub enum AccountChainExecutionRole {
         Maker => "maker",
         Taker => "taker",
@@ -34,6 +35,7 @@ pg_enum! {
 
 pg_enum! {
     type_name = "qp_account_recovery_incident_kind",
+    @derive(schemars::JsonSchema)
     pub enum AccountRecoveryIncidentKind {
         UnknownExternalExecution => "unknown_external_execution",
         BreakGlassRestart => "break_glass_restart",
@@ -44,6 +46,7 @@ pg_enum! {
 
 pg_enum! {
     type_name = "qp_account_recovery_incident_status",
+    @derive(schemars::JsonSchema)
     pub enum AccountRecoveryIncidentStatus {
         Open => "open",
         Reconciling => "reconciling",
@@ -52,8 +55,18 @@ pg_enum! {
 }
 
 pg_enum! {
-    type_name = "qp_account_pause_submission_state",
-    pub enum AccountPauseSubmissionState {
+    type_name = "qp_account_pause_operation_kind",
+    @derive(schemars::JsonSchema)
+    pub enum AccountPauseOperationKind {
+        Pause => "pause",
+        Unpause => "unpause",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_account_pause_operation_state",
+    @derive(schemars::JsonSchema)
+    pub enum AccountPauseOperationState {
         Prepared => "prepared",
         Dispatched => "dispatched",
         Ambiguous => "ambiguous",
@@ -269,11 +282,13 @@ wire_enum! {
         RecommendationFreshness => "recommendation_freshness",
         ReportStatus => "report_status",
         AuthorizationPolicy => "authorization_policy",
+        EconomicHealth => "economic_health",
         SettlementRecovery => "settlement_recovery",
         ModelRouteBinding => "model_route_binding",
         DataQuality => "data_quality",
         BookFreshness => "book_freshness",
         VenueMetadata => "venue_metadata",
+        VenueFunding => "venue_funding",
         EntryConditionPlan => "entry_condition",
         RiskEnvelopeHash => "risk_envelope_hash",
         CapitalBudget => "capital_budget",

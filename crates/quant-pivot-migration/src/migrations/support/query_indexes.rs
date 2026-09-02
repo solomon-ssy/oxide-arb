@@ -625,8 +625,19 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "uq_quant_account_pause_incident_exchange",
-        table: "quant_account_pause_submission",
+        name: "uq_quant_account_clean_funder_execution",
+        table: "quant_account_clean_funder_blocker",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "account_chain_execution_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_account_pause_operation_identity",
+        table: "quant_account_pause_operation",
         method: IndexMethod::BTree,
         unique: true,
         columns: &[
@@ -636,6 +647,10 @@ const INDEXES: &[IndexSpec] = &[
             },
             IndexColumnSpec {
                 name: "exchange_address",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "operation_kind",
                 direction: IndexDirection::Asc,
             },
         ],
@@ -651,6 +666,80 @@ const INDEXES: &[IndexSpec] = &[
             direction: IndexDirection::Asc,
         }],
         predicate: Some("status <> 'sealed'"),
+    },
+    IndexSpec {
+        name: "uq_quant_account_recovery_manifest_attempt",
+        table: "quant_account_recovery_manifest",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "recovery_incident_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "attempt_no",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_account_recovery_manifest_converged",
+        table: "quant_account_recovery_manifest",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "recovery_incident_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some("converged"),
+    },
+    IndexSpec {
+        name: "idx_recommendation_economic_profile_horizon",
+        table: "quant_recommendation_economic_outcome",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "research_profile_artifact_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "horizon_at",
+                direction: IndexDirection::Desc,
+            },
+            IndexColumnSpec {
+                name: "recommendation_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_route_economic_health_latest",
+        table: "quant_route_economic_health",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "route_identity_hash",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "research_profile_artifact_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "assessed_through",
+                direction: IndexDirection::Desc,
+            },
+            IndexColumnSpec {
+                name: "route_economic_health_id",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
     },
     IndexSpec {
         name: "idx_quant_account_chain_execution_cursor",
@@ -2626,6 +2715,35 @@ const INDEXES: &[IndexSpec] = &[
         predicate: Some("status <> 'completed'::qp_outcome_reconciliation_task_status"),
     },
     IndexSpec {
+        name: "idx_quant_economic_outcome_task_due",
+        table: "quant_economic_outcome_reconciliation_task",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "status",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "horizon_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "next_attempt_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "lease_expires_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "recommendation_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some("status <> 'completed'::qp_outcome_reconciliation_task_status"),
+    },
+    IndexSpec {
         name: "idx_quant_resolution_outcome_task_due",
         table: "quant_resolution_outcome_reconciliation_task",
         method: IndexMethod::BTree,
@@ -3239,7 +3357,15 @@ const INDEXES: &[IndexSpec] = &[
                 direction: IndexDirection::Asc,
             },
             IndexColumnSpec {
+                name: "scope_hash",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
                 name: "observed_at",
+                direction: IndexDirection::Desc,
+            },
+            IndexColumnSpec {
+                name: "evidence_id",
                 direction: IndexDirection::Desc,
             },
         ],
@@ -4276,7 +4402,7 @@ pub async fn apply(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 
 #[cfg(test)]
 mod tests {
-    use super::{INDEXES, IndexSpec};
+    use super::{INDEXES, IndexDirection, IndexSpec};
 
     fn index(name: &str) -> &'static IndexSpec {
         let Some(index) = INDEXES.iter().find(|index| index.name == name) else {
@@ -4308,5 +4434,23 @@ mod tests {
         assert!(!active.unique);
         assert_eq!(active.predicate, Some("(revoked_at IS NULL)"));
         assert_eq!(active.columns.len(), 4);
+    }
+
+    #[test]
+    fn readiness_index_matches_query() {
+        let latest = index("idx_quant_research_readiness_evidence_latest");
+        assert!(!latest.unique);
+        assert_eq!(
+            latest
+                .columns
+                .iter()
+                .map(|column| column.name)
+                .collect::<Vec<_>>(),
+            ["kind", "scope_hash", "observed_at", "evidence_id"]
+        );
+        assert!(matches!(latest.columns[0].direction, IndexDirection::Asc));
+        assert!(matches!(latest.columns[1].direction, IndexDirection::Asc));
+        assert!(matches!(latest.columns[2].direction, IndexDirection::Desc));
+        assert!(matches!(latest.columns[3].direction, IndexDirection::Desc));
     }
 }

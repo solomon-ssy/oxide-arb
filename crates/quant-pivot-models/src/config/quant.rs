@@ -304,12 +304,12 @@ pub struct QuantWorkersConfig {
     /// DB and runs `CoreOrderIntentService::expire_due` (atomic status + capital
     /// release), so a missed or duplicated wake only affects latency.
     pub intent_expire_sweep_secs: u64,
-    /// Auto-execution dispatcher poll-backstop cadence (seconds).
+    /// Authorized-intent dispatcher poll-backstop cadence (seconds).
     ///
-    /// The dispatcher is wake-driven: a fresh `ApprovedByPolicy` approval nudges
+    /// The dispatcher is wake-driven: a freshly `Authorized` intent nudges
     /// it for near-immediate submit. This cadence is the **backstop** poll that
     /// catches missed wakes, retries admission defers, and drains crash-recovery
-    /// work. The durable queue is Postgres (`ApprovedByPolicy` rows under a
+    /// work. The durable queue is Postgres (`Authorized` rows under a
     /// per-intent row lock). The current deployment runs a single dispatcher;
     /// repository locking remains authoritative across processes.
     pub execution_dispatch_secs: u64,
@@ -361,7 +361,7 @@ impl Default for QuantWorkersConfig {
 #[serde(deny_unknown_fields)]
 pub struct QuantAccountDeployConfig {
     /// Polymarket proxy/funder address used as `user=<funder>` for Data API
-    /// position reads. Required to generate reports (all modes).
+    /// position reads. Required to generate real-account-sized reports.
     pub funder: Option<String>,
     /// Wallet shape for money-moving on-chain operations.
     pub wallet_kind: ExecutionWalletKind,

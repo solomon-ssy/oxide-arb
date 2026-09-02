@@ -217,6 +217,11 @@ impl ExchangeHistoryAttestorConfig {
     }
 }
 
+/// Structural ceiling for one simultaneously resident provider chunk.
+pub const EXCHANGE_HISTORY_MAX_BLOCKS_PER_CHUNK: u64 = 50_000;
+/// Structural ceiling for sequential work admitted by one scheduling turn.
+pub const EXCHANGE_HISTORY_MAX_BLOCKS_PER_TICK: u64 = 1_500_000;
+
 /// Finalized Polygon exchange-history extraction, proof and projection policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -233,11 +238,15 @@ pub struct FinalizedExchangeHistoryConfig {
     pub connect_timeout_ms: u64,
     /// Per-request timeout in milliseconds.
     pub request_timeout_ms: u64,
-    /// Maximum decoded response body accepted from either provider.
-    pub max_response_bytes: usize,
+    /// Maximum streamed JSON response body accepted from `HyperSync`.
+    pub max_hypersync_response_body_bytes: usize,
+    /// Maximum streamed JSON-RPC response body accepted from the attestor.
+    pub max_rpc_response_body_bytes: usize,
+    /// Maximum max-width canonical JSON header/log array bytes retained for one chunk.
+    pub max_canonical_chunk_bytes: usize,
     /// Minimum inclusive chunk span after adaptive contraction.
     pub min_blocks_per_chunk: u64,
-    /// Maximum inclusive chunk span after adaptive expansion.
+    /// Maximum inclusive chunk span after adaptive expansion (at most 50,000).
     pub max_blocks_per_chunk: u64,
     /// First retry delay in milliseconds.
     pub retry_initial_ms: u64,
@@ -253,9 +262,9 @@ pub struct FinalizedExchangeHistoryConfig {
     pub activation_frontier_days: u32,
     /// Long-term raw history target filled after activation.
     pub retention_frontier_days: u32,
-    /// Maximum blocks assigned to the activation frontier per scheduling turn.
+    /// Maximum blocks assigned to activation per turn (at most 1,500,000).
     pub hot_window_blocks_per_tick: u64,
-    /// Maximum blocks assigned to the retention frontier per scheduling turn.
+    /// Maximum blocks assigned to retention per turn (at most 1,500,000).
     pub full_history_blocks_per_tick: u64,
     /// Maximum rows written in one fact batch.
     pub batch_size: usize,
@@ -270,7 +279,9 @@ impl Default for FinalizedExchangeHistoryConfig {
             attestor: ExchangeHistoryAttestorConfig::default(),
             connect_timeout_ms: 10_000,
             request_timeout_ms: 60_000,
-            max_response_bytes: 64 * 1_024 * 1_024,
+            max_hypersync_response_body_bytes: 64 * 1_024 * 1_024,
+            max_rpc_response_body_bytes: 64 * 1_024 * 1_024,
+            max_canonical_chunk_bytes: 64 * 1_024 * 1_024,
             min_blocks_per_chunk: 100,
             max_blocks_per_chunk: 2_000,
             retry_initial_ms: 500,

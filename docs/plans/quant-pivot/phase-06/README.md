@@ -4,15 +4,15 @@
 > **Deployment contract**
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
+> - `pre_deployment_behavior`: 允许 clean-break 与唯一 fresh terminal bootstrap rewrite；任何真实数据销毁仍需操作者单独授权。
+> - `post_deployment_behavior`: 本次实现只交付唯一 fresh terminal bootstrap；不设计 upgrade/downgrade 或 data/schema/version migration。
+> - `rollback_and_data_verification`: 只在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置必须另行授权。
 
 > 状态：设计文档 + 部分已落地（**06.0 / 06.1 已实现**，见各子phase §0 落地状态；其余仍为设计契约）
 >
 > 父文档：[`../08-third-party-crates-and-ml-stack.md`](../08-third-party-crates-and-ml-stack.md)、
 > [`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)、
-> [`../05-execution-risk-and-governance.md`](../05-execution-risk-and-governance.md)
+> [`../phase-12/12.0-execution-authority-account-recovery-fast-feedback.md`](../phase-12/12.0-execution-authority-account-recovery-fast-feedback.md)
 >
 > 本目录承接 **Phase 5 明确延后**、且属于「研究/模型族扩展」或「跨平面增强」的能力。
 > 每条延后项在 Phase 5 子phase §11 / [`phase-05/README.md`](../phase-05/README.md) §6.2
@@ -94,7 +94,9 @@ flowchart TD
 
 **不在 Phase 6、而在 Phase 5 收尾的项**见 [`05.10-auto-redeem-settlement.md`](../phase-05/05.10-auto-redeem-settlement.md)（`AutoRedeem` 链上赎回）。
 
-**Phase 8+ 部署架构项**见 [`../phase-08/README.md`](../phase-08/README.md)（多副本 leader-elected worker、高频 trailing 评估）。
+**后续部署/性能边界**见
+[`../08-cold-start-production-closeout.md`](../08-cold-start-production-closeout.md) 与
+[`../08-extreme-performance-design.md`](../08-extreme-performance-design.md)；不存在独立 `phase-08/README.md` 实施入口。
 
 ## 4. 文档契约模板
 
@@ -105,8 +107,7 @@ flowchart TD
 ```bash
 cargo fmt --all --
 cargo clippy --workspace --all-targets -- -D warnings
-bash scripts/lint-architecture.sh
-bash scripts/lint-quant-pivot-boundary.sh
-bash scripts/lint-quant-pivot-errors.sh
+cargo xtask architecture audit-functions
+cargo xtask architecture check
 cargo test --workspace
 ```

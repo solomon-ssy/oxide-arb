@@ -192,6 +192,12 @@ pub trait FeedbackCycleRepository: FeedbackOutboxRepository {
         cycle_id: &FeedbackCycleId,
     ) -> Result<Option<FeedbackCycleInfo>, StorageError>;
 
+    /// Load the requested immutable cycles in canonical identity order.
+    async fn find_cycles(
+        &self,
+        cycle_ids: &[FeedbackCycleId],
+    ) -> Result<Vec<FeedbackCycleInfo>, StorageError>;
+
     /// List every immutable manual/scheduled trigger intent for one converged
     /// cycle in authoritative occurrence order.
     async fn list_trigger_events(
@@ -295,6 +301,12 @@ pub trait FeedbackCycleRepository: FeedbackOutboxRepository {
     async fn list_stage_events(
         &self,
         cycle_id: &FeedbackCycleId,
+    ) -> Result<Vec<FeedbackStageEventInfo>, StorageError>;
+
+    /// Load immutable stage events for the requested cycles in canonical cycle/sequence order.
+    async fn find_stage_events(
+        &self,
+        cycle_ids: &[FeedbackCycleId],
     ) -> Result<Vec<FeedbackStageEventInfo>, StorageError>;
 
     async fn list_drift_reports(

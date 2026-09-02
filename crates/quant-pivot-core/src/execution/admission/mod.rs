@@ -1,9 +1,9 @@
 //! Execution admission engine — the read-only, deterministic, fixed-order gate
-//! between an `Approved` / `ApprovedByPolicy` order intent and real venue
+//! between an `Authorized` order intent and real venue
 //! submission.
 //!
 //! Admission never mutates the report and never submits an order. It runs a
-//! fixed sequence of 25 hard checks over a frozen [`AdmissionInput`] (built once
+//! fixed sequence of 27 hard checks over a frozen [`AdmissionInput`] (built once
 //! by the [`AdmissionInputBuilder`], which owns *all* I/O) and produces an
 //! [`AdmissionDecision`] of allow / deny / defer plus a full per-check trace and
 //! replayable [`StateVersion`].
@@ -30,35 +30,42 @@ pub(crate) use builder::pit_fee_schedule;
 pub use builder::{AdmissionInputBuilder, AdmissionInputBuilderDeps};
 use chrono::{DateTime, Utc};
 pub use engine::DefaultAdmissionEngine;
+use quant_pivot_api::clob::VenueFundingEvidence;
 use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
     domain::{
         data_plane::DataQualitySnapshot,
         market::BookSnapshot,
+        order::{CanonicalOrderAmounts, PolymarketOrderRules},
         quant::{
             CapitalAllocationInfo, EntryConditionInstanceInfo, OrderIntentInfo, RecommendationInfo,
             RecommendationReportInfo,
         },
     },
     enums::{
+        catalog::{CatalogFilterReason, CatalogFilterReasonSet},
         common::{OrderType, Side, TickSize},
         execution::{AdmissionCheckId, AdmissionOutcome, KillSwitchState},
-        quant::{EntryAuthorizationPolicy, FillRequirement},
+        market::MarketStatus,
+        quant::{EntryAuthorizationPolicy, FillRequirement, RouteEconomicHealthState},
         settlement::SettlementWritePolicy,
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, DecisionPolicySnapshotId, EntryMakerRebateTerms, EvmBlockHash, OrderAmount,
-        PreparedFeeSchedule, PreparedVenueOrder, ResearchProfileRef, Usd, VenueOrderAmount,
+        ClobMarketInfoVersionId, ContentHash, DecisionPolicySnapshotId, EntryMakerRebateTerms,
+        EntryOrderSpec, EvmBlockHash, MarketId, OrderAmount, PreparedFeeSchedule,
+        PreparedVenueOrder, Price, ResearchProfileRef, RouteEconomicHealthId, Shares, TokenId, Usd,
+        VenueOrderAmount,
     },
 };
 use quant_pivot_research::{
     execution_semantics::{
-        BookWalkOutcome, LiquidityRole, PitFeeSchedule, PitMakerRebateEvidence,
+        BookWalkFill, BookWalkOutcome, LiquidityRole, PitFeeSchedule, PitMakerRebateEvidence,
         walk_buy_cash_budget, walk_buy_exact_shares,
     },
     portfolio::AccountSnapshot,
 };
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::settlement_recovery_admission::SettlementRecoveryAdmission;
@@ -94,6 +101,47 @@ pub struct AdmissionSeams {
     pub exit_monitor_ready: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionEconomicHealth {
+    Missing,
+    Present {
+        route_economic_health_id: RouteEconomicHealthId,
+        evidence_hash: ContentHash,
+        state: RouteEconomicHealthState,
+        assessed_through: DateTime<Utc>,
+        fresh: bool,
+    },
+}
+
+impl AdmissionEconomicHealth {
+    #[must_use]
+    pub const fn evidence_id(&self) -> Option<RouteEconomicHealthId> {
+        match self {
+            Self::Missing => None,
+            Self::Present {
+                route_economic_health_id,
+                ..
+            } => Some(*route_economic_health_id),
+        }
+    }
+
+    #[must_use]
+    pub const fn evidence_hash(&self) -> Option<ContentHash> {
+        match self {
+            Self::Missing => None,
+            Self::Present { evidence_hash, .. } => Some(*evidence_hash),
+        }
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> Option<RouteEconomicHealthState> {
+        match self {
+            Self::Missing => None,
+            Self::Present { state, .. } => Some(*state),
+        }
+    }
+}
+
 /// Versioned provenance of the state the decision was made against.
 ///
 /// Recorded on the decision so the dispatcher can persist *why* an intent
@@ -111,6 +159,25 @@ pub struct StateVersion {
     pub settlement_write_policy: SettlementWritePolicy,
     pub settlement_deployment_digest: Option<ContentHash>,
     pub settlement_verified_block_hash: Option<EvmBlockHash>,
+    pub route_economic_health_id: Option<RouteEconomicHealthId>,
+    pub route_economic_health_hash: Option<ContentHash>,
+    pub route_economic_health_state: Option<RouteEconomicHealthState>,
+    /// Canonical hash of the complete venue metadata, funding, and prepared
+    /// order evidence that actually authorized the claim.
+    pub admission_evidence_hash: ContentHash,
+}
+
+#[derive(Serialize)]
+struct AdmissionExecutionEvidence<'a> {
+    venue_metadata: &'a AdmissionVenueMetadata,
+    venue_funding: &'a VenueFundingEvidence,
+    prepared_order: &'a PreparedVenueOrder,
+}
+
+impl AdmissionExecutionEvidence<'_> {
+    fn content_hash(&self) -> QuantResult<ContentHash> {
+        Ok(CanonicalDigest::content_hash_json(self)?)
+    }
 }
 
 /// Model-governance flags distilled at build time (`#5`, `#23`).
@@ -133,14 +200,114 @@ pub struct AdmissionExposureState {
     pub manual_block: bool,
 }
 
-/// Registry-versus-venue metadata frozen by the admission input builder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Report-time, current-registry, and live-venue metadata frozen by admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionVenueMetadata {
-    pub registry_tick_size: TickSize,
-    pub registry_neg_risk: bool,
-    pub venue_tick_size: TickSize,
-    pub venue_neg_risk: bool,
-    pub clob_market_info_hash: ContentHash,
+    pub catalog_market_id: MarketId,
+    pub catalog_token_id: Option<TokenId>,
+    pub frozen_version_id: ClobMarketInfoVersionId,
+    pub frozen_market_id: MarketId,
+    pub frozen_token_id: Option<TokenId>,
+    pub frozen_tick_size: TickSize,
+    pub frozen_minimum_order_size: Shares,
+    pub frozen_neg_risk: bool,
+    pub frozen_payload_hash: ContentHash,
+    pub current_version_id: ClobMarketInfoVersionId,
+    pub current_market_id: MarketId,
+    pub current_token_id: Option<TokenId>,
+    pub current_tick_size: TickSize,
+    pub current_minimum_order_size: Shares,
+    pub current_neg_risk: bool,
+    pub current_payload_hash: ContentHash,
+    pub live_market_id: MarketId,
+    pub live_token_id: TokenId,
+    pub live_tick_size: TickSize,
+    pub live_minimum_order_size: Shares,
+    pub live_neg_risk: bool,
+    pub catalog_status: MarketStatus,
+    pub catalog_filter_reasons: CatalogFilterReasonSet,
+}
+
+impl AdmissionVenueMetadata {
+    fn validate(&self, expected_market: &MarketId, expected_token: &TokenId) -> Result<(), String> {
+        if self.catalog_status != MarketStatus::Active || !self.catalog_filter_reasons.is_empty() {
+            let reasons = self
+                .catalog_filter_reasons
+                .iter()
+                .map(CatalogFilterReason::as_str)
+                .collect::<Vec<_>>()
+                .join(",");
+            return Err(format!(
+                "current Gamma market is not tradeable: status={}, reasons={reasons}",
+                self.catalog_status.as_str()
+            ));
+        }
+        if [
+            &self.catalog_market_id,
+            &self.frozen_market_id,
+            &self.current_market_id,
+            &self.live_market_id,
+        ]
+        .into_iter()
+        .any(|market_id| market_id != expected_market)
+        {
+            return Err(format!(
+                "catalog/frozen/current/live market mismatch: expected={expected_market}, catalog={}, frozen={}, current={}, live={}",
+                self.catalog_market_id,
+                self.frozen_market_id,
+                self.current_market_id,
+                self.live_market_id
+            ));
+        }
+        if self.catalog_token_id.as_ref() != Some(expected_token)
+            || self.frozen_token_id.as_ref() != Some(expected_token)
+            || self.current_token_id.as_ref() != Some(expected_token)
+            || &self.live_token_id != expected_token
+        {
+            return Err(format!(
+                "catalog/frozen/current/live token mismatch: expected={expected_token}, catalog={:?}, frozen={:?}, current={:?}, live={}",
+                self.catalog_token_id,
+                self.frozen_token_id,
+                self.current_token_id,
+                self.live_token_id
+            ));
+        }
+        if self.frozen_payload_hash != self.current_payload_hash {
+            return Err(format!(
+                "report-time/current CLOB payload mismatch: frozen={}, current={}",
+                self.frozen_payload_hash, self.current_payload_hash
+            ));
+        }
+        if self.frozen_tick_size != self.current_tick_size
+            || self.current_tick_size != self.live_tick_size
+        {
+            return Err(format!(
+                "frozen/current/live tick-size mismatch: frozen={}, current={}, live={}",
+                self.frozen_tick_size.as_str(),
+                self.current_tick_size.as_str(),
+                self.live_tick_size.as_str()
+            ));
+        }
+        if self.frozen_minimum_order_size != self.current_minimum_order_size
+            || self.current_minimum_order_size != self.live_minimum_order_size
+        {
+            return Err(format!(
+                "frozen/current/live order-minimum mismatch: frozen={}, current={}, live={}",
+                self.frozen_minimum_order_size,
+                self.current_minimum_order_size,
+                self.live_minimum_order_size
+            ));
+        }
+        if self.frozen_neg_risk != self.current_neg_risk
+            || self.current_neg_risk != self.live_neg_risk
+        {
+            return Err(format!(
+                "frozen/current/live NegRisk mismatch: frozen={}, current={}, live={}",
+                self.frozen_neg_risk, self.current_neg_risk, self.live_neg_risk
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Immutable, decision-time-frozen aggregate consumed by every admission check.
@@ -188,6 +355,8 @@ pub struct AdmissionInput {
     pub max_reserved_usd: Usd,
     /// Model publication + calibration flags distilled from the registry.
     pub model_state: AdmissionModelState,
+    /// Latest exact-policy Route economic health and freshness.
+    pub economic_health: AdmissionEconomicHealth,
     /// Live data-quality classification of the book plane.
     pub data_quality: DataQualitySnapshot,
     /// Plane-wide stale-book ratio cap (`data_quality.max_stale_book_ratio_bps`),
@@ -198,6 +367,12 @@ pub struct AdmissionInput {
     /// Venue metadata re-read through the official SDK and compared with the
     /// frozen registry before order signing.
     pub venue_metadata: AdmissionVenueMetadata,
+    /// Exact canonical order prepared once by the I/O-owning builder. Checks,
+    /// WAL construction, and venue submission consume this same value.
+    pub prepared_order: PreparedVenueOrder,
+    /// Valid live balance/allowance evidence. Closed funding states are pure
+    /// Defer outcomes; malformed/transport failures never build an input.
+    pub venue_funding: VenueFundingEvidence,
     /// Deferred readiness seams (`#18`/`#19`/`#20`).
     pub seams: AdmissionSeams,
     /// Fresh current-deployment recovery truth for `HoldToResolution + Auto`.
@@ -211,90 +386,13 @@ pub struct AdmissionInput {
 }
 
 impl AdmissionInput {
-    const fn prepared_fee_schedule(&self) -> PreparedFeeSchedule {
-        PreparedFeeSchedule {
-            schedule_hash: self.fee_schedule.schedule_hash,
-            effective_at: self.fee_schedule.effective_at,
-            available_at: self.fee_schedule.available_at,
-            platform_rate: self.fee_schedule.platform_rate,
-            exponent: self.fee_schedule.exponent,
-            taker_only: self.fee_schedule.taker_only,
-            builder_maker_fee_bps: self.fee_schedule.builder_maker_fee_bps,
-            builder_taker_fee_bps: self.fee_schedule.builder_taker_fee_bps,
-            builder_attribution: self.fee_schedule.builder_attribution,
-        }
-    }
-
     /// Notional of the (possibly downscaled) frozen entry order.
     #[must_use]
     pub fn order_notional(&self) -> Usd {
-        self.intent.entry_order_json.notional()
-    }
-
-    fn validate_entry_spec(&self) -> QuantResult<()> {
-        let spec = &self.intent.entry_order_json;
-        if spec.side != Side::Buy {
-            return Err(ExecutionError::IntentDenied {
-                reason: "opening entry must be a BUY".to_owned(),
-            }
-            .into());
+        match self.prepared_order.venue_amount {
+            VenueOrderAmount::PrincipalUsd(principal) => principal,
+            VenueOrderAmount::Shares(shares) => shares * self.prepared_order.limit_price,
         }
-        match spec.maker_rebate_terms {
-            EntryMakerRebateTerms::AggressiveNotApplicable if !spec.post_only => {}
-            EntryMakerRebateTerms::PassiveNoProgram {
-                terms_hash,
-                available_at,
-            } if spec.post_only
-                && available_at <= self.now
-                && self.fee_schedule.platform_rate.is_zero()
-                && matches!(
-                    &self.maker_rebate_evidence,
-                    PitMakerRebateEvidence::NoProgram {
-                        terms_hash: current,
-                        ..
-                    } if *current == terms_hash
-                ) => {}
-            EntryMakerRebateTerms::PassiveProgram { schedule } if spec.post_only => {
-                schedule
-                    .validate_at(self.now)
-                    .map_err(|detail| ExecutionError::IntentDenied {
-                        reason: detail.to_owned(),
-                    })?;
-                if schedule.platform_rate != self.fee_schedule.platform_rate
-                    || schedule.exponent != self.fee_schedule.exponent
-                    || schedule.taker_only != self.fee_schedule.taker_only
-                {
-                    return Err(ExecutionError::IntentDenied {
-                        reason: "frozen Gamma rebate terms disagree with admitted CLOB fee terms"
-                            .to_owned(),
-                    }
-                    .into());
-                }
-                if !matches!(
-                    &self.maker_rebate_evidence,
-                    PitMakerRebateEvidence::Available { schedule: current }
-                        if current.terms_hash == schedule.terms_hash
-                        && current.platform_rate == schedule.platform_rate
-                        && current.exponent == schedule.exponent
-                        && current.taker_only == schedule.taker_only
-                        && current.rebate_rate == schedule.rebate_rate
-                ) {
-                    return Err(ExecutionError::IntentDenied {
-                        reason:
-                            "maker-rebate terms drifted after recommendation or intent creation"
-                                .to_owned(),
-                    }
-                    .into());
-                }
-            }
-            _ => {
-                return Err(ExecutionError::IntentDenied {
-                    reason: "entry route and maker-rebate terms are not admissible".to_owned(),
-                }
-                .into());
-            }
-        }
-        Ok(())
     }
 }
 
@@ -403,157 +501,429 @@ pub trait AdmissionCheck: Send + Sync {
 #[async_trait]
 pub trait ExecutionAdmissionEngine: Send + Sync {
     /// Evaluate in fixed order, short-circuiting on the first hard deny.
-    async fn evaluate(&self, input: AdmissionInput) -> QuantResult<AdmissionDecision>;
+    async fn evaluate(&self, input: &AdmissionInput) -> QuantResult<AdmissionDecision>;
 
     /// Evaluate every check without short-circuit (diagnostics / audit). The
     /// outcome is identical to [`Self::evaluate`]; only the trace is complete.
-    async fn evaluate_full(&self, input: AdmissionInput) -> QuantResult<AdmissionDecision>;
+    async fn evaluate_full(&self, input: &AdmissionInput) -> QuantResult<AdmissionDecision>;
 }
 
-impl AdmissionInput {
-    /// Freeze the exact venue amount and all execution-semantic hashes consumed by
-    /// the dispatcher. The dispatcher must submit this object verbatim.
-    pub fn prepare_entry_order(&self) -> QuantResult<PreparedVenueOrder> {
-        let spec = &self.intent.entry_order_json;
+pub(super) struct EntryOrderPreparation<'a> {
+    pub profile_ref: &'a ResearchProfileRef,
+    pub spec: &'a EntryOrderSpec,
+    pub book: &'a BookSnapshot,
+    pub fee_schedule: &'a PitFeeSchedule,
+    pub maker_rebate_evidence: &'a PitMakerRebateEvidence,
+    pub venue_metadata: &'a AdmissionVenueMetadata,
+    pub now: DateTime<Utc>,
+}
+
+struct EntryFillPrediction {
+    expected_worst_fill_price: Price,
+    expected_filled_shares: Shares,
+    expected_fee: Usd,
+    total_cash_delta: Decimal,
+}
+
+impl EntryFillPrediction {
+    fn from_fill(fill: &BookWalkFill, limit_price: Price) -> Self {
+        Self {
+            expected_worst_fill_price: fill.worst_price.unwrap_or(limit_price),
+            expected_filled_shares: fill.filled_shares,
+            expected_fee: fill.immediate_cost.total_fee_usd(),
+            total_cash_delta: fill.account_cash_delta_usd,
+        }
+    }
+
+    fn passive(canonical: &CanonicalOrderAmounts, limit_price: Price) -> Self {
+        Self {
+            expected_worst_fill_price: limit_price,
+            expected_filled_shares: canonical.requested_shares,
+            expected_fee: Usd::ZERO,
+            total_cash_delta: -canonical.principal_usd.inner(),
+        }
+    }
+}
+
+impl EntryOrderPreparation<'_> {
+    pub fn prepare(&self) -> QuantResult<PreparedVenueOrder> {
         self.validate_entry_spec()?;
-        let book = self
-            .book
-            .as_ref()
-            .ok_or_else(|| ExecutionError::IntentDenied {
-                reason: "cannot prepare venue order without a PIT L2 book".to_owned(),
-            })?;
-        let book_hash = CanonicalDigest::content_hash_json(&(
-            book.timestamp_ms,
-            book.version,
-            book.bids.as_ref(),
-            book.asks.as_ref(),
-        ))?;
-        let requirement = match spec.order_type {
+        let rules = PolymarketOrderRules::new(
+            self.venue_metadata.current_tick_size,
+            self.venue_metadata.current_minimum_order_size,
+        )
+        .map_err(|error| ExecutionError::IntentDenied {
+            reason: format!("live venue order rules are invalid: {error}"),
+        })?;
+        let requirement = match self.spec.order_type {
             OrderType::Fak => FillRequirement::AllowPartial,
             OrderType::Fok | OrderType::Gtc | OrderType::Gtd { .. } => {
                 FillRequirement::AllOrNothing
             }
         };
-
-        let (
-            cash_budget,
-            venue_amount,
-            expected_fee,
-            total_cash_delta,
-            expected_filled_shares,
-            worst,
-        ) = match spec.amount {
+        let (cash_budget, canonical, fill) = match self.spec.amount {
             OrderAmount::CashBudget(budget) => {
-                if !matches!(spec.order_type, OrderType::Fok | OrderType::Fak) {
+                if !matches!(self.spec.order_type, OrderType::Fok | OrderType::Fak) {
                     return Err(ExecutionError::IntentDenied {
                         reason: "cash-budget BUY is valid only for FOK/FAK".to_owned(),
                     }
                     .into());
                 }
-                let fill = walk_buy_cash_budget(
-                    &book.asks,
+                let budget_fill = walk_buy_cash_budget(
+                    &self.book.asks,
                     budget,
-                    spec.limit_price,
+                    self.spec.limit_price,
                     requirement,
-                    &self.fee_schedule,
+                    self.fee_schedule,
                     LiquidityRole::Taker,
                     self.now,
                 )
                 .map_err(|error| ExecutionError::IntentDenied {
                     reason: format!("cash-budget execution preparation failed: {error:?}"),
                 })?;
-                if fill.outcome == BookWalkOutcome::Unfilled
-                    || !fill.immediate_cost.principal_usd.is_positive()
-                {
-                    return Err(ExecutionError::IntentDenied {
-                        reason: "cash budget cannot be executed from the admitted L2 book"
-                            .to_owned(),
-                    }
-                    .into());
-                }
+                Self::require_fill(&budget_fill, "cash budget")?;
+                let canonical = rules
+                    .canonical_order(
+                        Side::Buy,
+                        VenueOrderAmount::PrincipalUsd(budget_fill.immediate_cost.principal_usd),
+                        self.spec.limit_price,
+                    )
+                    .map_err(|error| ExecutionError::IntentDenied {
+                        reason: format!("cash-budget venue canonicalization failed: {error}"),
+                    })?;
+                let fill = self.predict_fill(canonical.requested_shares, requirement)?;
+                Self::require_fill(&fill, "canonical cash budget")?;
                 if fill.immediate_cost.cash_outlay_usd > budget {
                     return Err(ExecutionError::IntentDenied {
-                        reason: "prepared BUY exceeds governed cash budget".to_owned(),
+                        reason: "canonical BUY exceeds governed cash budget".to_owned(),
                     }
                     .into());
                 }
                 (
                     Some(budget),
-                    VenueOrderAmount::GrossUsd(fill.immediate_cost.principal_usd),
-                    fill.immediate_cost.total_fee_usd(),
-                    fill.account_cash_delta_usd,
-                    fill.filled_shares,
-                    fill.worst_price.unwrap_or(spec.limit_price),
+                    canonical,
+                    EntryFillPrediction::from_fill(&fill, self.spec.limit_price),
                 )
             }
             OrderAmount::Shares(shares) => {
-                let fill = walk_buy_exact_shares(
-                    &book.asks,
-                    shares,
-                    spec.limit_price,
-                    requirement,
-                    &self.fee_schedule,
-                    if spec.post_only {
-                        LiquidityRole::Maker
-                    } else {
-                        LiquidityRole::Taker
-                    },
-                    self.now,
-                )
-                .map_err(|error| ExecutionError::IntentDenied {
-                    reason: format!("share execution preparation failed: {error:?}"),
-                })?;
-                if matches!(spec.order_type, OrderType::Fok | OrderType::Fak)
-                    && fill.outcome == BookWalkOutcome::Unfilled
+                let canonical = rules
+                    .canonical_order(
+                        Side::Buy,
+                        VenueOrderAmount::Shares(shares),
+                        self.spec.limit_price,
+                    )
+                    .map_err(|error| ExecutionError::IntentDenied {
+                        reason: format!("share venue canonicalization failed: {error}"),
+                    })?;
+                let prediction = if self.spec.post_only {
+                    EntryFillPrediction::passive(&canonical, self.spec.limit_price)
+                } else {
+                    let fill = self.predict_fill(canonical.requested_shares, requirement)?;
+                    Self::require_fill(&fill, "share order")?;
+                    EntryFillPrediction::from_fill(&fill, self.spec.limit_price)
+                };
+                (None, canonical, prediction)
+            }
+        };
+        let book_hash = CanonicalDigest::content_hash_json(&(
+            self.book.timestamp_ms,
+            self.book.version,
+            self.book.bids.as_ref(),
+            self.book.asks.as_ref(),
+        ))?;
+        Ok(PreparedVenueOrder {
+            profile_ref: self.profile_ref.clone(),
+            market_id: self.venue_metadata.current_market_id.clone(),
+            token_id: self.spec.token_id.clone(),
+            tick_size: self.venue_metadata.current_tick_size,
+            minimum_order_size: self.venue_metadata.current_minimum_order_size,
+            neg_risk: self.venue_metadata.current_neg_risk,
+            side: self.spec.side,
+            order_type: self.spec.order_type,
+            post_only: self.spec.post_only,
+            limit_price: self.spec.limit_price,
+            expected_worst_fill_price: fill.expected_worst_fill_price,
+            cash_budget,
+            venue_amount: canonical.venue_amount,
+            requested_shares: canonical.requested_shares,
+            expected_fee: fill.expected_fee,
+            total_cash_delta: fill.total_cash_delta,
+            expected_filled_shares: fill.expected_filled_shares,
+            book_hash,
+            clob_market_info_payload_hash: self.venue_metadata.current_payload_hash,
+            fee_schedule: self.prepared_fee_schedule(),
+            maker_rebate_terms: self.spec.maker_rebate_terms,
+            prepared_at: self.now,
+            valid_until: self.spec.valid_until,
+        })
+    }
+
+    fn predict_fill(
+        &self,
+        shares: Shares,
+        requirement: FillRequirement,
+    ) -> QuantResult<BookWalkFill> {
+        walk_buy_exact_shares(
+            &self.book.asks,
+            shares,
+            self.spec.limit_price,
+            requirement,
+            self.fee_schedule,
+            LiquidityRole::Taker,
+            self.now,
+        )
+        .map_err(|error| {
+            ExecutionError::IntentDenied {
+                reason: format!("canonical share prediction failed: {error:?}"),
+            }
+            .into()
+        })
+    }
+
+    fn require_fill(fill: &BookWalkFill, subject: &str) -> QuantResult<()> {
+        if fill.outcome == BookWalkOutcome::Unfilled
+            || !fill.immediate_cost.principal_usd.is_positive()
+        {
+            return Err(ExecutionError::IntentDenied {
+                reason: format!("{subject} cannot execute from the admitted PIT L2 book"),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    const fn prepared_fee_schedule(&self) -> PreparedFeeSchedule {
+        PreparedFeeSchedule {
+            schedule_hash: self.fee_schedule.schedule_hash,
+            effective_at: self.fee_schedule.effective_at,
+            available_at: self.fee_schedule.available_at,
+            platform_rate: self.fee_schedule.platform_rate,
+            exponent: self.fee_schedule.exponent,
+            taker_only: self.fee_schedule.taker_only,
+            builder_maker_fee_bps: self.fee_schedule.builder_maker_fee_bps,
+            builder_taker_fee_bps: self.fee_schedule.builder_taker_fee_bps,
+            builder_attribution: self.fee_schedule.builder_attribution,
+        }
+    }
+
+    fn validate_entry_spec(&self) -> QuantResult<()> {
+        if self.spec.side != Side::Buy {
+            return Err(ExecutionError::IntentDenied {
+                reason: "opening entry must be a BUY".to_owned(),
+            }
+            .into());
+        }
+        match self.spec.maker_rebate_terms {
+            EntryMakerRebateTerms::AggressiveNotApplicable if !self.spec.post_only => {}
+            EntryMakerRebateTerms::PassiveNoProgram {
+                terms_hash,
+                available_at,
+            } if self.spec.post_only
+                && available_at <= self.now
+                && self.fee_schedule.platform_rate.is_zero()
+                && matches!(
+                    self.maker_rebate_evidence,
+                    PitMakerRebateEvidence::NoProgram {
+                        terms_hash: current,
+                        ..
+                    } if *current == terms_hash
+                ) => {}
+            EntryMakerRebateTerms::PassiveProgram { schedule } if self.spec.post_only => {
+                schedule
+                    .validate_at(self.now)
+                    .map_err(|detail| ExecutionError::IntentDenied {
+                        reason: detail.to_owned(),
+                    })?;
+                if schedule.platform_rate != self.fee_schedule.platform_rate
+                    || schedule.exponent != self.fee_schedule.exponent
+                    || schedule.taker_only != self.fee_schedule.taker_only
                 {
                     return Err(ExecutionError::IntentDenied {
-                        reason: "share order cannot be executed from the admitted L2 book"
+                        reason: "frozen Gamma rebate terms disagree with admitted CLOB fee terms"
                             .to_owned(),
                     }
                     .into());
                 }
-                let expected_fee = if spec.post_only {
-                    Usd::ZERO
-                } else {
-                    fill.immediate_cost.total_fee_usd()
-                };
-                (
-                    None,
-                    VenueOrderAmount::Shares(shares),
-                    expected_fee,
-                    if spec.post_only {
-                        -(shares * spec.limit_price).inner()
-                    } else {
-                        fill.account_cash_delta_usd
-                    },
-                    if spec.post_only {
-                        shares
-                    } else {
-                        fill.filled_shares
-                    },
-                    fill.worst_price.unwrap_or(spec.limit_price),
-                )
+                if !matches!(
+                    self.maker_rebate_evidence,
+                    PitMakerRebateEvidence::Available { schedule: current }
+                        if current.terms_hash == schedule.terms_hash
+                            && current.platform_rate == schedule.platform_rate
+                            && current.exponent == schedule.exponent
+                            && current.taker_only == schedule.taker_only
+                            && current.rebate_rate == schedule.rebate_rate
+                ) {
+                    return Err(ExecutionError::IntentDenied {
+                        reason:
+                            "maker-rebate terms drifted after recommendation or intent creation"
+                                .to_owned(),
+                    }
+                    .into());
+                }
             }
-        };
+            _ => {
+                return Err(ExecutionError::IntentDenied {
+                    reason: "entry route and maker-rebate terms are not admissible".to_owned(),
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+}
 
-        Ok(PreparedVenueOrder {
-            profile_ref: self.profile_ref.clone(),
-            token_id: spec.token_id.clone(),
-            side: spec.side,
-            order_type: spec.order_type,
-            post_only: spec.post_only,
-            worst_price: worst,
-            cash_budget,
-            venue_amount,
-            expected_fee,
-            total_cash_delta,
-            expected_filled_shares,
-            book_hash,
-            clob_market_info_hash: self.venue_metadata.clob_market_info_hash,
-            fee_schedule: self.prepared_fee_schedule(),
-            maker_rebate_terms: spec.maker_rebate_terms,
-            prepared_at: self.now,
-            valid_until: spec.valid_until,
-        })
+#[cfg(test)]
+mod tests {
+    use quant_pivot_api::clob::{
+        VenueBalanceAllowanceSnapshot, VenueFundingAsset, VenueFundingBalance, VenueFundingEvidence,
+    };
+    use quant_pivot_models::{
+        enums::{
+            catalog::CatalogFilterReasonSet,
+            common::{OrderType, Side, TickSize},
+            market::MarketStatus,
+        },
+        types::{
+            ClobMarketInfoVersionId, ContentHash, EvmAddress, EvmUint256, MarketId, Price, Shares,
+            TokenId, Usd, VenueOrderAmount,
+        },
+    };
+    use rust_decimal_macros::dec;
+
+    use super::{AdmissionExecutionEvidence, AdmissionVenueMetadata};
+    use crate::test_fixtures::execution_pg_seed::PreparedOrderFixture;
+
+    impl AdmissionVenueMetadata {
+        fn test_fixture() -> Self {
+            let market_id = MarketId::new("0xmarket");
+            let token_id = TokenId::new("token-1");
+            Self {
+                catalog_market_id: market_id.clone(),
+                catalog_token_id: Some(token_id.clone()),
+                frozen_version_id: ClobMarketInfoVersionId::from_v7(),
+                frozen_market_id: market_id.clone(),
+                frozen_token_id: Some(token_id.clone()),
+                frozen_tick_size: TickSize::Hundredth,
+                frozen_minimum_order_size: Shares::new(dec!(5)),
+                frozen_neg_risk: false,
+                frozen_payload_hash: ContentHash::from_bytes([1; 32]),
+                current_version_id: ClobMarketInfoVersionId::from_v7(),
+                current_market_id: market_id.clone(),
+                current_token_id: Some(token_id.clone()),
+                current_tick_size: TickSize::Hundredth,
+                current_minimum_order_size: Shares::new(dec!(5)),
+                current_neg_risk: false,
+                current_payload_hash: ContentHash::from_bytes([1; 32]),
+                live_market_id: market_id,
+                live_token_id: token_id,
+                live_tick_size: TickSize::Hundredth,
+                live_minimum_order_size: Shares::new(dec!(5)),
+                live_neg_risk: false,
+                catalog_status: MarketStatus::Active,
+                catalog_filter_reasons: CatalogFilterReasonSet::EMPTY,
+            }
+        }
+    }
+
+    fn funding(required: &str) -> VenueFundingEvidence {
+        VenueFundingEvidence::Ready {
+            snapshot: VenueBalanceAllowanceSnapshot {
+                asset: VenueFundingAsset::Collateral,
+                token_id: None,
+                spender: EvmAddress::parse(format!("0x{}", "a".repeat(40)))
+                    .expect("canonical spender"),
+                balance: EvmUint256::parse("100000000").expect("canonical balance"),
+                human_balance: VenueFundingBalance::Collateral(Usd::new(dec!(100))),
+                allowance: Some(EvmUint256::parse("100000000").expect("canonical allowance")),
+            },
+            required: EvmUint256::parse(required).expect("canonical required funding"),
+        }
+    }
+
+    #[test]
+    fn unchanged_metadata_is_valid() {
+        let metadata = AdmissionVenueMetadata::test_fixture();
+        assert!(
+            metadata
+                .validate(&MarketId::new("0xmarket"), &TokenId::new("token-1"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn payload_change_is_rejected() {
+        let mut metadata = AdmissionVenueMetadata::test_fixture();
+        metadata.current_payload_hash = ContentHash::from_bytes([2; 32]);
+        let error = metadata
+            .validate(&MarketId::new("0xmarket"), &TokenId::new("token-1"))
+            .expect_err("fee-only payload drift must invalidate the report");
+        assert!(error.contains("payload mismatch"));
+    }
+
+    #[test]
+    fn live_rule_change_rejected() {
+        let mut metadata = AdmissionVenueMetadata::test_fixture();
+        metadata.live_minimum_order_size = Shares::new(dec!(6));
+        let error = metadata
+            .validate(&MarketId::new("0xmarket"), &TokenId::new("token-1"))
+            .expect_err("live rule drift must block preparation");
+        assert!(error.contains("order-minimum mismatch"));
+    }
+
+    #[test]
+    fn evidence_hash_tracks_all() {
+        let metadata = AdmissionVenueMetadata::test_fixture();
+        let funding_evidence = funding("10000000");
+        let prepared = PreparedOrderFixture {
+            market_id: metadata.current_market_id.clone(),
+            token_id: metadata.current_token_id.clone().expect("current token"),
+            side: Side::Buy,
+            order_type: OrderType::Fak,
+            venue_amount: VenueOrderAmount::PrincipalUsd(Usd::new(dec!(10))),
+            expected_fee: Usd::new(dec!(1)),
+            expected_filled_shares: Shares::new(dec!(20)),
+            limit_price: Price::new(dec!(0.50)),
+        }
+        .build();
+        let baseline = AdmissionExecutionEvidence {
+            venue_metadata: &metadata,
+            venue_funding: &funding_evidence,
+            prepared_order: &prepared,
+        }
+        .content_hash()
+        .expect("baseline admission evidence hash");
+
+        let mut changed_metadata = metadata.clone();
+        changed_metadata.current_payload_hash = ContentHash::from_bytes([3; 32]);
+        let metadata_hash = AdmissionExecutionEvidence {
+            venue_metadata: &changed_metadata,
+            venue_funding: &funding_evidence,
+            prepared_order: &prepared,
+        }
+        .content_hash()
+        .expect("metadata-change admission evidence hash");
+
+        let changed_funding = funding("10000001");
+        let funding_hash = AdmissionExecutionEvidence {
+            venue_metadata: &metadata,
+            venue_funding: &changed_funding,
+            prepared_order: &prepared,
+        }
+        .content_hash()
+        .expect("funding-change admission evidence hash");
+
+        let mut changed_prepared = prepared;
+        changed_prepared.expected_fee = Usd::new(dec!(1.01));
+        let prepared_hash = AdmissionExecutionEvidence {
+            venue_metadata: &metadata,
+            venue_funding: &funding_evidence,
+            prepared_order: &changed_prepared,
+        }
+        .content_hash()
+        .expect("prepared-change admission evidence hash");
+
+        assert_ne!(baseline, metadata_hash);
+        assert_ne!(baseline, funding_hash);
+        assert_ne!(baseline, prepared_hash);
     }
 }

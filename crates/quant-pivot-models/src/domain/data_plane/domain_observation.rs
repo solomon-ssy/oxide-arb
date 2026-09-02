@@ -6,12 +6,13 @@
 //! value, event_time)` — adding a vertical, metric, or source never changes
 //! this shape.
 
-use std::str::FromStr;
+use std::{cmp::Ordering, str::FromStr};
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     clickhouse::{ChDecimal64, ChSchemaVersion, DomainObservationRow},
@@ -226,7 +227,198 @@ pub enum DomainSourceCheckpoint {
     },
 }
 
+/// Validation failures for source-native Crypto checkpoint construction and ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CryptoCheckpointError {
+    #[error("unsupported Crypto source `{source_id}`")]
+    UnsupportedSource { source_id: DomainSourceId },
+    #[error("Crypto report/checkpoint binding mismatch: {detail}")]
+    BindingMismatch { detail: &'static str },
+    #[error("Crypto checkpoint type changed within one source binding")]
+    CheckpointTypeChanged,
+    #[error("invalid persisted Crypto timestamp `{field}`: {value}")]
+    InvalidTimestamp { field: &'static str, value: i64 },
+}
+
+/// Hash-independent source-native ordering key for one Crypto checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CryptoCheckpointKey {
+    BinanceAggTrade {
+        aggregate_trade_id: u64,
+    },
+    ChainlinkDataStreams {
+        observations_timestamp: DateTime<Utc>,
+    },
+    PolymarketRtds {
+        source_timestamp: DateTime<Utc>,
+        envelope_timestamp: DateTime<Utc>,
+    },
+}
+
 impl DomainSourceCheckpoint {
+    /// Immutable report hash carried by checkpoints whose source key can revise.
+    #[must_use]
+    pub const fn crypto_report_hash(&self) -> Option<ContentHash> {
+        match self {
+            Self::ChainlinkDataStreams { report_hash, .. }
+            | Self::PolymarketRtds { report_hash, .. } => Some(*report_hash),
+            _ => None,
+        }
+    }
+
+    /// Project the checkpoint into its hash-independent source ordering key.
+    pub const fn crypto_order_key(&self) -> Result<CryptoCheckpointKey, CryptoCheckpointError> {
+        match self {
+            Self::BinanceAggTrade {
+                aggregate_trade_id, ..
+            } => Ok(CryptoCheckpointKey::BinanceAggTrade {
+                aggregate_trade_id: *aggregate_trade_id,
+            }),
+            Self::ChainlinkDataStreams {
+                observations_timestamp,
+                ..
+            } => Ok(CryptoCheckpointKey::ChainlinkDataStreams {
+                observations_timestamp: *observations_timestamp,
+            }),
+            Self::PolymarketRtds {
+                source_timestamp,
+                envelope_timestamp,
+                ..
+            } => Ok(CryptoCheckpointKey::PolymarketRtds {
+                source_timestamp: *source_timestamp,
+                envelope_timestamp: *envelope_timestamp,
+            }),
+            _ => Err(CryptoCheckpointError::CheckpointTypeChanged),
+        }
+    }
+
+    /// Compare an incoming Crypto checkpoint with this durable frontier.
+    ///
+    /// The returned ordering is `incoming.cmp(self)`. Report hashes never
+    /// participate in ordering: an equal source-native key with a different
+    /// hash is equivocation and must be rejected by the caller.
+    pub fn compare_crypto(&self, incoming: &Self) -> Result<Ordering, CryptoCheckpointError> {
+        let ordering = match (self, incoming) {
+            (
+                Self::BinanceAggTrade {
+                    aggregate_trade_id: current,
+                    ..
+                },
+                Self::BinanceAggTrade {
+                    aggregate_trade_id: incoming,
+                    ..
+                },
+            ) => incoming.cmp(current),
+            (
+                Self::ChainlinkDataStreams {
+                    observations_timestamp: current,
+                    ..
+                },
+                Self::ChainlinkDataStreams {
+                    observations_timestamp: incoming,
+                    ..
+                },
+            ) => incoming.cmp(current),
+            (
+                Self::PolymarketRtds {
+                    source_timestamp: current_source,
+                    envelope_timestamp: current_envelope,
+                    ..
+                },
+                Self::PolymarketRtds {
+                    source_timestamp: incoming_source,
+                    envelope_timestamp: incoming_envelope,
+                    ..
+                },
+            ) => (*incoming_source, *incoming_envelope).cmp(&(*current_source, *current_envelope)),
+            _ => return Err(CryptoCheckpointError::CheckpointTypeChanged),
+        };
+        Ok(ordering)
+    }
+
+    /// Source-order bounds used to keep `ClickHouse` reads behind the committed frontier.
+    pub fn crypto_query_frontier(&self) -> Result<(u64, i64), CryptoCheckpointError> {
+        match self {
+            Self::BinanceAggTrade {
+                aggregate_trade_id, ..
+            } => Ok((*aggregate_trade_id, i64::MAX)),
+            Self::ChainlinkDataStreams {
+                observations_timestamp,
+                ..
+            } => Ok((
+                u64::try_from(observations_timestamp.timestamp()).map_err(|_| {
+                    CryptoCheckpointError::BindingMismatch {
+                        detail: "negative Chainlink observations timestamp",
+                    }
+                })?,
+                observations_timestamp.timestamp_millis(),
+            )),
+            Self::PolymarketRtds {
+                source_timestamp,
+                envelope_timestamp,
+                ..
+            } => Ok((
+                u64::try_from(source_timestamp.timestamp_millis()).map_err(|_| {
+                    CryptoCheckpointError::BindingMismatch {
+                        detail: "negative RTDS source timestamp",
+                    }
+                })?,
+                envelope_timestamp.timestamp_millis(),
+            )),
+            _ => Err(CryptoCheckpointError::CheckpointTypeChanged),
+        }
+    }
+
+    /// Validate that a persisted projection head is the same source-native checkpoint.
+    pub fn validate_crypto_head(
+        &self,
+        source_id: &DomainSourceId,
+        source_sequence: u64,
+        event_time: DateTime<Utc>,
+        report_hash: ContentHash,
+    ) -> Result<(), CryptoCheckpointError> {
+        let matches = match self {
+            Self::BinanceAggTrade {
+                aggregate_trade_id,
+                event_time: checkpoint_time,
+            } => {
+                (source_id == &DomainSourceId::binance_agg_trade()
+                    || source_id == &DomainSourceId::binance_futures_trade())
+                    && *aggregate_trade_id == source_sequence
+                    && same_millis(*checkpoint_time, event_time)
+            }
+            Self::ChainlinkDataStreams {
+                observations_timestamp,
+                report_hash: checkpoint_hash,
+            } => {
+                source_id == &DomainSourceId::chainlink_data_streams()
+                    && u64::try_from(observations_timestamp.timestamp()).ok()
+                        == Some(source_sequence)
+                    && same_millis(*observations_timestamp, event_time)
+                    && *checkpoint_hash == report_hash
+            }
+            Self::PolymarketRtds {
+                source_timestamp,
+                report_hash: checkpoint_hash,
+                ..
+            } => {
+                (source_id == &DomainSourceId::polymarket_rtds_binance()
+                    || source_id == &DomainSourceId::polymarket_rtds_chainlink())
+                    && u64::try_from(source_timestamp.timestamp_millis()).ok()
+                        == Some(source_sequence)
+                    && same_millis(*source_timestamp, event_time)
+                    && *checkpoint_hash == report_hash
+            }
+            _ => false,
+        };
+        if !matches {
+            return Err(CryptoCheckpointError::BindingMismatch {
+                detail: "projection head differs from its committed checkpoint",
+            });
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub const fn event_time(&self) -> DateTime<Utc> {
         match self {
@@ -309,6 +501,10 @@ impl DomainSourceCheckpoint {
             _ => self.event_time(),
         }
     }
+}
+
+const fn same_millis(left: DateTime<Utc>, right: DateTime<Utc>) -> bool {
+    left.timestamp_millis() == right.timestamp_millis()
 }
 
 /// Persisted ingest checkpoint for one `(source, instrument)` stream.
@@ -419,13 +615,15 @@ fn millis_to_utc(timestamp_ms: i64) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use std::cmp::Ordering;
+
+    use chrono::{Duration, TimeZone, Utc};
     use rust_decimal_macros::dec;
 
-    use super::DomainObservation;
+    use super::{DomainObservation, DomainSourceCheckpoint};
     use crate::{
         enums::domain::{DomainFamily, DomainMetric, KlineInterval},
-        types::{BinanceSymbol, DomainInstrumentKey, DomainSourceId},
+        types::{BinanceSymbol, ContentHash, DomainInstrumentKey, DomainSourceId},
     };
 
     #[test]
@@ -469,5 +667,35 @@ mod tests {
         let mut row = observation.into_clickhouse_row(Utc::now());
         "not_a_family".clone_into(&mut row.family);
         assert!(DomainObservation::from_clickhouse_row(&row).is_none());
+    }
+
+    #[test]
+    fn crypto_checkpoint_orders() {
+        let source = Utc.with_ymd_and_hms(2026, 8, 29, 12, 0, 0).unwrap();
+        let current = DomainSourceCheckpoint::PolymarketRtds {
+            source_timestamp: source,
+            envelope_timestamp: source,
+            report_hash: hash('a'),
+        };
+        let incoming = DomainSourceCheckpoint::PolymarketRtds {
+            source_timestamp: source,
+            envelope_timestamp: source + Duration::milliseconds(1),
+            report_hash: hash('b'),
+        };
+        assert_eq!(
+            current.compare_crypto(&incoming).expect("RTDS order"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            incoming.crypto_query_frontier().expect("query frontier"),
+            (
+                u64::try_from(source.timestamp_millis()).expect("source timestamp"),
+                (source + Duration::milliseconds(1)).timestamp_millis(),
+            )
+        );
+    }
+
+    fn hash(seed: char) -> ContentHash {
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 }

@@ -79,6 +79,7 @@ use crate::{
         error, primitives,
         quant::{
             feature_parity::PgFeatureParityRepository, order_intent::PgOrderIntentRepository,
+            recommendation_economic_outcome::PgRecommendationEconomicOutcomeRepository,
             report_scope::ReportScope,
         },
         query::paginate_mapped,
@@ -231,7 +232,6 @@ fn validate_sampled_feature_parity(
         || run.training_dataset_id.is_some()
         || run.window_start != report.decision_at
         || run.window_end <= run.window_start
-        || run.feature_contract_hash.is_none()
     {
         return Err(StorageError::invariant_violation(
             Some(QUANT_FEATURE_PARITY_RUN),
@@ -275,16 +275,8 @@ fn validate_report_data_quality(
     let mut vector_ids = HashSet::new();
     let mut markets = HashSet::new();
     for record in &dq.tokens_json.0 {
-        let vector_id = record.feature_vector_id.as_ref().ok_or_else(|| {
-            StorageError::invariant_violation(
-                Some(QUANT_RECOMMENDATION_REPORT),
-                format!(
-                    "new report DQ row for market {} has no exact feature-vector binding",
-                    record.market_id
-                ),
-            )
-        })?;
-        if !vector_ids.insert(*vector_id) || !markets.insert(record.market_id.clone()) {
+        if !vector_ids.insert(record.feature_vector_id) || !markets.insert(record.market_id.clone())
+        {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_RECOMMENDATION_REPORT),
                 "report DQ snapshot contains duplicate feature-vector or market bindings",
@@ -764,6 +756,7 @@ impl PgRecommendationReportRepository {
             RecommendationStatus::Published,
         )
         .await?;
+        PgRecommendationEconomicOutcomeRepository::enqueue_report_txn(txn, report_id).await?;
         Ok(())
     }
 }
@@ -824,6 +817,7 @@ impl PgRecommendationReportRepository {
             .update(txn)
             .await
             .map_err(StorageError::from)?;
+        Self::release_announcement_claim(txn, &current.recommendation_report_id, now).await?;
         Self::insert_report_transition_log(
             txn,
             "supersede",
@@ -938,6 +932,33 @@ impl PgRecommendationReportRepository {
             .await
             .map(Into::into)
             .map_err(StorageError::from)
+    }
+
+    async fn release_announcement_claim(
+        txn: &DatabaseTransaction,
+        report_id: &RecommendationReportId,
+        now: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let Some(delivery) = Entity::find_by_id(*report_id)
+            .lock_exclusive()
+            .one(txn)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Ok(());
+        };
+        if delivery.status != ReportFactDeliveryStatus::Verified
+            || delivery.announced_at.is_some()
+            || (delivery.claim_owner.is_none() && delivery.lease_expires_at.is_none())
+        {
+            return Ok(());
+        }
+        let mut active = delivery.into_active_model();
+        active.claim_owner = ActiveValue::Set(None);
+        active.lease_expires_at = ActiveValue::Set(None);
+        active.updated_at = ActiveValue::Set(now);
+        active.update(txn).await.map_err(StorageError::from)?;
+        Ok(())
     }
 }
 
@@ -1100,26 +1121,22 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .map(|row| row.map(Into::into))
     }
 
-    async fn list_route_runs(
+    async fn find_route_runs(
         &self,
-        report_id: &RecommendationReportId,
+        report_run_ids: &[ReportRunId],
     ) -> Result<Vec<ReportRouteRunInfo>, StorageError> {
-        let Some(report) = QuantRecommendationReportEntity::find_by_id(*report_id)
-            .one(&self.db)
-            .await
-            .map_err(StorageError::from)?
-        else {
+        if report_run_ids.is_empty() {
             return Ok(Vec::new());
-        };
+        }
         let mut rows = QuantReportRouteRunEntity::find()
-            .filter(QuantReportRouteRunColumn::ReportRunId.eq(report.report_run_id))
+            .filter(QuantReportRouteRunColumn::ReportRunId.is_in(report_run_ids.iter().copied()))
             .all(&self.db)
             .await
             .map_err(StorageError::from)?
             .into_iter()
             .map(ReportRouteRunInfo::from)
             .collect::<Vec<_>>();
-        rows.sort_by_key(|row| row.route);
+        rows.sort_by_key(|row| (row.report_run_id.as_uuid(), row.route));
         Ok(rows)
     }
 
@@ -1448,8 +1465,12 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         let database_now = primitives::statement_timestamp(&txn).await?;
         let effective_lease_expires_at = database_now + lease_duration;
         let row = Entity::find()
+            .inner_join(QuantRecommendationReportEntity)
             .filter(QuantReportFactDeliveryColumn::Status.eq(ReportFactDeliveryStatus::Verified))
             .filter(QuantReportFactDeliveryColumn::AnnouncedAt.is_null())
+            .filter(
+                QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Published),
+            )
             .filter(
                 Condition::any()
                     .add(QuantReportFactDeliveryColumn::LeaseExpiresAt.is_null())
@@ -1477,7 +1498,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         &self,
         report_id: &RecommendationReportId,
         worker_id: WorkerId,
-    ) -> Result<ReportFactDeliveryInfo, StorageError> {
+    ) -> Result<FactDeliverySettlement<ReportFactDeliveryInfo>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let now = primitives::statement_timestamp(&txn).await?;
         let row = Entity::find_by_id(*report_id)
@@ -1491,11 +1512,9 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             || row.claim_owner != Some(worker_id)
             || row.lease_expires_at.is_none_or(|expires| expires <= now)
         {
-            return Err(StorageError::state_conflict(
-                QUANT_RECOMMENDATION_REPORT,
-                Some(report_id),
-                "report fact announcement is not leased by this worker",
-            ));
+            let current = Box::new(row.into());
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(FactDeliverySettlement::ClaimLost(current));
         }
         let mut active = row.into_active_model();
         active.announced_at = ActiveValue::Set(Some(now));
@@ -1504,7 +1523,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         active.updated_at = ActiveValue::Set(now);
         let updated = active.update(&txn).await.map_err(StorageError::from)?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(updated.into())
+        Ok(FactDeliverySettlement::Applied(updated.into()))
     }
 
     async fn find_by_report_run(
@@ -1711,6 +1730,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         active.status_reason = ActiveValue::Set(Some("ttl_expired".to_owned()));
         active.expired_at = ActiveValue::Set(Some(now));
         let model = active.update(&txn).await.map_err(StorageError::from)?;
+        Self::release_announcement_claim(&txn, report_id, now).await?;
         let after_info: RecommendationReportInfo = model.clone().into();
 
         let operation_log =
@@ -1913,6 +1933,7 @@ impl PgRecommendationReportRepository {
         active.status_reason = ActiveValue::Set(Some(reason.to_owned()));
         active.revoked_at = ActiveValue::Set(Some(now));
         let report_model = active.update(&txn).await.map_err(StorageError::from)?;
+        Self::release_announcement_claim(&txn, report_id, now).await?;
         let after_info: RecommendationReportInfo = report_model.clone().into();
 
         let operation_log =

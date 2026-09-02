@@ -146,7 +146,7 @@ impl ModelRouteEvidenceService {
             && run.matched_count == run.total_count
             && run.mismatched_count == 0
             && run.pending_materialization_count == 0
-            && run.feature_contract_hash == Some(contract.bindings().schemas.feature_schema_hash)
+            && run.feature_contract_hash == contract.bindings().schemas.feature_schema_hash
             && run.transform_hash == Some(contract.bindings().transform.input_transform_hash)
             && run
                 .finished_at

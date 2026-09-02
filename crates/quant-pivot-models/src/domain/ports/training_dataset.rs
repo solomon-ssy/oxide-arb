@@ -75,10 +75,12 @@ pub trait TrainingDatasetPort: Send + Sync {
     ///
     /// This authority is intentionally absent from HTTP routes. The exact
     /// cohort window, source lineage, purpose, and preassigned identity are
-    /// frozen in the durable learning-stage job.
+    /// frozen in the durable learning-stage job. `max_working_set_bytes` is the
+    /// command-owned offline compute reservation, never a local fallback.
     async fn build_feedback(
         &self,
         request: FeedbackDatasetBuildRequest,
+        max_working_set_bytes: u64,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetInfo>;

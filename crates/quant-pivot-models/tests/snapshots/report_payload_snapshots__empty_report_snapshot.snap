@@ -7,7 +7,6 @@ expression: empty_report()
   "report_run_id": "fa00afeb-89a8-5640-b06c-2fb04656e04b",
   "report_kind": "top_n",
   "decision_at": "2023-11-14T22:11:20Z",
-  "runtime_mode": "report_only",
   "top_n": 20,
   "status": "published",
   "account_source": "polymarket",
@@ -54,9 +53,9 @@ expression: empty_report()
     },
     "top_rejection_reasons": [],
     "execution_eligibility_summary": {
-      "eligible_report_only": 0,
-      "eligible_semi_auto": 0,
-      "eligible_auto_execution": 0
+      "analysis_only": 0,
+      "operator_approval": 0,
+      "policy_automatic": 0
     },
     "empty_reason": "no_positive_signal",
     "warnings": [

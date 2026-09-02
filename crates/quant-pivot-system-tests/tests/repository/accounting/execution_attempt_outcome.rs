@@ -3,10 +3,13 @@
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::quant::{
-        ExecutionAttemptDeferredReason, ExecutionAttemptOutcomeInfo,
-        ExecutionAttemptReconciliationResult, NewExecutionAttemptOutcome, NewExecutionOrder,
-        NewReconciliation, NewStrategyPositionLot, OutcomeTaskSettlement,
+    domain::{
+        order::PolymarketOrderRules,
+        quant::{
+            ExecutionAttemptDeferredReason, ExecutionAttemptOutcomeInfo,
+            ExecutionAttemptReconciliationResult, NewExecutionAttemptOutcome, NewExecutionOrder,
+            NewReconciliation, NewStrategyPositionLot, OutcomeTaskSettlement,
+        },
     },
     entities::{
         quant_execution_order::Entity as QuantExecutionOrderEntity,
@@ -17,7 +20,7 @@ use quant_pivot_models::{
         quant_strategy_position_lot::Entity as QuantPositionEntity,
     },
     enums::{
-        common::{MarketCategory, OrderType, Side},
+        common::{MarketCategory, OrderType, Side, TickSize},
         execution::{
             ExecutionOrderPhase, ExitReason, ExitState, OrderTypeKind, PositionLedgerState,
             ReconciliationEvidenceKind, ReconciliationResult, StrategyPositionOriginKind,
@@ -40,8 +43,8 @@ use quant_pivot_repository::{
 use quant_pivot_system_tests::{
     postgres::{PostgresClock, setup_pg},
     support::execution_pg_seed::{
-        ExecutionTxnIds, entry_execution_order, prepared_order, seed_approved_intent,
-        seed_report_fixture,
+        ExecutionTxnIds, PreparedOrderFixture, entry_execution_order, seed_approved_intent,
+        seed_intent_account_fees, seed_report_fixture,
     },
 };
 use rust_decimal::Decimal;
@@ -72,7 +75,7 @@ impl SourceShape {
     const fn contract(self) -> SourceShapeContract {
         match self {
             Self::Unfilled => SourceShapeContract {
-                intent_status: OrderIntentStatus::AuthorizationRejected,
+                intent_status: OrderIntentStatus::Failed,
                 order_state: ExecutionOrderState::Failed,
                 venue_status: VenueOrderStatus::Rejected,
                 reconciliation_result: ReconciliationResult::NotFilled,
@@ -310,7 +313,7 @@ pub async fn reconciliation_candidates_require_source() {
     let pre_submission = seed_report_fixture(&db).await;
     let pre_submission_intent = seed_approved_intent(&db, &pre_submission).await;
     let repository = PgExecutionAttemptOutcomeRepository::new(db.clone());
-    let cutoff = db.statement_time().await;
+    let cutoff = db.statement_time().await + Duration::seconds(30);
     let worker = WorkerId::from_v7();
 
     let claims = repository
@@ -548,6 +551,7 @@ async fn seed_execution_source(
     };
     let (entry_execution_order_id, entry_reconciliation_id) = seed.persist_entry().await;
     seed.persist_exit().await;
+    seed_intent_account_fees(db, &order_intent_id).await;
     let strategy_position_lot_id = seed.persist_position().await;
     seed.mark_intent_terminal().await;
 
@@ -570,6 +574,7 @@ impl ExecutionSourceSeed<'_> {
         order.prepared_order_json.cash_budget = Some(Usd::new(dec!(24)));
         order.prepared_order_json.expected_fee = Usd::ZERO;
         order.prepared_order_json.total_cash_delta = dec!(-24);
+        order.venue_order_id = Some(OrderId::new("repository-contract-entry"));
         order.submitted_at = Some(self.entry_filled_at - Duration::seconds(1));
         order.filled_at = self.contract.average_price.map(|_| self.entry_filled_at);
         order.cancelled_at =
@@ -617,41 +622,48 @@ impl ExecutionSourceSeed<'_> {
             return;
         }
         let exit_execution_order_id = ExecutionOrderId::from_v7();
-        QuantExecutionOrderEntity::insert(
-            NewExecutionOrder {
-                execution_order_id: exit_execution_order_id,
-                order_intent_id: self.order_intent_id,
-                order_phase: ExecutionOrderPhase::Exit,
+        let order = NewExecutionOrder {
+            execution_order_id: exit_execution_order_id,
+            order_intent_id: self.order_intent_id,
+            order_phase: ExecutionOrderPhase::Exit,
+            market_id: MarketId::new(&self.ids.market),
+            token_id: TokenId::new(&self.ids.token),
+            side: Side::Sell,
+            order_type: OrderTypeKind::Gtc,
+            price: Price::new(dec!(0.6)),
+            shares: self.contract.filled_shares,
+            cost_usd: self.contract.filled_shares * Price::new(dec!(0.6)),
+            prepared_order_json: PreparedOrderFixture {
                 market_id: MarketId::new(&self.ids.market),
                 token_id: TokenId::new(&self.ids.token),
                 side: Side::Sell,
-                order_type: OrderTypeKind::Gtc,
-                price: Price::new(dec!(0.6)),
-                shares: self.contract.filled_shares,
-                cost_usd: self.contract.filled_shares * Price::new(dec!(0.6)),
-                prepared_order_json: prepared_order(
-                    TokenId::new(&self.ids.token),
-                    Side::Sell,
-                    OrderType::Gtc,
-                    VenueOrderAmount::Shares(self.contract.filled_shares),
-                    Usd::ZERO,
-                    self.contract.filled_shares,
-                    Price::new(dec!(0.6)),
-                ),
-                venue_order_id: Some(OrderId::new("repository-contract-exit")),
-                venue_status: Some(VenueOrderStatus::Filled),
-                state: ExecutionOrderState::Filled,
-                submitted_at: Some(self.terminal_at - Duration::seconds(1)),
-                filled_at: Some(self.terminal_at),
-                cancelled_at: None,
-                gtd_expiration_at: None,
-                error_message: None,
+                order_type: OrderType::Gtc,
+                venue_amount: VenueOrderAmount::Shares(self.contract.filled_shares),
+                expected_fee: Usd::ZERO,
+                expected_filled_shares: self.contract.filled_shares,
+                limit_price: Price::new(dec!(0.6)),
+                order_rules: PolymarketOrderRules::new(TickSize::Hundredth, Shares::ONE)
+                    .expect("fixture order rules"),
+                book_hash: hash('b'),
+                clob_market_info_payload_hash: hash('c'),
+                prepared_at: self.entry_filled_at,
+                valid_until: self.terminal_at + Duration::hours(1),
             }
-            .into_active_model(),
-        )
-        .exec(self.db)
-        .await
-        .expect("persist terminal exit order");
+            .build()
+            .expect("canonical exit fixture order"),
+            venue_order_id: Some(OrderId::new("repository-contract-exit")),
+            venue_status: Some(VenueOrderStatus::Filled),
+            state: ExecutionOrderState::Filled,
+            submitted_at: Some(self.terminal_at - Duration::seconds(1)),
+            filled_at: Some(self.terminal_at),
+            cancelled_at: None,
+            gtd_expiration_at: None,
+            error_message: None,
+        };
+        QuantExecutionOrderEntity::insert(order.into_active_model())
+            .exec(self.db)
+            .await
+            .expect("persist terminal exit order");
         QuantReconciliationEntity::insert(
             NewReconciliation {
                 reconciliation_id: ReconciliationId::from_v7(),

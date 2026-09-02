@@ -16,8 +16,9 @@ use quant_pivot_api::settlement::resolution::{
     FinalizedResolutionBlock, FinalizedResolutionObservation, FinalizedResolutionScan,
     FinalizedResolutionVector, ResolutionSourceReadError, ResolutionSourceReader,
 };
-use quant_pivot_compute::ComputeExecutor;
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_core::{
+    app::exchange_history_worker::ExchangeHistoryWorker,
     execution::{
         OutcomeReconciliationPassConfig, OutcomeReconciliationService,
         OutcomeReconciliationServiceDeps,
@@ -28,17 +29,20 @@ use quant_pivot_core::{
     projection::inference_context::build_market_inference_context,
     service::{
         feedback_dataset::{FeedbackDatasetService, FeedbackDatasetServiceDeps},
+        recommendation_economic_outcome::{
+            RecommendationEconomicReplayAttempt, RecommendationEconomicReplaySource,
+        },
         training_dataset::{
             TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
             default_labelers,
         },
     },
 };
-use quant_pivot_error::storage::entity::MARKET_RESOLUTION_EVENT;
+use quant_pivot_error::{QuantError, storage::entity::MARKET_RESOLUTION_EVENT};
 use quant_pivot_models::{
     clickhouse::{
-        MarketResolutionRow, QuantFeatureEventRow, QuantModelInputEventRow,
-        QuantServingEvidenceCompletionRow,
+        ExchangeHistoryAcceptanceRow, MarketResolutionRow, QuantFeatureEventRow,
+        QuantModelInputEventRow, QuantServingEvidenceCompletionRow,
     },
     config::ClickHouseConfig,
     domain::{
@@ -48,8 +52,8 @@ use quant_pivot_models::{
         },
         ports::FeedbackDatasetBuildRequest,
         quant::{
-            FeedbackCohortWindow, FeedbackRecommendationContext, ModelVersionInfo,
-            NewRecommendation, NoopProgressSink,
+            EconomicOutcomeTaskClaim, FeedbackCohortWindow, FeedbackRecommendationContext,
+            ModelVersionInfo, NewRecommendation, NoopProgressSink,
         },
     },
     enums::{
@@ -75,16 +79,18 @@ use quant_pivot_repository::{
         PgDomainSourceCursorRepository, PgExchangeHistoryRepository,
         PgExecutionAttemptOutcomeRepository, PgFactorRepository, PgFeatureRepository,
         PgMarketLinkageRepository, PgMarketRepository, PgModelRegistryRepository,
-        PgPolicyRepository, PgRecommendationExecutionRollupRepository,
-        PgRecommendationReportRepository, PgRecommendationRepository,
-        PgRecommendationResolutionOutcomeRepository, PgResolutionObservationRepository,
-        PgStrategyPositionLotRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
+        PgPolicyRepository, PgRecommendationEconomicOutcomeRepository,
+        PgRecommendationExecutionRollupRepository, PgRecommendationReportRepository,
+        PgRecommendationRepository, PgRecommendationResolutionOutcomeRepository,
+        PgResolutionObservationRepository, PgStrategyPositionLotRepository,
+        PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
         DomainSourceCursorRepository, FactWriter, FactorRepository, FeatureRepository,
         MarketRepository, ModelRegistryRepository, PolicyRepository, QuantFactReadRepository,
-        RecommendationReportRepository, RecommendationRepository,
-        RecommendationResolutionOutcomeRepository, ServingEvidenceRepository,
+        RecommendationEconomicOutcomeRepository, RecommendationReportRepository,
+        RecommendationRepository, RecommendationResolutionOutcomeRepository,
+        ServingEvidenceRepository,
     },
 };
 use quant_pivot_research::{
@@ -116,6 +122,7 @@ use quant_pivot_system_tests::{
         report_lifecycle_seed::{materialize_report_facts, persist_and_publish_report},
         research_fixtures::{
             ReplayableSourceSliceFixture, persist_replayable_source_slice, seed_source_manifest,
+            source_fit_acceptance_row,
         },
     },
 };
@@ -134,8 +141,11 @@ struct ServingEvidenceSinks {
 }
 
 impl ServingEvidenceSinks {
-    fn new(ch: &Arc<ClickHousePool>, max_concurrent_inserts: usize) -> Self {
-        let write_manager = Arc::new(ChWriteManager::new(max_concurrent_inserts));
+    fn new(ch: &Arc<ClickHousePool>, config: &ClickHouseConfig) -> Self {
+        let write_manager = Arc::new(ChWriteManager::new(
+            config.max_concurrent_inserts,
+            &config.io,
+        ));
         Self {
             features: Arc::new(ChFactWriter::new(
                 Arc::clone(ch),
@@ -184,6 +194,21 @@ async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
             .context("connect second ClickHouse production-stack handle")?,
     );
     let facts = Arc::new(ChQuantFactReadRepository::new(Arc::clone(&ch)));
+    let acceptance = source_fit_acceptance_row()?;
+    ChFactWriter::<ExchangeHistoryAcceptanceRow>::new(
+        Arc::clone(&ch),
+        Arc::new(ChWriteManager::new(
+            stack.clickhouse_config.max_concurrent_inserts,
+            &stack.clickhouse_config.io,
+        )),
+        "quant_exchange_history_acceptance",
+    )
+    .write_batch_idempotent(
+        &ExchangeHistoryWorker::acceptance_token(acceptance.chunk_id),
+        vec![acceptance],
+    )
+    .await
+    .context("install source-fit acceptance before its PG cursor")?;
     let infra = seed_demo_with_store(&db, &store).await;
     let model = PgModelRegistryRepository::new(db.clone())
         .find_model_version(&infra.model_version_id)
@@ -202,7 +227,7 @@ async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
         &runtime.profile_artifacts.features.definition,
         profile.spec.feature_contract,
     )?;
-    let sinks = ServingEvidenceSinks::new(&ch, stack.clickhouse_config.max_concurrent_inserts);
+    let sinks = ServingEvidenceSinks::new(&ch, &stack.clickhouse_config);
     let population = seed_feedback_population(
         &FeedbackReportSeedContext {
             db: &db,
@@ -222,6 +247,7 @@ async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
         Arc::clone(&ch),
         Arc::clone(&facts),
         &population.reports,
+        &stack.clickhouse_config,
     )
     .await?;
     assert_scored_population(
@@ -398,6 +424,7 @@ async fn reconcile_outcomes(
     ch: Arc<ClickHousePool>,
     facts: Arc<ChQuantFactReadRepository>,
     reports: &[ExecutionTxnIds],
+    clickhouse: &ClickHouseConfig,
 ) -> Result<ReconciledOutcomes> {
     let window_start = reports
         .iter()
@@ -421,6 +448,7 @@ async fn reconcile_outcomes(
         Arc::clone(&ch),
         Arc::clone(&facts),
         resolution_source(first, 101, first_resolved_at, '1'),
+        clickhouse,
     );
     let first_summary = first_reconciliation
         .run_resolution_pass(pass_config(db.statement_time().await, 1))
@@ -458,6 +486,7 @@ async fn reconcile_outcomes(
         ch,
         facts,
         resolution_source(second, 102, second_resolved_at, '2'),
+        clickhouse,
     );
     let second_summary = second_reconciliation
         .run_resolution_pass(pass_config(db.statement_time().await, 1))
@@ -857,9 +886,10 @@ async fn feedback_service(
         .await?
         .context("feedback training runtime policy")?
         .snapshot;
+    let compute = Arc::new(ComputeExecutor::new().expect("feedback compute executor"));
     let training = TrainingDatasetService::new(
         TrainingDatasetServiceDeps {
-            compute: Arc::new(ComputeExecutor::new().expect("feedback compute executor")),
+            compute: Arc::clone(&compute),
             fact_read: Arc::clone(&fact_read) as Arc<dyn QuantFactReadRepository>,
             catalog_repo: Arc::new(PgCatalogLedgerRepository::new(db.clone())),
             market_repo: Arc::new(PgMarketRepository::new(db.clone())),
@@ -901,6 +931,8 @@ async fn feedback_service(
         feature_repository: Arc::new(PgFeatureRepository::new(db.clone())),
         factor_repository: Arc::new(PgFactorRepository::new(db.clone())),
         artifact_store: store,
+        compute,
+        compute_memory: OfflineMemory::try_gib(10)?,
         dataset_service: Arc::new(training),
     }))
 }
@@ -910,10 +942,14 @@ fn reconciliation_service(
     ch: Arc<ClickHousePool>,
     facts: Arc<ChQuantFactReadRepository>,
     source: Arc<dyn ResolutionSourceReader>,
+    clickhouse: &ClickHouseConfig,
 ) -> OutcomeReconciliationService {
     let writer: Arc<dyn FactWriter<MarketResolutionRow>> = Arc::new(ChFactWriter::new(
         ch,
-        Arc::new(ChWriteManager::new(2)),
+        Arc::new(ChWriteManager::new(
+            clickhouse.max_concurrent_inserts,
+            &clickhouse.io,
+        )),
         MARKET_RESOLUTION_EVENT,
     ));
     OutcomeReconciliationService::new(OutcomeReconciliationServiceDeps {
@@ -926,12 +962,30 @@ fn reconciliation_service(
         resolution_outcomes: Arc::new(PgRecommendationResolutionOutcomeRepository::new(db.clone())),
         execution_outcomes: Arc::new(PgExecutionAttemptOutcomeRepository::new(db.clone())),
         execution_rollups: Arc::new(PgRecommendationExecutionRollupRepository::new(db.clone())),
+        economic_outcomes: Arc::new(PgRecommendationEconomicOutcomeRepository::new(db.clone()))
+            as Arc<dyn RecommendationEconomicOutcomeRepository>,
+        economic_replay: Arc::new(UnexpectedEconomicReplaySource),
     })
 }
 
 struct ScriptedResolutionSource {
     head: FinalizedResolutionBlock,
     scan: FinalizedResolutionScan,
+}
+
+struct UnexpectedEconomicReplaySource;
+
+#[async_trait]
+impl RecommendationEconomicReplaySource for UnexpectedEconomicReplaySource {
+    async fn replay(
+        &self,
+        _claim: EconomicOutcomeTaskClaim,
+        _available_through: DateTime<Utc>,
+    ) -> Result<RecommendationEconomicReplayAttempt, QuantError> {
+        Err(QuantError::config(
+            "economic replay was not expected in this isolated lane test",
+        ))
+    }
 }
 
 #[async_trait]
@@ -1039,8 +1093,10 @@ const fn pass_config(
 ) -> OutcomeReconciliationPassConfig {
     OutcomeReconciliationPassConfig {
         pass_started_at,
+        sweep_secs: 1,
         candidate_batch_size,
         source_block_span: 32,
+        economic_source_lateness_secs: 300,
     }
 }
 

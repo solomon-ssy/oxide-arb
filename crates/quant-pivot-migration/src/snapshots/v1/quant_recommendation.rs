@@ -95,6 +95,12 @@ pub struct Model {
     pub quant_recommendation_execution_rollup:
         HasOne<super::quant_recommendation_execution_rollup::Entity>,
     #[sea_orm(has_one)]
+    pub quant_recommendation_economic_outcome:
+        HasOne<super::quant_recommendation_economic_outcome::Entity>,
+    #[sea_orm(has_one)]
+    pub quant_economic_outcome_reconciliation_task:
+        HasOne<super::quant_economic_outcome_reconciliation_task::Entity>,
+    #[sea_orm(has_one)]
     pub quant_recommendation_resolution_outcome:
         HasOne<super::quant_recommendation_resolution_outcome::Entity>,
 }

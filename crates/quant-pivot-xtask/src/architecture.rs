@@ -10,8 +10,9 @@ use quote::ToTokens;
 use serde::Deserialize;
 use syn::{
     Attribute, Block, Expr, ExprMethodCall, Fields, File, GenericArgument, ImplItemFn, Item,
-    ItemFn, ItemMod, ItemUse, Lit, Meta, Path as SynPath, PathArguments, Token, Type, UseTree,
-    Visibility,
+    ItemFn, ItemMod, ItemUse, Lit, Macro, Meta, Path as SynPath, PathArguments, Token, Type,
+    UseTree, Visibility,
+    parse::Parser,
     punctuated::Punctuated,
     visit::{self, Visit},
 };
@@ -342,7 +343,49 @@ fn validate_execution_history_queries(workspace_root: &Path) -> Result<Vec<Strin
         "quant_market_execution",
         "quant_execution_participant",
     ];
-    const ACTIVE_PREDICATE: &str = "argMax(active, state_revision) = 1";
+    const RANGE_SOURCE: &str = "crates/quant-pivot-repository/src/clickhouse/fact_read.rs";
+    const RANGE_CONSTANTS: &[&str] = &["ACTIVE_HISTORY_RANGES", "FILTERED_ACTIVE_HISTORY_RANGES"];
+    const RANGE_TOKENS: &[&str] = &[
+        "argMax(tuple(frontier, from_block, to_block, active), state_revision)",
+        "AS accepted_frontier",
+        "AS accepted_from_block",
+        "AS accepted_to_block",
+        "max(state_revision) AS accepted_state_revision",
+        "state_revision), 4",
+        ") = 1",
+    ];
+    const RANGE_PLACEHOLDERS: &[&str] = &[
+        "{ACTIVE_HISTORY_RANGES}",
+        "{FILTERED_ACTIVE_HISTORY_RANGES}",
+    ];
+    const JOIN_CONSTANT: &str = "HISTORY_RANGE_JOIN";
+    const JOIN_PLACEHOLDER: &str = "{HISTORY_RANGE_JOIN}";
+    const JOIN_TOKENS: &[&str] = &[
+        "history.accepted_chunk_id = fact.chunk_id",
+        "fact.block_number >= history.accepted_from_block",
+        "fact.block_number <= history.accepted_to_block",
+    ];
+
+    let (range_path, range_source) = read_architecture_source(workspace_root, RANGE_SOURCE)?;
+    let range_syntax = syn::parse_file(&range_source)
+        .with_context(|| format!("parse {}", range_path.display()))?;
+    let string_constant = |name: &str| {
+        range_syntax.items.iter().find_map(|item| {
+            let Item::Const(item) = item else {
+                return None;
+            };
+            if item.ident != name {
+                return None;
+            }
+            let Expr::Lit(value) = item.expr.as_ref() else {
+                return None;
+            };
+            let Lit::Str(value) = &value.lit else {
+                return None;
+            };
+            Some(value.value())
+        })
+    };
 
     let mut paths = Vec::new();
     for root in SOURCE_ROOTS {
@@ -350,6 +393,45 @@ fn validate_execution_history_queries(workspace_root: &Path) -> Result<Vec<Strin
     }
     paths.sort();
     let mut violations = Vec::new();
+    for name in RANGE_CONSTANTS {
+        let Some(value) = string_constant(name) else {
+            violations.push(format!(
+                "{} must define string constant {name} for the sealed execution-history range contract",
+                range_path.display()
+            ));
+            continue;
+        };
+        for token in RANGE_TOKENS {
+            if !value.contains(token) {
+                violations.push(format!(
+                    "{} constant {name} is missing sealed execution-history token `{token}`",
+                    range_path.display()
+                ));
+            }
+        }
+        if *name == "FILTERED_ACTIVE_HISTORY_RANGES" && !value.contains("WHERE chunk_id IN ?") {
+            violations.push(format!(
+                "{} constant {name} must retain bounded chunk-id filtering",
+                range_path.display()
+            ));
+        }
+    }
+    match string_constant(JOIN_CONSTANT) {
+        Some(value) => {
+            for token in JOIN_TOKENS {
+                if !value.contains(token) {
+                    violations.push(format!(
+                        "{} constant {JOIN_CONSTANT} is missing sealed execution-history token `{token}`",
+                        range_path.display()
+                    ));
+                }
+            }
+        }
+        None => violations.push(format!(
+            "{} must define string constant {JOIN_CONSTANT} for the sealed execution-history range join",
+            range_path.display()
+        )),
+    }
     let mut serving_query_count = 0_usize;
     for path in paths {
         let source =
@@ -374,9 +456,12 @@ fn validate_execution_history_queries(workspace_root: &Path) -> Result<Vec<Strin
                 continue;
             }
             serving_query_count = serving_query_count.saturating_add(1);
-            if !query.contains(ACTIVE_PREDICATE) {
+            let uses_range = RANGE_PLACEHOLDERS
+                .iter()
+                .any(|placeholder| query.contains(placeholder));
+            if !uses_range || !query.contains(JOIN_PLACEHOLDER) {
                 violations.push(format!(
-                    "{} contains an execution-history SELECT without the active state-revision predicate",
+                    "{} contains an execution-history SELECT without the canonical active-range projection and block-range join",
                     path.display()
                 ));
             }
@@ -405,6 +490,18 @@ impl<'ast> Visit<'ast> for ExecutionHistoryQueryVisitor {
             }
         }
         visit::visit_lit(self, literal);
+    }
+
+    fn visit_macro(&mut self, item: &'ast Macro) {
+        if item.path.is_ident("format") {
+            let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
+            if let Ok(arguments) = parser.parse2(item.tokens.clone()) {
+                for argument in &arguments {
+                    self.visit_expr(argument);
+                }
+            }
+        }
+        visit::visit_macro(self, item);
     }
 }
 
@@ -1004,6 +1101,10 @@ fn validate_model_category_routes(workspace_root: &Path) -> Result<Vec<String>> 
         workspace_root,
         "crates/quant-pivot-core/src/report/builder.rs",
     )?;
+    let (universe_path, universe) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/report/universe.rs",
+    )?;
     let (generation_path, generation) = read_architecture_source(
         workspace_root,
         "crates/quant-pivot-core/src/service/model_serving_generation.rs",
@@ -1061,6 +1162,23 @@ fn validate_model_category_routes(workspace_root: &Path) -> Result<Vec<String>> 
         &generation_path,
         production_generation,
     ));
+    violations.extend(
+        ReportUniverseSources {
+            owner: ArchitectureSource {
+                path: &universe_path,
+                text: &universe,
+            },
+            builder: ArchitectureSource {
+                path: &report_path,
+                text: &report,
+            },
+            parity: ArchitectureSource {
+                path: &parity_path,
+                text: &parity,
+            },
+        }
+        .validate(),
+    );
     violations.extend(validate_atomic_generation(&AtomicGenerationSources {
         generation: ArchitectureSource {
             path: &generation_path,
@@ -1253,13 +1371,6 @@ fn validate_category_runtime(
         (
             report_path,
             report,
-            "context.version.snapshot_hash,\n                primary_route,\n                &active_routes,",
-            1,
-            "the immutable universe hash must bind the frozen durable policy artifact",
-        ),
-        (
-            report_path,
-            report,
             "serving: &route.active.serving,",
             1,
             "each Route inference must retain its pre-selection generation snapshot",
@@ -1302,6 +1413,130 @@ fn validate_category_runtime(
 struct ArchitectureSource<'a> {
     path: &'a Path,
     text: &'a str,
+}
+
+struct ReportUniverseSources<'a> {
+    owner: ArchitectureSource<'a>,
+    builder: ArchitectureSource<'a>,
+    parity: ArchitectureSource<'a>,
+}
+
+impl ReportUniverseSources<'_> {
+    fn validate(&self) -> Vec<String> {
+        let mut violations = Vec::new();
+        for (source, needle, expected, invariant) in [
+            (
+                self.owner,
+                r#"CanonicalDigest::content_hash_typed(
+                    "quant-pivot/report-universe-plan", 1,
+                    &(policy_id, snapshot_hash, primary_route, &active_routes, &route_lineage,
+                        serving_head_seal_id, serving_head_seal_hash,),
+                )?"#,
+                1,
+                "the shared universe hash must bind the frozen policy artifact, every active Route, and exact history head",
+            ),
+            (
+                self.owner,
+                "routes.sort_unstable_by_key(|route| route.route);",
+                1,
+                "all active Routes must have canonical ordering before the universe is hashed",
+            ),
+            (
+                self.owner,
+                "(route.route, route.model_version_id, route.serving_contract_hash, route.model_spec_definition_hash, route.profile_hash,)",
+                1,
+                "the universe preimage must bind each active model's version, serving, spec, and research profile",
+            ),
+            (
+                self.owner,
+                "for route in routes { requirements.merge(route.requirements); }",
+                1,
+                "selector requiredness must include active Routes absent from selected membership",
+            ),
+            (
+                self.builder,
+                "ReportUniverseContract::try_new(context.version.decision_policy_snapshot_id, context.version.snapshot_hash, active.iter().map(|route| ReportUniverseRoute::from(&route.serving)).collect(), serving_head.seal.serving_head_seal_id, serving_head.seal.seal_hash,)?",
+                1,
+                "serving must construct the shared universe from its pinned policy, complete generation, and validated head",
+            ),
+            (
+                self.builder,
+                "let requirements = universe.contract.requirements.clone();",
+                1,
+                "serving selection must consume the shared all-active-route requiredness",
+            ),
+            (
+                self.builder,
+                "route_availability: Some(universe.contract.availability.clone()),",
+                1,
+                "serving selection must commit the shared Route availability contract",
+            ),
+            (
+                self.builder,
+                "report_universe_plan_hash: universe.contract.availability.universe_plan_hash,",
+                1,
+                "every published Route lineage must preserve the exact shared universe hash",
+            ),
+            (
+                self.parity,
+                ".report_selector_contract(ModelServingGenerationRequest { decision_policy_snapshot_id: context.decision_policy_snapshot_id, snapshot_hash: context.snapshot_hash, snapshot: config, }, represented_routes, binding,)",
+                1,
+                "report-associated model replay must resolve its selector from the frozen policy identity and Route binding",
+            ),
+            (
+                self.parity,
+                ".report_selector_contract(ModelServingGenerationRequest { decision_policy_snapshot_id: context.decision_policy_snapshot_id, snapshot_hash: context.snapshot_hash, snapshot: &context.config, }, &context.represented_routes, &context.selector_binding,)",
+                1,
+                "report-level replay must use the same frozen selector resolver as model replay",
+            ),
+            (
+                self.parity,
+                ".resolve_available_routes(request).await?",
+                1,
+                "Runtime selector replay must recover all active Routes, not just represented Routes",
+            ),
+            (
+                self.parity,
+                "ReportUniverseContract::try_new(request.decision_policy_snapshot_id, request.snapshot_hash, serving_routes.iter().map(ReportUniverseRoute::from).collect(), *serving_head_seal_id, *serving_head_seal_hash,)?",
+                1,
+                "Runtime replay must reconstruct the shared contract with its exact frozen head identity",
+            ),
+            (
+                self.parity,
+                "return binding.verify_universe(contract);",
+                1,
+                "Runtime replay must verify its reconstructed universe against durable Route lineage",
+            ),
+            (
+                self.parity,
+                "if *universe_plan_hash == contract.availability.universe_plan_hash",
+                1,
+                "replayed universe hashes must match exactly, never merely agree on a Route subset",
+            ),
+            (
+                self.parity,
+                "route_availability: selector.route_availability,",
+                2,
+                "both replay selectors must consume the recovered availability contract",
+            ),
+        ] {
+            let production = source
+                .text
+                .split_once("#[cfg(test)]")
+                .map_or(source.text, |(body, _)| body);
+            let text = production.split_whitespace().collect::<String>();
+            let needle = needle.split_whitespace().collect::<String>();
+            require_exact_occurrences(
+                &mut violations,
+                source.path,
+                &text,
+                &needle,
+                expected,
+                invariant,
+            );
+        }
+        violations
+    }
 }
 
 struct AtomicGenerationSources<'a> {
@@ -1413,21 +1648,33 @@ fn validate_generation_publication(sources: &AtomicGenerationSources<'_>) -> Vec
         ),
         (
             sources.governance,
-            "policy_bundle_reconciler: None,",
+            "policy_bundle_reconciler: PolicyReconcilerState::Unprepared,",
             1,
             "governance assembly must not start reconciliation before late-bound consumers",
         ),
         (
             sources.governance,
-            "pub fn start_policy_reconciler(",
+            "pub fn prepare_policy_reconciler(",
             1,
-            "reconciliation must have one explicit post-bootstrap start boundary",
+            "reconciliation must have one explicit post-bootstrap preparation boundary",
+        ),
+        (
+            sources.governance,
+            "runner.spawn(TaskId::PolicyBundleReconciler,",
+            1,
+            "policy reconciliation must be owned and drained by the application task registry",
+        ),
+        (
+            sources.governance,
+            "tokio::spawn(",
+            0,
+            "governance bundle must not detach a publisher outside the application task registry",
         ),
         (
             sources.build,
-            "governance.start_policy_reconciler(",
+            "governance.prepare_policy_reconciler(",
             1,
-            "application build must start one reconciler after all subscribers bootstrap",
+            "application build must prepare one reconciler after all subscribers bootstrap",
         ),
     ] {
         require_exact_occurrences(
@@ -1444,13 +1691,13 @@ fn validate_generation_publication(sources: &AtomicGenerationSources<'_>) -> Vec
     let reconciler_position = sources
         .build
         .text
-        .find("governance.start_policy_reconciler(");
+        .find("governance.prepare_policy_reconciler(");
     if !matches!(
         (research_position, reconciler_position),
         (Some(research), Some(reconciler)) if research < reconciler
     ) {
         violations.push(format!(
-            "{} must assemble and attach the complete serving generation before starting policy reconciliation",
+            "{} must assemble and attach the complete serving generation before preparing policy reconciliation",
             sources.build.path.display()
         ));
     }
@@ -1594,7 +1841,7 @@ fn validate_category_readiness(
             preflight,
             "RepresentedRouteSet::from_enabled_categories(",
             1,
-            "mode preflight must derive the complete configured Route set",
+            "entry-authorization preflight must derive the complete configured Route set",
         ),
         (
             preflight_path,
@@ -1608,7 +1855,7 @@ fn validate_category_readiness(
             preflight,
             ".champion(*route)",
             1,
-            "mode preflight must inspect each represented Route without fallback",
+            "entry-authorization preflight must inspect each represented Route without fallback",
         ),
         (
             capability_path,
@@ -2271,6 +2518,9 @@ fn parallel_kernel_allowed(path: &Path, function_name: Option<&str>) -> bool {
             Some("crates/quant-pivot-research/src/features/builder.rs"),
             Some("build_batch")
         ) | (
+            Some("crates/quant-pivot-core/src/service/feature_pipeline.rs"),
+            Some("build_parallel")
+        ) | (
             Some("crates/quant-pivot-research/src/parallel.rs"),
             Some("par_try_map" | "par_map_with_index" | "par_try_map_index")
         ) | (
@@ -2403,6 +2653,16 @@ impl<'ast> Visit<'ast> for BodyStyleVisitor<'_> {
         }
         if self.test_depth == 0
             && segments
+                .last()
+                .is_some_and(|segment| segment == "block_in_place")
+        {
+            self.violations.push(format!(
+                "{} blocks an application Tokio worker with `block_in_place`; submit an owned 'static kernel to ComputeExecutor",
+                self.path.display()
+            ));
+        }
+        if self.test_depth == 0
+            && segments
                 .iter()
                 .any(|segment| segment == "ThreadPoolBuilder")
             && !self.path.starts_with("crates/quant-pivot-compute/src")
@@ -2449,6 +2709,14 @@ impl<'ast> Visit<'ast> for BodyStyleVisitor<'_> {
 
     fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
         let method = call.method.to_string();
+        if self.test_depth == 0
+            && matches!(method.as_str(), "run_offline_scoped" | "run_serving_scoped")
+        {
+            self.violations.push(format!(
+                "{} calls removed scoped compute bridge `{method}`; move or Arc-share owned 'static inputs before submitting the kernel",
+                self.path.display()
+            ));
+        }
         if self.test_depth == 0
             && matches!(
                 method.as_str(),
@@ -2867,7 +3135,7 @@ fn validate_compute_runtime_contract(root: &Path, violations: &mut Vec<String>) 
         "offline_jobs: Arc<Semaphore>",
         "offline_memory: Arc<Semaphore>",
         "run_offline_cancellable",
-        "run_serving_scoped",
+        "run_serving",
         "run_security",
     ] {
         if !compute.contains(fragment) {
@@ -2881,7 +3149,7 @@ fn validate_compute_runtime_contract(root: &Path, violations: &mut Vec<String>) 
     for (relative, fragments) in [
         (
             "crates/quant-pivot-core/src/service/feature_pipeline.rs",
-            &["ComputeExecutor", "run_serving_scoped"][..],
+            &["ComputeExecutor", "run_serving"][..],
         ),
         (
             "crates/quant-pivot-core/src/service/factor_pipeline.rs",
@@ -2902,6 +3170,14 @@ fn validate_compute_runtime_contract(root: &Path, violations: &mut Vec<String>) 
         (
             "crates/quant-pivot-core/src/service/cpcv_backtest.rs",
             &["ComputeExecutor", "run_offline_cancellable"][..],
+        ),
+        (
+            "crates/quant-pivot-core/src/service/trade_policy.rs",
+            &[
+                "ComputeExecutor",
+                "acquire_offline_memory_cancellable",
+                "run_leased_cancellable",
+            ][..],
         ),
     ] {
         let path = root.join(relative);
@@ -3249,10 +3525,137 @@ mod tests {
     };
 
     use super::{
-        CargoDependency, CargoMetadata, CargoPackage, validate_config_secret_types,
-        validate_feedback_dead_semantics, validate_persistence_documents, validate_public_exports,
-        validate_source_style,
+        ArchitectureSource, CargoDependency, CargoMetadata, CargoPackage, ReportUniverseSources,
+        validate_config_secret_types, validate_feedback_dead_semantics,
+        validate_persistence_documents, validate_public_exports, validate_source_style,
     };
+
+    const REPORT_UNIVERSE_SOURCE: &str =
+        include_str!("../../quant-pivot-core/src/report/universe.rs");
+    const REPORT_BUILDER_SOURCE: &str =
+        include_str!("../../quant-pivot-core/src/report/builder.rs");
+    const REPORT_PARITY_SOURCE: &str =
+        include_str!("../../quant-pivot-core/src/service/durable_feature_parity.rs");
+
+    #[test]
+    fn report_universe_rejects_mutations() {
+        let originals = [
+            REPORT_UNIVERSE_SOURCE,
+            REPORT_BUILDER_SOURCE,
+            REPORT_PARITY_SOURCE,
+        ];
+        let paths = [
+            Path::new("report/universe.rs"),
+            Path::new("report/builder.rs"),
+            Path::new("service/durable_feature_parity.rs"),
+        ];
+        let valid = ReportUniverseSources {
+            owner: ArchitectureSource {
+                path: paths[0],
+                text: originals[0],
+            },
+            builder: ArchitectureSource {
+                path: paths[1],
+                text: originals[1],
+            },
+            parity: ArchitectureSource {
+                path: paths[2],
+                text: originals[2],
+            },
+        }
+        .validate();
+        assert!(valid.is_empty(), "{valid:?}");
+        for (index, needle, replacement) in [
+            (
+                0,
+                "policy_id,\n                snapshot_hash,",
+                "policy_id, current_snapshot_hash,",
+            ),
+            (
+                0,
+                "serving_head_seal_id,\n                serving_head_seal_hash,",
+                "latest_head_id, latest_head_hash,",
+            ),
+            (0, "route.profile_hash,", "unbound_profile_hash,"),
+            (
+                0,
+                "requirements.merge(route.requirements);",
+                "requirements.merge(ModelFeatureRequirements::default());",
+            ),
+            (
+                1,
+                "context.version.snapshot_hash,",
+                "current_snapshot_hash,",
+            ),
+            (1, "Some(universe.contract.availability.clone())", "None"),
+            (
+                2,
+                "snapshot_hash: context.snapshot_hash,",
+                "snapshot_hash: current_snapshot_hash,",
+            ),
+            (
+                2,
+                "&context.represented_routes,\n                &context.selector_binding,",
+                "&current_routes, &context.selector_binding,",
+            ),
+            (
+                2,
+                ".resolve_available_routes(request)",
+                ".resolve_routes(request, represented_routes)",
+            ),
+            (
+                2,
+                "*serving_head_seal_id,\n                *serving_head_seal_hash,",
+                "latest_head_id, latest_head_hash,",
+            ),
+            (
+                2,
+                "return binding.verify_universe(contract);",
+                "return unchecked(contract);",
+            ),
+            (
+                2,
+                "if *universe_plan_hash == contract.availability.universe_plan_hash",
+                "if true",
+            ),
+            (
+                2,
+                "route_availability: selector.route_availability,",
+                "route_availability: None,",
+            ),
+        ] {
+            assert!(
+                originals[index].contains(needle),
+                "missing mutation target {needle}"
+            );
+            let mut mutated = originals.map(str::to_owned);
+            mutated[index] = originals[index].replacen(needle, replacement, 1);
+            let violations = ReportUniverseSources {
+                owner: ArchitectureSource {
+                    path: paths[0],
+                    text: &mutated[0],
+                },
+                builder: ArchitectureSource {
+                    path: paths[1],
+                    text: &mutated[1],
+                },
+                parity: ArchitectureSource {
+                    path: paths[2],
+                    text: &mutated[2],
+                },
+            }
+            .validate();
+            assert!(
+                !violations.is_empty(),
+                "accepted broken universe binding: {needle}"
+            );
+            assert!(
+                violations
+                    .iter()
+                    .any(|error| error.contains(&paths[index].display().to_string()))
+            );
+        }
+    }
 
     fn dependency(name: &str, kind: Option<&str>, features: &[&str]) -> CargoDependency {
         CargoDependency {
@@ -3404,10 +3807,27 @@ mod tests {
         assert!(violations[0].contains("directly calls `spawn_blocking`"));
 
         let test_source = syn::parse_file(
-            "#[cfg(test)] mod tests { fn run() { let _ = tokio::task::spawn_blocking(work); } }",
+            "#[cfg(test)] mod tests {
+                fn run() {
+                    let _ = tokio::task::spawn_blocking(work);
+                    let _ = tokio::task::block_in_place(work);
+                    let _ = compute.run_offline_scoped(memory, cancel, work);
+                    let _ = compute.run_serving_scoped(work);
+                }
+            }",
         )
         .expect("parse test fixture");
         assert!(validate_source_style(&test_source, Path::new("src/test_owner.rs")).is_empty());
+
+        for forbidden in [
+            "fn run() { let _ = tokio::task::block_in_place(work); }",
+            "fn run() { let _ = compute.run_offline_scoped(memory, cancel, work); }",
+            "fn run() { let _ = compute.run_serving_scoped(work); }",
+        ] {
+            let source = syn::parse_file(forbidden).expect("parse forbidden compute fixture");
+            let violations = validate_source_style(&source, Path::new("src/unbudgeted.rs"));
+            assert_eq!(violations.len(), 1);
+        }
     }
 
     #[test]

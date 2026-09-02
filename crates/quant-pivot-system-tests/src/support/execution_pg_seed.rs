@@ -5,34 +5,54 @@
 
 use std::{collections::BTreeMap, str::FromStr, sync::Arc};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_core::governance::model_score_content_hash;
+use quant_pivot_core::{
+    governance::model_score_content_hash,
+    report::universe::{ReportUniverseContract, ReportUniverseRoute},
+    service::{
+        equity::ReportEquitySnapshot, model_runner::ActiveModelRequirements,
+        portfolio_context::PromotedRouteContract,
+    },
+};
+#[cfg(test)]
+use quant_pivot_error::QuantResult;
+#[cfg(test)]
+use quant_pivot_models::types::calibration::CalibratedPayoutDistribution;
 use quant_pivot_models::{
     config::ClickHouseConfig,
     domain::{
+        data_plane::{ExchangeHistoryFrontier, HistoryServingHeadSeal},
         governance::{NewOperationLog, RuntimeControlUpdate},
-        market::fee::{BuilderFeeAttribution, ImmediateExecutionCost},
+        market::{
+            CATALOG_OBJECT_HASH_VERSION, CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit,
+            CatalogEventCandidate, CatalogMarketCandidate, EventRegistryInfo,
+            MarketMakerRebateEvidence, MarketRegistryInfo, NewCatalogEventChange,
+            NewCatalogEventObject, NewCatalogMarketObject, NewCatalogSyncBatch,
+            fee::{BuilderFeeAttribution, ImmediateExecutionCost},
+            registry::TokenInfo,
+        },
+        order::PolymarketOrderRules,
         quant::{
             AggressiveEntryEconomics, AuthorizeOrderIntent, CalibrationArtifactPayload,
             CapitalOccupancyBucket, CapitalSettlement, DiscountCurvePoint, EntryConditionClaim,
             EntryExecutionEconomics, ExactVerificationEvidence, ExecutableEconomicTier,
             ExecutionIdentityRefs, ExistingPortfolioState, ExitLedgerWrite, GlobalPortfolioPlan,
             HardReservationBucket, MarketSelectionModel, ModelScoreCalibrationCommit,
-            ModelVersionInfo, NewAccountSnapshot, NewCalibrationArtifact, NewCapitalAllocation,
-            NewEntryConditionArtifact, NewEntryConditionInstance, NewEquitySnapshot,
-            NewExecutionAccount, NewExecutionOrder, NewFactorDefinition, NewFeatureParityState,
-            NewMarketSelection, NewMarketSelectionMember, NewModelRun, NewModelVersion,
-            NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-            NewReconciliation, NewReportDataQualitySnapshot, NewReportRouteRun,
-            NewReportTransaction, PortfolioConstraintEvidence, PortfolioDecisionResult,
-            PortfolioObjectiveEvidence, PortfolioScenario, PortfolioScenarioArtifact,
-            PortfolioScenarioEvidenceRegime, PortfolioScenarioKind, PortfolioScenarioVisibility,
-            PositionExit, PositionFill, RecommendationEconomics, RepresentedRouteSet,
-            RouteCandidateFunnel, RouteModelLineage, RouteRunOutcome,
-            ScenarioCapitalOccupancySlice, ScenarioCashflow, ScenarioDistribution,
+            ModelVersionInfo, NewAccountChainExecution, NewAccountSnapshot, NewCalibrationArtifact,
+            NewCapitalAllocation, NewEntryConditionArtifact, NewEntryConditionInstance,
+            NewEquitySnapshot, NewExecutionAccount, NewExecutionOrder, NewFactorDefinition,
+            NewFeatureParityState, NewMarketSelection, NewMarketSelectionMember, NewModelRun,
+            NewModelVersion, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
+            NewRecommendationReport, NewReconciliation, NewReportDataQualitySnapshot,
+            NewReportRouteRun, NewReportTransaction, PortfolioConstraintEvidence,
+            PortfolioDecisionResult, PortfolioObjectiveEvidence, PortfolioScenario,
+            PortfolioScenarioArtifact, PortfolioScenarioEvidenceRegime, PortfolioScenarioKind,
+            PortfolioScenarioVisibility, PositionExit, PositionFill, RecommendationEconomics,
+            RepresentedRouteSet, RouteCandidateFunnel, RouteHistoryLineage, RouteModelLineage,
+            RouteRunOutcome, ScenarioCapitalOccupancySlice, ScenarioCashflow, ScenarioDistribution,
             ScenarioEntryExecution, ScenarioExecutionCashflow, ScenarioWeight, SolverEvidence,
-            SubmissionLedgerWrite, TrainingDatasetInfo,
+            SubmissionLedgerWrite, TrainingDatasetInfo, VerifiedModelScoreCalibrationCommit,
         },
         query::TimeWindow,
     },
@@ -45,13 +65,17 @@ use quant_pivot_models::{
         },
     },
     enums::{
-        common::{MarketCategory, OrderType, Side, TickSize::Hundredth},
+        catalog::{
+            CatalogChangeType, CatalogFilterReasonSet, CatalogSyncKind, CatalogTimestampQuality,
+        },
+        common::{CategorySet, MarketCategory, OrderType, Side, TickSize::Hundredth},
         execution::{
-            CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, KillSwitchState,
-            OrderTypeKind, ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus,
+            AccountChainExecutionRole, CapitalAllocationState, ExecutionOrderPhase, ExitReason,
+            ExitState, KillSwitchState, OrderTypeKind, ReconciliationEvidenceKind,
+            ReconciliationResult, VenueOrderStatus,
         },
         factor::{FactorNormalization, NormalizationSource},
-        market::MarketStatus,
+        market::{EventStatus, MarketStatus},
         model::ModelFamily,
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
@@ -70,30 +94,33 @@ use quant_pivot_models::{
         ModelBinding, ModelBindingSource, PortfolioConfig,
     },
     types::{
-        AccountPositions, AccountSnapshotId, ArtifactUri, AuthorizationEvidence, BookSnapshotRef,
-        Bps, CalibrationArtifactId, CapitalAllocationId, ConditionTruth, ConfirmationPolicy,
-        ContentHash, DataQualitySummary, DecisionPolicySnapshotId,
-        ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION, EconomicTierId,
-        EligibilitySummary, EntryConditionArtifactId, EntryConditionArtifactV1,
-        EntryConditionBinding, EntryConditionFoldState, EntryConditionInstanceId,
-        EntryConditionPlan, EntryConditionV1, EntryMakerRebateTerms, EntryOrderPolicy,
-        EntryOrderSpec, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs, EvmAddress,
-        ExecutionAccountId, ExecutionEligibility, ExecutionOrderId, ExitPlan, ExitPolicySpec,
-        ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId,
-        HistoryServingHeadSealId, MakerRebateObjectiveStatus, MakerRebateScenarioCreditStatus,
-        MarketContext, MarketId, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId,
-        ModelVersionId, OperationDetailDocument, OperationLogId, OpportunisticExitPolicy,
-        OrderAmount, OrderId, OrderIntentId, PayoutRatio, PendingScaleOut, PolicyBundleGeneration,
-        PortfolioPlanId, PortfolioScenarioArtifactId, PortfolioScenarioModelArtifactId,
-        PreparedFeeSchedule, PreparedVenueOrder, Price, PriceCondition, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportRouteRunId, ReportRunId, ReportSummary, ResearchProfileRef,
-        ResearchProfileSpec, RiskEnvelope, RoleCode, SchemaVersion, SelectionExclusionSummary,
-        ServingAuthority, Shares, SignalCandidateId, SizingPlan, SourceSliceManifestRef,
-        ThesisInvalidationPolicy, TokenId, TradePolicyCohortProvenance, TrainingDatasetId, Usd,
-        UsdHours, VenueOrderAmount, VenuePositionSnapshot, builtin_research_profiles,
+        AccountChainExecutionId, AccountPositions, AccountSnapshotId, ArtifactUri,
+        AuthorizationEvidence, BookSnapshotRef, Bps, CalibrationArtifactId, CapitalAllocationId,
+        CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId, CatalogMarketObjectId,
+        CatalogSyncBatchId, ClobFeeDetails, ClobMarketInfoVersion, ClobMarketInfoVersionId,
+        ClobTokenDescriptor, ConditionTruth, ConfirmationPolicy, ContentHash, DataQualitySummary,
+        DecisionPolicySnapshotId, ENTRY_CONDITION_EVALUATOR_VERSION,
+        ENTRY_CONDITION_SCHEMA_VERSION, EconomicTierId, EligibilitySummary,
+        EntryConditionArtifactId, EntryConditionArtifactV1, EntryConditionBinding,
+        EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan, EntryConditionV1,
+        EntryMakerRebateTerms, EntryOrderPolicy, EntryOrderSpec, EntryPlan, EquitySnapshotId,
+        EventId, EvidenceRefs, EvmAddress, EvmBlockHash, EvmTransactionHash, ExecutionAccountId,
+        ExecutionEligibility, ExecutionOrderId, ExitPlan, ExitPolicySpec, ExposureBreakdown,
+        FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId, HistoryServingHeadSealId,
+        MICRO_SCALE, MakerRebateObjectiveStatus, MakerRebateScenarioCreditStatus, MarketContext,
+        MarketId, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelVersionId,
+        OperationDetailDocument, OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId,
+        OrderIntentId, PayoutRatio, PendingScaleOut, PolicyBundleGeneration, PortfolioPlanId,
+        PortfolioScenarioArtifactId, PortfolioScenarioModelArtifactId, PreparedFeeSchedule,
+        PreparedVenueOrder, Price, PriceCondition, Probability, RecommendationFactorBreakdown,
+        RecommendationId, RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
+        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
+        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportRouteRunId, ReportRunId,
+        ReportSummary, ResearchProfileArtifact, ResearchProfileRef, ResearchProfileSpec,
+        RiskEnvelope, RoleCode, SchemaVersion, SelectionExclusionSummary, ServingAuthority, Shares,
+        SignalCandidateId, SizingPlan, SourceSliceManifestRef, ThesisInvalidationPolicy, TokenId,
+        TradePolicyCohortProvenance, TrainingDatasetId, Usd, UsdHours, VenueOrderAmount,
+        VenuePositionSnapshot, builtin_research_profiles,
         calibration::{
             IsotonicKnot, MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
             ModelScoreCalibrationDatasetBinding, ModelScoreCalibrationFitContract,
@@ -111,22 +138,29 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgCalibrationArtifactRepository, PgEntryConditionRepository, PgEventRepository,
-        PgExecutionAccountRepository, PgExecutionSubmissionRepository, PgFactorRepository,
-        PgFeatureParityRepository, PgMarketRepository, PgMarketSelectionRepository,
-        PgModelRegistryRepository, PgModelRunRepository, PgOrderIntentRepository,
-        PgPolicyRepository, PgRuntimeControlRepository, PgStrategyPositionLotRepository,
-        PgTradePolicyRepository, PgTrainingDatasetRepository,
+        PgAccountChainExecutionRepository, PgAccountRecoveryRepository,
+        PgCalibrationArtifactRepository, PgCatalogLedgerRepository, PgClobMarketInfoRepository,
+        PgEntryConditionRepository, PgEventRepository, PgExchangeHistoryRepository,
+        PgExecutionAccountRepository, PgExecutionOrderRepository, PgExecutionSubmissionRepository,
+        PgFactorRepository, PgFeatureParityRepository, PgMarketRepository,
+        PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
+        PgOrderIntentRepository, PgPolicyRepository, PgReconciliationRepository,
+        PgRuntimeControlRepository, PgStrategyPositionLotRepository, PgTradePolicyRepository,
+        PgTrainingDatasetRepository,
     },
     traits::{
-        CalibrationArtifactRepository, EntryConditionRepository, EventRepository,
-        ExecutionAccountRepository, ExecutionSubmissionRepository, FactorRepository,
+        AccountChainExecutionRepository, AccountRecoveryRepository, CalibrationArtifactRepository,
+        CatalogLedgerRepository, ClobMarketInfoRepository, EntryConditionRepository,
+        EventRepository, ExchangeHistoryRepository, ExecutionAccountRepository,
+        ExecutionOrderRepository, ExecutionSubmissionRepository, FactorRepository,
         FeatureParityRepository, MarketRepository, MarketSelectionRepository,
         ModelRegistryRepository, ModelRunRepository, OrderIntentRepository, PolicyRepository,
-        RuntimeControlRepository, StrategyPositionLotRepository, TradePolicyRepository,
-        TrainingDatasetRepository,
+        ReconciliationRepository, RuntimeControlRepository, StrategyPositionLotRepository,
+        TradePolicyRepository, TrainingDatasetRepository,
     },
 };
+#[cfg(test)]
+use quant_pivot_research::model::{CancellationProbe, ResolvedCalibration};
 use quant_pivot_research::{
     artifact::ArtifactStore,
     factors::{FactorEngine, FactorValue, NormalizedFactor},
@@ -155,8 +189,11 @@ use super::{
     policy_fixtures::bootstrap_policy_bundle,
     report_fixtures,
     report_lifecycle_seed::{materialize_report_facts, persist_and_publish_report},
+    report_pipeline_harness::{ReportEvidenceWriters, build_model_runner},
     seeded_uuid,
-    trade_policy_fixtures::{PublishedTradePolicyFixture, PublishedTradePolicyFixtureInput},
+    trade_policy_fixtures::{
+        FixtureBookTiming, PublishedTradePolicyFixture, PublishedTradePolicyFixtureInput,
+    },
 };
 
 /// Total cash budget: 40 shares * 0.60 gross price + 1.00 observed fee.
@@ -170,9 +207,11 @@ pub const FEEDBACK_SCALE_REPORT_COUNT: usize = 11;
 pub const FEEDBACK_SCALE_PER_REPORT: usize = 1_000;
 /// Total recommendations admitted by the scaled feedback fixture.
 pub const FEEDBACK_SCALE_TOTAL: usize = FEEDBACK_SCALE_REPORT_COUNT * FEEDBACK_SCALE_PER_REPORT;
-const ENTRY_GROSS_USD: Decimal = dec!(24);
+const ENTRY_PRINCIPAL_USD: Decimal = dec!(24);
 const ENTRY_FEE_USD: Decimal = dec!(1);
-const ENTRY_PRICE: Decimal = dec!(0.6);
+/// Venue-confirmed average entry price before the observed fee.
+pub const ENTRY_PRICE: Decimal = dec!(0.6);
+const PRODUCTION_REPORT_KNOWLEDGE_LAG_SECS: i64 = 10;
 
 /// Derive the catalog's opposite token as a deterministic canonical decimal U256.
 #[must_use]
@@ -203,6 +242,160 @@ pub async fn ensure_fixture_execution_account(db: &DatabaseConnection) -> Execut
         .await
         .expect("persist fixture execution account")
         .execution_account_id
+}
+
+/// Persist exact account-chain fee facts for every filled order owned by an intent.
+pub async fn seed_intent_account_fees(db: &DatabaseConnection, intent_id: &OrderIntentId) {
+    let intent = PgOrderIntentRepository::new(db.clone())
+        .find_by_id(intent_id)
+        .await
+        .expect("load fee-fixture intent")
+        .expect("fee-fixture intent exists");
+    let orders = PgExecutionOrderRepository::new(db.clone())
+        .find_by_intent(intent_id)
+        .await
+        .expect("load fee-fixture orders");
+    let reconciliations = PgReconciliationRepository::new(db.clone());
+    let executions = PgAccountChainExecutionRepository::new(db.clone());
+    let recovery = PgAccountRecoveryRepository::new(db.clone());
+    let account = PgExecutionAccountRepository::new(db.clone())
+        .find_by_id(&intent.execution_account_id)
+        .await
+        .expect("load fee-fixture execution account")
+        .expect("fee-fixture execution account exists");
+    for (index, order) in orders.iter().enumerate() {
+        let Some(reconciliation) = reconciliations
+            .find_by_execution_order(&order.execution_order_id)
+            .await
+            .expect("load fee-fixture reconciliation")
+        else {
+            continue;
+        };
+        if !matches!(
+            reconciliation.result,
+            ReconciliationResult::Filled | ReconciliationResult::PartiallyFilled
+        ) {
+            continue;
+        }
+        let shares = reconciliation
+            .venue_filled_shares
+            .expect("filled fee-fixture reconciliation has observed shares");
+        let average_price = reconciliation
+            .venue_avg_price
+            .expect("filled fee-fixture reconciliation has observed average price");
+        let (principal_usd, maker_amount_raw, taker_amount_raw) =
+            account_fill_amounts(order.side, shares, average_price)
+                .expect("observed fee-fixture fill has exact chain base units");
+        let source_event_hash =
+            CanonicalDigest::content_hash_json(&order.execution_order_id).expect("fee source hash");
+        let account_chain_execution_id =
+            AccountChainExecutionId::from_content_hash(&source_event_hash);
+        let source_hash_text = source_event_hash.to_string();
+        let source_hash_hex = source_hash_text
+            .strip_prefix("blake3:")
+            .expect("canonical fee source hash prefix");
+        let evm_hash = format!("0x{source_hash_hex}");
+        let block_number =
+            i64::from_str_radix(&source_hash_hex[..12], 16).expect("source-derived block number");
+        let sequence = i64::try_from(index).expect("fee-fixture execution sequence");
+        let observed_at = reconciliation.updated_at;
+        executions
+            .append(vec![NewAccountChainExecution {
+                account_chain_execution_id,
+                execution_account_id: intent.execution_account_id,
+                role: AccountChainExecutionRole::Maker,
+                chain_id: account.chain_id,
+                protocol_version: 2,
+                exchange_address: EvmAddress::parse("0xe111180000d2663c0091e4f400237545b87b996b")
+                    .expect("fixture exchange"),
+                block_number,
+                block_hash: EvmBlockHash::parse(&evm_hash).expect("fixture block hash"),
+                transaction_hash: EvmTransactionHash::parse(&evm_hash)
+                    .expect("fixture transaction hash"),
+                transaction_index: sequence,
+                log_index: sequence,
+                order_id: order
+                    .venue_order_id
+                    .clone()
+                    .expect("filled fee-fixture order has venue id"),
+                maker_address: account.funder_address.clone(),
+                taker_address: EvmAddress::parse("0x2222222222222222222222222222222222222222")
+                    .expect("fixture taker"),
+                order_side: order.side,
+                order_token_id: order.token_id.clone(),
+                maker_amount_raw,
+                taker_amount_raw,
+                account_side: Some(order.side),
+                account_token_id: Some(order.token_id.clone()),
+                shares: Some(shares),
+                principal_usd: Some(principal_usd),
+                exact_fee_usd: Some(order.prepared_order_json.expected_fee),
+                builder_code: None,
+                metadata: None,
+                source_event_hash,
+                availability_policy_hash: ContentHash::from_bytes([9; 32]),
+                observed_at,
+                available_at: observed_at,
+            }])
+            .await
+            .expect("persist account fee execution");
+        let associated = recovery
+            .associate_execution(&account_chain_execution_id, observed_at)
+            .await
+            .expect("associate account fee execution");
+        assert!(
+            associated.incident.is_none(),
+            "fixture system order must associate without opening a recovery incident"
+        );
+    }
+}
+
+fn account_fill_amounts(
+    side: Side,
+    shares: Shares,
+    average_price: Price,
+) -> Result<(Usd, String, String)> {
+    ensure!(
+        shares.is_positive(),
+        "filled account shares must be positive"
+    );
+    // Decimal multiplication may round when the combined scale exceeds its
+    // precision. Multiply normalized integer coefficients so chain evidence
+    // either remains exact or fails closed before serialization.
+    let share_value = shares.inner().normalize();
+    let price_value = average_price.inner().normalize();
+    let mut coefficient = share_value
+        .mantissa()
+        .checked_mul(price_value.mantissa())
+        .context("observed account fill principal coefficient overflows")?;
+    let mut scale = share_value.scale() + price_value.scale();
+    while scale > 0 && coefficient % 10 == 0 {
+        coefficient /= 10;
+        scale -= 1;
+    }
+    let principal = Decimal::try_from_i128_with_scale(coefficient, scale)
+        .context("observed account fill principal is not exactly representable")?;
+    let exact_units = |value: Decimal| -> Result<String> {
+        ensure!(
+            value.normalize().scale() <= 6,
+            "observed account fill is finer than chain base-unit precision",
+        );
+        let scaled = value
+            .checked_mul(Decimal::from(MICRO_SCALE))
+            .context("observed account fill overflows six-decimal wire scaling")?;
+        ensure!(
+            !scaled.is_sign_negative() && scaled.fract().is_zero(),
+            "observed account fill is not an exact non-negative chain base-unit amount",
+        );
+        Ok(scaled.normalize().to_string())
+    };
+    let principal_raw = exact_units(principal)?;
+    let shares_raw = exact_units(shares.inner())?;
+    let (maker_raw, taker_raw) = match side {
+        Side::Buy => (principal_raw, shares_raw),
+        Side::Sell => (shares_raw, principal_raw),
+    };
+    Ok((Usd::new(principal), maker_raw, taker_raw))
 }
 
 /// Explicitly close the fail-closed kill switch for integration tests
@@ -312,17 +505,27 @@ pub struct SharedDemoInfra {
 /// governed-feedback production fixture.
 pub struct GovernedFeedbackInfra {
     pub template: SharedDemoInfra,
+    pub pooled_model_version_id: ModelVersionId,
     pub champion_model_version_id: ModelVersionId,
+}
+
+/// Default-policy Browser models pinned before any report is materialized.
+pub struct BrowserServingInfra {
+    pub template: SharedDemoInfra,
+    pub pooled_model_version_id: ModelVersionId,
 }
 
 /// Explicit production-stack workset and financial limits for one governed
 /// feedback serving fixture.
 pub struct FeedbackServingFixtureConfig {
+    pub book_timing: FixtureBookTiming,
     pub required_shadow_window_secs: u64,
     pub shadow_diff_threshold: Decimal,
     pub feedback_budget_usd: Decimal,
     pub outcome_reconciliation_enabled: bool,
+    pub outcome_reconciliation_sweep_secs: u64,
     pub ad_hoc_report_enabled: bool,
+    pub knowledge_lag_secs: u64,
 }
 
 impl FeedbackServingFixtureConfig {
@@ -330,7 +533,12 @@ impl FeedbackServingFixtureConfig {
         snapshot.operations_policy.outcome_reconciliation.enabled =
             self.outcome_reconciliation_enabled;
         if self.outcome_reconciliation_enabled {
-            snapshot.operations_policy.outcome_reconciliation.sweep_secs = 1;
+            assert!(
+                self.outcome_reconciliation_sweep_secs > 0,
+                "feedback outcome-reconciliation sweep must be positive"
+            );
+            snapshot.operations_policy.outcome_reconciliation.sweep_secs =
+                self.outcome_reconciliation_sweep_secs;
         }
         snapshot
             .profile_artifacts
@@ -340,7 +548,24 @@ impl FeedbackServingFixtureConfig {
         snapshot.execution_risk.portfolio = self.portfolio_policy();
         snapshot.recommendation.selection.enabled_categories = Vec::new();
         snapshot.recommendation.reports.ad_hoc_report_enabled = self.ad_hoc_report_enabled;
+        snapshot
+            .recommendation
+            .reports
+            .ad_hoc_default_knowledge_lag_secs = self.knowledge_lag_secs;
+        let data_quality = &mut snapshot.recommendation.data_quality;
+        data_quality.max_book_age_ms = data_quality
+            .max_book_age_ms
+            .max(self.knowledge_lag_secs.saturating_mul(1_000));
+        // The newest complete one-second feature bucket is strictly before the
+        // source cutoff, so its decision-time age is knowledge lag plus 1s.
+        data_quality.max_feature_bucket_age_secs = data_quality
+            .max_feature_bucket_age_secs
+            .max(self.knowledge_lag_secs.saturating_add(1));
+        data_quality.max_execution_age_secs = data_quality
+            .max_execution_age_secs
+            .max(self.knowledge_lag_secs);
         for schedule in &mut snapshot.report_schedule.schedules {
+            schedule.knowledge_lag_secs = self.knowledge_lag_secs;
             schedule.enabled = false;
         }
         snapshot.model_routing.model.shadow_diff_threshold =
@@ -426,6 +651,171 @@ pub struct CalibratedModelSeed {
     pub training_dataset_id: TrainingDatasetId,
     pub training_input_hash: ContentHash,
     pub head: CalibratedModelHead,
+    pub calibration_preset: CalibrationEvidencePreset,
+}
+
+impl CalibratedModelSeed {
+    fn execution_fixture(
+        model_version_id: ModelVersionId,
+        training_dataset_id: TrainingDatasetId,
+        head: CalibratedModelHead,
+        calibration_preset: CalibrationEvidencePreset,
+    ) -> Self {
+        Self {
+            model_version_id,
+            training_dataset_id,
+            training_input_hash: content_hash('7'),
+            head,
+            calibration_preset,
+        }
+    }
+}
+
+/// Explicit calibration evidence used by a system-test model chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalibrationEvidencePreset {
+    /// Exercise fail-closed portfolio admission with an intentionally weak binary signal.
+    WeakBinarySignal,
+    /// Preserve the general-purpose fixture's original moderate binary signal.
+    Baseline,
+    /// Keep binary candidates safely above governed scenario-stress admission floors.
+    StrongBinarySignal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CalibrationPresetEvidence {
+    mapping_min: Decimal,
+    mapping_max: Decimal,
+    mean_predicted: Decimal,
+    empirical_frequency: Decimal,
+    wilson_lower: Decimal,
+    wilson_upper: Decimal,
+    brier_score: Decimal,
+    log_loss: Decimal,
+    ece: Decimal,
+    split_wilson_upper: Decimal,
+}
+
+impl CalibrationEvidencePreset {
+    const fn evidence(self) -> CalibrationPresetEvidence {
+        match self {
+            Self::WeakBinarySignal => CalibrationPresetEvidence {
+                mapping_min: dec!(0.45),
+                mapping_max: dec!(0.55),
+                mean_predicted: dec!(0.50),
+                empirical_frequency: dec!(0.50),
+                wilson_lower: dec!(0.45),
+                wilson_upper: dec!(0.55),
+                brier_score: dec!(0.25),
+                log_loss: dec!(0.693147180560),
+                ece: Decimal::ZERO,
+                split_wilson_upper: dec!(0.007624),
+            },
+            Self::Baseline => CalibrationPresetEvidence {
+                mapping_min: dec!(0.55),
+                mapping_max: dec!(0.65),
+                mean_predicted: dec!(0.60),
+                empirical_frequency: dec!(0.60),
+                wilson_lower: dec!(0.55),
+                wilson_upper: dec!(0.65),
+                brier_score: dec!(0.24),
+                log_loss: dec!(0.67),
+                ece: dec!(0.02),
+                split_wilson_upper: dec!(0.007624),
+            },
+            Self::StrongBinarySignal => CalibrationPresetEvidence {
+                mapping_min: dec!(0.80),
+                mapping_max: dec!(0.90),
+                mean_predicted: dec!(0.85),
+                empirical_frequency: dec!(0.85),
+                wilson_lower: dec!(0.80),
+                wilson_upper: dec!(0.90),
+                brier_score: dec!(0.1275),
+                log_loss: dec!(0.422709087806),
+                ece: Decimal::ZERO,
+                split_wilson_upper: dec!(0.007624),
+            },
+        }
+    }
+
+    fn mapping(self) -> MonotoneMapping {
+        let evidence = self.evidence();
+        MonotoneMapping::Isotonic {
+            knots: vec![
+                IsotonicKnot {
+                    score: Decimal::ZERO,
+                    probability: evidence.mapping_min,
+                },
+                IsotonicKnot {
+                    score: Decimal::ONE,
+                    probability: evidence.mapping_max,
+                },
+            ],
+        }
+    }
+
+    fn reliability(self) -> ReliabilityReport {
+        let evidence = self.evidence();
+        ReliabilityReport {
+            bins: vec![ReliabilityBin {
+                predicted_lo: Decimal::ZERO,
+                predicted_hi: Decimal::ONE,
+                sample_count: 500,
+                mean_predicted: Probability::new(evidence.mean_predicted),
+                empirical_frequency: Probability::new(evidence.empirical_frequency),
+                wilson_ci: (
+                    Probability::new(evidence.wilson_lower),
+                    Probability::new(evidence.wilson_upper),
+                ),
+                mean_adverse_excursion_bps: Some(dec!(-500)),
+            }],
+            brier_score: evidence.brier_score,
+            log_loss: evidence.log_loss,
+            ece: evidence.ece,
+            n_samples: 500,
+        }
+    }
+
+    fn split_rate(self) -> SplitPayoutRateEvidence {
+        let evidence = self.evidence();
+        SplitPayoutRateEvidence {
+            total_sample_count: 500,
+            split_sample_count: 0,
+            empirical_probability: Probability::ZERO,
+            wilson_ci: (
+                Probability::ZERO,
+                Probability::new(evidence.split_wilson_upper),
+            ),
+            split_payout_ratio: PayoutRatio::try_new(dec!(0.5)).expect("split payout ratio"),
+        }
+    }
+
+    /// Resolve the exact production calibration runtime represented by this preset.
+    #[cfg(test)]
+    pub(super) fn resolved_calibration(self) -> QuantResult<ResolvedCalibration> {
+        let identity_byte = match self {
+            Self::Baseline => 1,
+            Self::StrongBinarySignal => 2,
+            Self::WeakBinarySignal => 3,
+        };
+        ResolvedCalibration::try_new(
+            CalibrationArtifactId::from_content_hash(&ContentHash::from_bytes([identity_byte; 32])),
+            self.mapping(),
+            self.reliability(),
+            self.split_rate(),
+            &CancellationProbe::default(),
+        )
+    }
+
+    /// Apply the exact production calibration runtime represented by this preset.
+    #[cfg(test)]
+    pub(super) fn calibrate_distribution(
+        self,
+        composite_score: Decimal,
+    ) -> QuantResult<CalibratedPayoutDistribution> {
+        self.resolved_calibration()?
+            .calibrate_distribution(composite_score)
+    }
 }
 
 /// Frozen alpha-head source for a calibrated system-test model.
@@ -441,15 +831,16 @@ impl CalibratedModelHead {
     /// Canonical governed control head for feedback-closure fixtures.
     pub(super) fn feedback_control() -> Self {
         Self::alpha_simplex([
-            (FactorName::new("momentum_ema_slope"), dec!(0.03)),
-            (FactorName::new("momentum_macd"), dec!(0.15)),
-            (FactorName::new("momentum_roc"), dec!(0.03)),
-            (FactorName::new("momentum_vol_adjusted"), dec!(0.18)),
+            (FactorName::new("mean_reversion"), dec!(0.148)),
+            (FactorName::new("momentum_ema_slope"), dec!(0.018)),
+            (FactorName::new("momentum_macd"), dec!(0.090)),
+            (FactorName::new("momentum_roc"), dec!(0.270)),
+            (FactorName::new("momentum_vol_adjusted"), dec!(0.108)),
             (
                 FactorName::new("struct.resolution_proximity_regime"),
-                dec!(0.17),
+                dec!(0.102),
             ),
-            (FactorName::new("struct.reversal_after_shock"), dec!(0.44)),
+            (FactorName::new("struct.reversal_after_shock"), dec!(0.264)),
         ])
         .expect("governed-feedback control head")
     }
@@ -559,6 +950,21 @@ pub struct ReportSeedConfig {
     pub trigger_key: String,
 }
 
+impl ReportSeedConfig {
+    fn selection_member(&self) -> ReportSelectionMemberSeed {
+        ReportSelectionMemberSeed {
+            market_id: MarketId::new(&self.market_id),
+            event_id: EventId::new(&self.event_id),
+            category: MarketCategory::Weather,
+            status: MarketStatus::Active,
+            primary_token_id: TokenId::new(&self.token_id),
+            secondary_token_id: Some(fixture_no_token_id(&self.market_id, &self.token_id)),
+            liquidity_usd: Some(Usd::new(dec!(5000))),
+            volume_24h_usd: Some(Usd::new(dec!(10000))),
+        }
+    }
+}
+
 /// Immutable member payload used to create one atomic market-selection snapshot.
 pub struct ReportSelectionMemberSeed {
     pub market_id: MarketId,
@@ -596,6 +1002,8 @@ pub struct ReportBuildOptions {
     /// Optional governed capital scale for historical fixtures that share the
     /// live account's equity high-water ledger.
     pub account_capital_usd: Option<Usd>,
+    /// Complete Route lineage frozen before report composition.
+    pub route_lineages: BTreeMap<BuyModelRoute, RouteModelLineage>,
 }
 
 impl ReportBuildOptions {
@@ -616,6 +1024,7 @@ impl ReportBuildOptions {
             summary: report_summary(),
             as_of: ids.decision_at,
             account_capital_usd: None,
+            route_lineages: BTreeMap::from([(BuyModelRoute::Weather, ids.report_lineage())]),
         }
     }
 
@@ -628,6 +1037,7 @@ impl ReportBuildOptions {
             summary: empty_report_summary(),
             as_of: ids.decision_at,
             account_capital_usd: None,
+            route_lineages: BTreeMap::from([(BuyModelRoute::Weather, ids.report_lineage())]),
         }
     }
 }
@@ -643,6 +1053,87 @@ pub async fn seed_demo_with_store(
     artifact_store: &Arc<dyn ArtifactStore>,
 ) -> SharedDemoInfra {
     Box::pin(seed_demo_inner(db, Some(artifact_store))).await
+}
+
+/// Bootstrap only the Browser's model Routes; all default runtime policies and
+/// independent execution authorities remain unchanged.
+pub async fn seed_browser_serving_infra(
+    db: &DatabaseConnection,
+    artifact_store: &Arc<dyn ArtifactStore>,
+) -> Result<BrowserServingInfra> {
+    let policy = PgPolicyRepository::new(db.clone());
+    ensure!(
+        policy.load_current().await?.is_none(),
+        "Browser model Routes must be frozen in the initial policy snapshot"
+    );
+    let controls = PgRuntimeControlRepository::new(db.clone());
+    let control_before = controls.load().await?;
+    let pooled_model_version_id = ModelVersionId::from_v7();
+    let weather_model_version_id = ModelVersionId::from_v7();
+    let defaults = DecisionPolicySnapshot::default();
+    let mut snapshot = defaults.clone();
+    for (route, model_id) in [
+        (BuyModelRoute::Pooled, pooled_model_version_id),
+        (BuyModelRoute::Weather, weather_model_version_id),
+    ] {
+        snapshot.model_routing.model.buy_routes.insert(
+            route,
+            BuyRouteBinding {
+                champion: ModelBinding::new(
+                    model_id,
+                    ModelBindingSource::Bootstrap,
+                    Utc::now(),
+                    PolicyBundleGeneration::FIRST,
+                    1,
+                ),
+                shadow: None,
+            },
+        );
+    }
+    let mut without_routes = snapshot.clone();
+    without_routes.model_routing.model.buy_routes.clear();
+    ensure!(
+        without_routes == defaults,
+        "Browser model bootstrap changed a non-routing policy"
+    );
+    let decision_policy_snapshot_id = bootstrap_policy_bundle(
+        &policy,
+        &snapshot,
+        "ui-demo-seed",
+        "freeze Browser pooled and Weather serving models",
+    )
+    .await;
+    let seeded = Box::pin(seed_model_version_named(
+        db,
+        SeedModelVersionInput {
+            decision_policy_snapshot_id,
+            model_version_id: weather_model_version_id,
+            book_timing: FixtureBookTiming::standard(),
+            model_name: "ui-demo-seed-model",
+            profile_ref: fixture_profile_ref(),
+            artifact_store: Some(artifact_store),
+            head: CalibratedModelHead::Policy,
+            calibration_preset: CalibrationEvidencePreset::Baseline,
+        },
+    ))
+    .await;
+    let result = BrowserServingInfra {
+        template: SharedDemoInfra {
+            feature_parity_state_id: clear_parity_state(db).await,
+            decision_policy_snapshot_id,
+            model_version_id: seeded.model_version_id,
+            calibration_artifact_id: seeded.calibration_artifact_id,
+            model_run_id: seeded.model_run_id,
+            trade_policy: seeded.trade_policy,
+            factor_serving_plane: seeded.factor_serving_plane,
+        },
+        pooled_model_version_id,
+    };
+    ensure!(
+        controls.load().await? == control_before,
+        "Browser model bootstrap changed independent execution authorities"
+    );
+    Ok(result)
 }
 
 /// Reserve one exact Weather route and seed the model-template lineage used to
@@ -661,9 +1152,23 @@ pub async fn seed_feedback_serving_infra(
             .is_none(),
         "governed-feedback serving fixture requires a fresh policy database"
     );
+    let pooled_model_version_id = ModelVersionId::from_v7();
     let champion_model_version_id = ModelVersionId::from_v7();
     let mut snapshot = DecisionPolicySnapshot::default();
     config.apply_runtime_controls(&mut snapshot);
+    snapshot.model_routing.model.buy_routes.insert(
+        BuyModelRoute::Pooled,
+        BuyRouteBinding {
+            champion: ModelBinding::new(
+                pooled_model_version_id,
+                ModelBindingSource::Bootstrap,
+                Utc::now(),
+                PolicyBundleGeneration::FIRST,
+                1,
+            ),
+            shadow: None,
+        },
+    );
     snapshot.model_routing.model.buy_routes.insert(
         BuyModelRoute::Weather,
         BuyRouteBinding {
@@ -689,10 +1194,12 @@ pub async fn seed_feedback_serving_infra(
         SeedModelVersionInput {
             decision_policy_snapshot_id,
             model_version_id: champion_model_version_id,
+            book_timing: config.book_timing,
             model_name: "governed-feedback-model",
             profile_ref: fixture_profile_ref(),
             artifact_store: Some(artifact_store),
             head: CalibratedModelHead::feedback_control(),
+            calibration_preset: CalibrationEvidencePreset::Baseline,
         },
     ))
     .await;
@@ -706,6 +1213,7 @@ pub async fn seed_feedback_serving_infra(
             trade_policy: seeded.trade_policy,
             factor_serving_plane: seeded.factor_serving_plane,
         },
+        pooled_model_version_id,
         champion_model_version_id,
     }
 }
@@ -735,10 +1243,12 @@ async fn seed_demo_inner(
         SeedModelVersionInput {
             decision_policy_snapshot_id,
             model_version_id: ModelVersionId::from_v7(),
+            book_timing: FixtureBookTiming::standard(),
             model_name: "ui-demo-seed-model",
             profile_ref: fixture_profile_ref(),
             artifact_store,
             head: CalibratedModelHead::Policy,
+            calibration_preset: CalibrationEvidencePreset::Baseline,
         },
     ))
     .await;
@@ -862,19 +1372,442 @@ pub async fn seed_report_on_infra(
     ids
 }
 
+struct ProductionCatalogSeed<'a> {
+    config: &'a ReportSeedConfig,
+    no_token_id: TokenId,
+    source_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+    sync_kind: CatalogSyncKind,
+    batch_id: CatalogSyncBatchId,
+    event_change_id: CatalogEventChangeId,
+}
+
+impl<'a> ProductionCatalogSeed<'a> {
+    fn new(
+        config: &'a ReportSeedConfig,
+        source_at: DateTime<Utc>,
+        sync_kind: CatalogSyncKind,
+    ) -> Self {
+        Self {
+            config,
+            no_token_id: fixture_no_token_id(&config.market_id, &config.token_id),
+            source_at,
+            end_at: source_at + Duration::days(7),
+            sync_kind,
+            batch_id: CatalogSyncBatchId::from_v7(),
+            event_change_id: CatalogEventChangeId::from_v7(),
+        }
+    }
+
+    fn event(&self) -> EventRegistryInfo {
+        EventRegistryInfo {
+            event_id: EventId::new(&self.config.event_id),
+            title: self.config.market_question.clone(),
+            slug: self.config.market_slug.clone(),
+            series_slug: None,
+            status: EventStatus::Active,
+            market_ids: vec![MarketId::new(&self.config.market_id)],
+            categories: CategorySet::from(MarketCategory::Weather),
+            tags: vec![MarketCategory::Weather.to_string()],
+            neg_risk: false,
+            end_date: Some(self.end_at),
+            created_at: self.source_at,
+            updated_at: self.source_at,
+        }
+    }
+
+    fn market(&self) -> MarketRegistryInfo {
+        MarketRegistryInfo {
+            market_id: MarketId::new(&self.config.market_id),
+            event_id: EventId::new(&self.config.event_id),
+            token_yes: TokenId::new(&self.config.token_id),
+            token_no: self.no_token_id.clone(),
+            question: self.config.market_question.clone(),
+            slug: self.config.market_slug.clone(),
+            description: None,
+            categories: CategorySet::from(MarketCategory::Weather),
+            status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
+            outcome: None,
+            neg_risk: false,
+            tick_size: Hundredth,
+            tokens: vec![
+                TokenInfo {
+                    token_id: TokenId::new(&self.config.token_id),
+                    outcome: "Yes".to_owned(),
+                    neg_risk: false,
+                },
+                TokenInfo {
+                    token_id: self.no_token_id.clone(),
+                    outcome: "No".to_owned(),
+                    neg_risk: false,
+                },
+            ],
+            best_bid: None,
+            best_ask: None,
+            depth_usd: None,
+            min_order_size: Decimal::ONE,
+            liquidity_usd: Some(Usd::new(dec!(100_000))),
+            volume_24h: Some(Usd::new(dec!(10_000))),
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
+            start_date: Some(self.source_at),
+            end_date: Some(self.end_at),
+            resolved_at: None,
+            created_at: Some(self.source_at),
+            updated_at: self.source_at,
+        }
+    }
+
+    fn commit(&self) -> Result<CatalogBatchCommit> {
+        let event = self.event();
+        let market = self.market();
+        let event_payload = serde_json::to_value(&event)?;
+        let market_payload = serde_json::to_value(&market)?;
+        let event_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-event-object",
+            CATALOG_OBJECT_HASH_VERSION,
+            &event_payload,
+        )?;
+        let market_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-market-object",
+            CATALOG_OBJECT_HASH_VERSION,
+            &market_payload,
+        )?;
+        let event_object_id = CatalogEventObjectId::from_content_hash(&event_hash);
+        let mut event_projection = make_event(
+            &self.config.event_id,
+            &self.config.market_question,
+            &self.config.market_slug,
+            MarketCategory::Weather,
+        );
+        event_projection.catalog_market_ids = vec![MarketId::new(&self.config.market_id)].into();
+        event_projection.end_date = Some(self.end_at);
+        event_projection.content_hash = event_hash;
+        let mut market_projection = make_market(
+            &self.config.market_id,
+            &self.config.event_id,
+            &self.config.market_question,
+            &self.config.market_slug,
+            MarketCategory::Weather,
+            Some(self.end_at),
+        );
+        market_projection.yes_token_id = TokenId::new(&self.config.token_id);
+        market_projection.no_token_id = self.no_token_id.clone();
+        market_projection.start_date = Some(self.source_at);
+        market_projection.content_hash = market_hash;
+        let batch_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-manifest",
+            1,
+            &(event_hash, market_hash),
+        )?;
+        Ok(CatalogBatchCommit {
+            batch: NewCatalogSyncBatch {
+                catalog_sync_batch_id: self.batch_id,
+                sync_kind: self.sync_kind,
+                started_at: self.source_at,
+                fetched_at: self.source_at,
+                event_count: 1,
+                market_count: 1,
+                rejected_count: 0,
+                batch_hash,
+            },
+            events: vec![CatalogEventCandidate {
+                projection: event_projection,
+                object: NewCatalogEventObject {
+                    event_object_id,
+                    content_hash: event_hash,
+                    schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
+                    payload: event_payload.into(),
+                },
+                change: NewCatalogEventChange {
+                    event_change_id: self.event_change_id,
+                    catalog_sync_batch_id: self.batch_id,
+                    event_object_id,
+                    event_id: EventId::new(&self.config.event_id),
+                    source_effective_at: self.source_at,
+                    source_timestamp_quality: CatalogTimestampQuality::Source,
+                    change_type: CatalogChangeType::GammaScanUpsert,
+                },
+            }],
+            markets: vec![CatalogMarketCandidate {
+                projection: market_projection,
+                object: NewCatalogMarketObject {
+                    market_object_id: CatalogMarketObjectId::from_content_hash(&market_hash),
+                    content_hash: market_hash,
+                    schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
+                    payload: market_payload.into(),
+                },
+                market_change_id: CatalogMarketChangeId::from_v7(),
+                catalog_sync_batch_id: self.batch_id,
+                event_object_id,
+                source_effective_at: self.source_at,
+                source_timestamp_quality: CatalogTimestampQuality::Source,
+                source_created_at: Some(self.source_at),
+                change_type: CatalogChangeType::GammaScanUpsert,
+            }],
+        })
+    }
+
+    fn clob_market_info(&self) -> Result<ClobMarketInfoVersion> {
+        let raw_payload = serde_json::json!({
+            "c": self.config.market_id,
+            "t": [
+                { "t": self.config.token_id, "o": "Yes" },
+                { "t": self.no_token_id, "o": "No" }
+            ],
+            "mts": "0.01",
+            "mos": "1",
+            "nr": false,
+            "itode": false,
+            "ibce": false,
+            "oas": 0,
+            "fd": { "r": "0", "e": 1, "to": true },
+            "mbf": 0,
+            "tbf": 0,
+            "rfqe": false
+        });
+        Ok(ClobMarketInfoVersion {
+            version_id: ClobMarketInfoVersionId::from_v7(),
+            market_id: MarketId::new(&self.config.market_id),
+            tokens: vec![
+                ClobTokenDescriptor {
+                    token_id: TokenId::new(&self.config.token_id),
+                    outcome: "Yes".to_owned(),
+                },
+                ClobTokenDescriptor {
+                    token_id: self.no_token_id.clone(),
+                    outcome: "No".to_owned(),
+                },
+            ],
+            tick_size: Hundredth,
+            minimum_order_size: Shares::ONE,
+            neg_risk: false,
+            taker_order_delay_enabled: false,
+            minimum_order_age_secs: Some(0),
+            blockaid_check_enabled: false,
+            fee_details: ClobFeeDetails {
+                rate: Decimal::ZERO,
+                exponent: 1,
+                taker_only: true,
+            },
+            builder_maker_fee_rate_bps: 0,
+            builder_taker_fee_rate_bps: 0,
+            effective_at: self.source_at,
+            available_at: self.source_at,
+            payload_hash: CanonicalDigest::content_hash_json(&raw_payload)?,
+            raw_payload,
+        })
+    }
+}
+
+async fn seed_production_catalog(
+    db: &DatabaseConnection,
+    config: &ReportSeedConfig,
+) -> Result<DateTime<Utc>> {
+    let source_at = db.statement_time().await;
+    let catalog = PgCatalogLedgerRepository::new(db.clone());
+    let sync_kind = if catalog.coverage_start().await?.is_some() {
+        CatalogSyncKind::Reconcile
+    } else {
+        CatalogSyncKind::Baseline
+    };
+    let seed = ProductionCatalogSeed::new(config, source_at, sync_kind);
+    let committed = catalog.commit(seed.commit()?).await?;
+    PgClobMarketInfoRepository::new(db.clone())
+        .insert_observation(seed.clob_market_info()?)
+        .await?;
+    let visible_at = committed
+        .committed_at
+        .context("durable production catalog commit has no committed_at")?
+        + Duration::seconds(PRODUCTION_REPORT_KNOWLEDGE_LAG_SECS);
+    loop {
+        let now = db.statement_time().await;
+        if now >= visible_at {
+            return Ok(now);
+        }
+        tokio::time::sleep((visible_at - now).to_std()?).await;
+    }
+}
+
+/// Account and catalog truth for one production-format browser report.
+pub struct ProductionReportSeed {
+    pub catalog: ReportSeedConfig,
+    pub account: ReportEquitySnapshot,
+    /// Exact pre-start Activation source published by the production history worker.
+    pub history_head: HistoryServingHeadSeal,
+}
+
+impl ProductionReportSeed {
+    pub(crate) async fn validated_history(
+        &self,
+        db: &DatabaseConnection,
+        decision_at: DateTime<Utc>,
+    ) -> Result<HistoryServingHeadSeal> {
+        let history = PgExchangeHistoryRepository::new(db.clone())
+            .validate_serving_head(
+                self.history_head.seal.serving_head_seal_id,
+                self.history_head.seal.seal_hash,
+            )
+            .await?;
+        ensure!(
+            history == self.history_head
+                && history.seal.frontier == ExchangeHistoryFrontier::Activation
+                && history.seal.created_at <= decision_at,
+            "Browser report source is not its exact decision-visible Activation head"
+        );
+        Ok(history)
+    }
+
+    async fn freeze_context(
+        &self,
+        db: &DatabaseConnection,
+        artifacts: &Arc<dyn ArtifactStore>,
+        infra: &SharedDemoInfra,
+        decision_at: DateTime<Utc>,
+    ) -> Result<ProductionReportContext> {
+        let history = self.validated_history(db, decision_at).await?;
+        let policy = PgPolicyRepository::new(db.clone())
+            .load_snapshot(&infra.decision_policy_snapshot_id)
+            .await?
+            .context("Browser report lost its frozen policy artifact")?;
+        let runner = Box::pin(build_model_runner(
+            db,
+            artifacts,
+            ReportEvidenceWriters::default().model_inputs,
+        ))
+        .await;
+        let routes = Box::pin(runner.available_route_requirements(&policy)).await?;
+        let universe = ReportUniverseContract::try_new(
+            policy.decision_policy_snapshot_id,
+            policy.snapshot_hash,
+            routes
+                .iter()
+                .map(|route| ReportUniverseRoute::from(&route.serving))
+                .collect(),
+            history.seal.serving_head_seal_id,
+            history.seal.seal_hash,
+        )?;
+        let weather = routes
+            .iter()
+            .find(|route| route.route == BuyModelRoute::Weather)
+            .context("Browser report has no active Weather Route")?;
+        ensure!(
+            weather.model_version_id == infra.model_version_id,
+            "Browser report model differs from the champion pinned before selection"
+        );
+        Ok(ProductionReportContext {
+            routes,
+            universe,
+            history,
+        })
+    }
+}
+
+struct ProductionReportContext {
+    routes: Vec<ActiveModelRequirements>,
+    universe: ReportUniverseContract,
+    history: HistoryServingHeadSeal,
+}
+
+impl ProductionReportContext {
+    fn route_lineages(
+        &self,
+        ids: &ExecutionTxnIds,
+    ) -> Result<BTreeMap<BuyModelRoute, RouteModelLineage>> {
+        self.routes
+            .iter()
+            .filter(|route| matches!(route.route, BuyModelRoute::Pooled | BuyModelRoute::Weather))
+            .map(|route| {
+                let contract = PromotedRouteContract::from_version(route.route, &route.version)?;
+                Ok((
+                    route.route,
+                    RouteModelLineage {
+                        model_version_id: contract.model_version_id,
+                        model_run_id: (route.route == BuyModelRoute::Weather)
+                            .then_some(ids.model_run),
+                        calibration_artifact_id: contract.calibration_artifact_id,
+                        trade_policy_artifact_id: contract.trade_policy_artifact_id,
+                        research_profile_artifact_id: contract.research_profile_artifact_id,
+                        research_profile_ref: contract.research_profile_ref,
+                        prediction_horizon_secs: contract.prediction_horizon_secs,
+                        feature_contract_digest: contract.feature_contract_digest,
+                        pit_lineage_digest: contract.pit_lineage_digest,
+                        serving_contract_digest: contract.serving_contract_hash,
+                        recommendation_contract_hash: contract.recommendation_contract_hash,
+                        report_universe_plan_hash: self.universe.availability.universe_plan_hash,
+                        history: RouteHistoryLineage::Runtime {
+                            serving_head_seal_id: self.history.seal.serving_head_seal_id,
+                            serving_head_seal_hash: self.history.seal.seal_hash,
+                        },
+                        serving_authority: contract.serving_authority,
+                    },
+                ))
+            })
+            .collect()
+    }
+}
+
 /// Seed a report with a production-format S3 bundle and exact `ClickHouse` facts.
 pub async fn seed_production_report(
     db: &DatabaseConnection,
     clickhouse: &ClickHouseConfig,
     artifacts: &Arc<dyn ArtifactStore>,
     infra: &SharedDemoInfra,
-    config: ReportSeedConfig,
+    seed: ProductionReportSeed,
 ) -> Result<ExecutionTxnIds> {
-    let ids = prepare_report_on_infra(db, infra, &config, db.statement_time().await).await;
-    let mut transaction = ids.build_report_transaction();
+    let controls = PgRuntimeControlRepository::new(db.clone());
+    let authority_before = controls.load().await?;
+    let decision_at = seed_production_catalog(db, &seed.catalog).await?;
+    let context = Box::pin(seed.freeze_context(db, artifacts, infra, decision_at)).await?;
+    let selection_members = vec![seed.catalog.selection_member()];
+    let market_selection_id = seed_market_selection(
+        db,
+        &infra.decision_policy_snapshot_id,
+        decision_at,
+        selection_members,
+    )
+    .await;
+    let ids = finish_report_lineage(
+        db,
+        infra,
+        &seed.catalog,
+        decision_at,
+        market_selection_id,
+        seed.account.account_snapshot.execution_account_id,
+    )
+    .await;
+    let mut options = ReportBuildOptions::published_single(&ids);
+    options.route_lineages = context.route_lineages(&ids)?;
+    let mut transaction = build_custom_report_transaction(&ids, options);
+    let ProductionReportSeed {
+        catalog: config,
+        mut account,
+        history_head: _,
+    } = seed;
+    // The browser account stage is frozen while catalog knowledge matures.
+    // Bind that same financial state to the final report decision and keep
+    // every account/equity foreign key in this one atomic report transaction.
+    account.account_snapshot.account_snapshot_id = ids.account_snapshot;
+    account.account_snapshot.as_of = decision_at;
+    account.equity_snapshot.equity_snapshot_id = transaction.equity_snapshot.equity_snapshot_id;
+    account.equity_snapshot.account_snapshot_ref = Some(ids.account_snapshot);
+    account.equity_snapshot.as_of = decision_at;
+    transaction.report.capital_base_usd = account.account_snapshot.capital_base_usd;
+    transaction.account_snapshot = account.account_snapshot;
+    transaction.equity_snapshot = account.equity_snapshot;
     materialize_report_facts(artifacts, clickhouse, &mut transaction).await?;
     ids.complete_model_run(db).await;
-    persist_and_publish_report(db, transaction, &config.trigger_key, 10).await;
+    persist_and_publish_report(
+        db,
+        transaction,
+        &config.trigger_key,
+        PRODUCTION_REPORT_KNOWLEDGE_LAG_SECS,
+    )
+    .await;
+    ensure!(
+        controls.load().await? == authority_before,
+        "Browser report materialization changed independent execution authorities"
+    );
     Ok(ids)
 }
 
@@ -938,16 +1871,7 @@ pub async fn prepare_report_on_infra(
         infra,
         config,
         decision_at,
-        vec![ReportSelectionMemberSeed {
-            market_id: MarketId::new(&config.market_id),
-            event_id: EventId::new(&config.event_id),
-            category: MarketCategory::Weather,
-            status: MarketStatus::Active,
-            primary_token_id: TokenId::new(&config.token_id),
-            secondary_token_id: Some(no_token_id),
-            liquidity_usd: Some(Usd::new(dec!(5000))),
-            volume_24h_usd: Some(Usd::new(dec!(10000))),
-        }],
+        vec![config.selection_member()],
     )
     .await
 }
@@ -967,7 +1891,16 @@ pub async fn prepare_report_lineage(
         selection_members,
     )
     .await;
-    finish_report_lineage(db, infra, config, decision_at, market_selection_id).await
+    let execution_account = ensure_fixture_execution_account(db).await;
+    finish_report_lineage(
+        db,
+        infra,
+        config,
+        decision_at,
+        market_selection_id,
+        execution_account,
+    )
+    .await
 }
 
 /// Prepare immutable report lineage from an already materialized production
@@ -992,7 +1925,16 @@ pub async fn prepare_report_lineage_model(
         .create_snapshot(selection.snapshot, selection.members)
         .await
         .expect("persist exact market selection");
-    finish_report_lineage(db, infra, config, decision_at, market_selection_id).await
+    let execution_account = ensure_fixture_execution_account(db).await;
+    finish_report_lineage(
+        db,
+        infra,
+        config,
+        decision_at,
+        market_selection_id,
+        execution_account,
+    )
+    .await
 }
 
 async fn finish_report_lineage(
@@ -1001,8 +1943,8 @@ async fn finish_report_lineage(
     config: &ReportSeedConfig,
     decision_at: DateTime<Utc>,
     market_selection_id: MarketSelectionId,
+    execution_account: ExecutionAccountId,
 ) -> ExecutionTxnIds {
-    let execution_account = ensure_fixture_execution_account(db).await;
     let model_run_id = seed_report_model_run(db, infra, &market_selection_id, decision_at).await;
     ExecutionTxnIds {
         decision_at,
@@ -1505,7 +2447,7 @@ pub async fn seed_settlement_report_fixture(db: &DatabaseConnection) -> Executio
     .await
 }
 
-/// Create a semi-auto intent awaiting operator approval.
+/// Create an operator-authorization-pending intent.
 pub async fn seed_pending_intent(db: &DatabaseConnection, ids: &ExecutionTxnIds) -> OrderIntentId {
     let order_intent_id = OrderIntentId::from_v7();
     PgOrderIntentRepository::new(db.clone())
@@ -1590,7 +2532,10 @@ pub async fn fill_entry_lot(
                 identity_refs: empty_identity_refs(),
                 state: ExecutionOrderState::Filled,
                 intent_status: OrderIntentStatus::Filled,
-                venue_order_id: Some(OrderId::new("venue-entry")),
+                venue_order_id: Some(OrderId::new(format!(
+                    "venue-entry-{}",
+                    order.execution_order_id
+                ))),
                 venue_status: Some(VenueOrderStatus::Filled),
                 submitted_at: filled_at,
                 filled_at: Some(filled_at),
@@ -1651,7 +2596,10 @@ pub async fn partial_exit_lot(
             ExitLedgerWrite {
                 identity_refs: empty_identity_refs(),
                 order_state: ExecutionOrderState::Filled,
-                venue_order_id: Some(OrderId::new("venue-exit-partial")),
+                venue_order_id: Some(OrderId::new(format!(
+                    "venue-exit-partial-{}",
+                    exit.execution_order_id
+                ))),
                 venue_status: Some(VenueOrderStatus::Filled),
                 filled_at: Some(exited_at),
                 cancelled_at: None,
@@ -1715,7 +2663,10 @@ pub async fn close_position_full(
             ExitLedgerWrite {
                 identity_refs: empty_identity_refs(),
                 order_state: ExecutionOrderState::Filled,
-                venue_order_id: Some(OrderId::new("venue-exit")),
+                venue_order_id: Some(OrderId::new(format!(
+                    "venue-exit-{}",
+                    exit.execution_order_id
+                ))),
                 venue_status: Some(VenueOrderStatus::Filled),
                 filled_at: Some(exited_at),
                 cancelled_at: None,
@@ -1885,51 +2836,75 @@ pub fn fixture_profile_ref() -> ResearchProfileRef {
         .profile_ref
 }
 
-pub fn prepared_order(
-    token_id: TokenId,
-    side: Side,
-    order_type: OrderType,
-    venue_amount: VenueOrderAmount,
-    expected_fee: Usd,
-    expected_filled_shares: Shares,
-    worst_price: Price,
-) -> PreparedVenueOrder {
-    let now = Utc::now();
-    let total_cash_delta = match (side, venue_amount) {
-        (Side::Buy, VenueOrderAmount::GrossUsd(gross)) => -(gross.inner() + expected_fee.inner()),
-        (Side::Sell, VenueOrderAmount::Shares(shares)) => {
-            shares.inner() * worst_price.inner() - expected_fee.inner()
-        }
-        _ => Decimal::ZERO,
-    };
-    PreparedVenueOrder {
-        profile_ref: fixture_profile_ref(),
-        token_id,
-        side,
-        order_type,
-        post_only: false,
-        worst_price,
-        cash_budget: venue_amount.gross_usd().map(|gross| gross + expected_fee),
-        venue_amount,
-        expected_fee,
-        total_cash_delta,
-        expected_filled_shares,
-        book_hash: content_hash('b'),
-        clob_market_info_hash: content_hash('c'),
-        fee_schedule: PreparedFeeSchedule {
-            schedule_hash: content_hash('f'),
-            effective_at: now,
-            available_at: now,
-            platform_rate: dec!(0.02),
-            exponent: Decimal::ONE,
-            taker_only: true,
-            builder_maker_fee_bps: Bps::ZERO,
-            builder_taker_fee_bps: Bps::ZERO,
-            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
-        },
-        maker_rebate_terms: EntryMakerRebateTerms::AggressiveNotApplicable,
-        prepared_at: now,
-        valid_until: now + Duration::hours(1),
+pub struct PreparedOrderFixture {
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub side: Side,
+    pub order_type: OrderType,
+    pub venue_amount: VenueOrderAmount,
+    pub expected_fee: Usd,
+    pub expected_filled_shares: Shares,
+    pub limit_price: Price,
+    pub order_rules: PolymarketOrderRules,
+    pub book_hash: ContentHash,
+    pub clob_market_info_payload_hash: ContentHash,
+    pub prepared_at: DateTime<Utc>,
+    pub valid_until: DateTime<Utc>,
+}
+
+impl PreparedOrderFixture {
+    pub fn build(self) -> Result<PreparedVenueOrder> {
+        ensure!(
+            self.prepared_at < self.valid_until,
+            "prepared fixture validity is empty"
+        );
+        let canonical =
+            self.order_rules
+                .validate_order(self.side, self.venue_amount, self.limit_price)?;
+        ensure!(
+            canonical.requested_shares == self.expected_filled_shares,
+            "prepared fixture shares differ from canonical order amounts",
+        );
+        let total_cash_delta = match self.side {
+            Side::Buy => -(canonical.principal_usd.inner() + self.expected_fee.inner()),
+            Side::Sell => canonical.principal_usd.inner() - self.expected_fee.inner(),
+        };
+        Ok(PreparedVenueOrder {
+            profile_ref: fixture_profile_ref(),
+            market_id: self.market_id,
+            token_id: self.token_id,
+            tick_size: self.order_rules.tick_size,
+            minimum_order_size: self.order_rules.minimum_order_size,
+            neg_risk: false,
+            side: self.side,
+            order_type: self.order_type,
+            post_only: false,
+            limit_price: self.limit_price,
+            expected_worst_fill_price: self.limit_price,
+            cash_budget: (self.side == Side::Buy)
+                .then_some(canonical.principal_usd + self.expected_fee),
+            venue_amount: canonical.venue_amount,
+            requested_shares: canonical.requested_shares,
+            expected_fee: self.expected_fee,
+            total_cash_delta,
+            expected_filled_shares: self.expected_filled_shares,
+            book_hash: self.book_hash,
+            clob_market_info_payload_hash: self.clob_market_info_payload_hash,
+            fee_schedule: PreparedFeeSchedule {
+                schedule_hash: content_hash('f'),
+                effective_at: self.prepared_at,
+                available_at: self.prepared_at,
+                platform_rate: dec!(0.02),
+                exponent: Decimal::ONE,
+                taker_only: true,
+                builder_maker_fee_bps: Bps::ZERO,
+                builder_taker_fee_bps: Bps::ZERO,
+                builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+            },
+            maker_rebate_terms: EntryMakerRebateTerms::AggressiveNotApplicable,
+            prepared_at: self.prepared_at,
+            valid_until: self.valid_until,
+        })
     }
 }
 
@@ -1945,15 +2920,24 @@ pub fn new_execution_order(intent_id: &OrderIntentId, ids: &ExecutionTxnIds) -> 
         price: Price::new(ENTRY_PRICE),
         shares: Shares::new(ENTRY_FILLED_SHARES),
         cost_usd: Usd::new(EXECUTION_NOTIONAL),
-        prepared_order_json: prepared_order(
-            TokenId::new(&ids.token),
-            Side::Buy,
-            OrderType::Fak,
-            VenueOrderAmount::GrossUsd(Usd::new(ENTRY_GROSS_USD)),
-            Usd::new(ENTRY_FEE_USD),
-            Shares::new(ENTRY_FILLED_SHARES),
-            Price::new(ENTRY_PRICE),
-        ),
+        prepared_order_json: PreparedOrderFixture {
+            market_id: MarketId::new(&ids.market),
+            token_id: TokenId::new(&ids.token),
+            side: Side::Buy,
+            order_type: OrderType::Fak,
+            venue_amount: VenueOrderAmount::PrincipalUsd(Usd::new(ENTRY_PRINCIPAL_USD)),
+            expected_fee: Usd::new(ENTRY_FEE_USD),
+            expected_filled_shares: Shares::new(ENTRY_FILLED_SHARES),
+            limit_price: Price::new(ENTRY_PRICE),
+            order_rules: PolymarketOrderRules::new(Hundredth, Shares::ONE)
+                .expect("fixture order rules"),
+            book_hash: content_hash('b'),
+            clob_market_info_payload_hash: content_hash('c'),
+            prepared_at: Utc::now(),
+            valid_until: Utc::now() + Duration::hours(1),
+        }
+        .build()
+        .expect("canonical entry fixture order"),
         venue_order_id: None,
         venue_status: None,
         state: ExecutionOrderState::Submitted,
@@ -2080,15 +3064,24 @@ pub(super) fn exit_order(
         price: Price::new(price),
         shares: Shares::new(shares),
         cost_usd: Shares::new(shares) * Price::new(price),
-        prepared_order_json: prepared_order(
-            TokenId::new(&ids.token),
-            Side::Sell,
-            OrderType::Gtc,
-            VenueOrderAmount::Shares(Shares::new(shares)),
-            Usd::ZERO,
-            Shares::new(shares),
-            Price::new(price),
-        ),
+        prepared_order_json: PreparedOrderFixture {
+            market_id: MarketId::new(&ids.market),
+            token_id: TokenId::new(&ids.token),
+            side: Side::Sell,
+            order_type: OrderType::Gtc,
+            venue_amount: VenueOrderAmount::Shares(Shares::new(shares)),
+            expected_fee: Usd::ZERO,
+            expected_filled_shares: Shares::new(shares),
+            limit_price: Price::new(price),
+            order_rules: PolymarketOrderRules::new(Hundredth, Shares::ONE)
+                .expect("fixture order rules"),
+            book_hash: content_hash('b'),
+            clob_market_info_payload_hash: content_hash('c'),
+            prepared_at: Utc::now(),
+            valid_until: Utc::now() + Duration::hours(1),
+        }
+        .build()
+        .expect("canonical exit fixture order"),
         venue_order_id: None,
         venue_status: None,
         state: ExecutionOrderState::Submitted,
@@ -2260,7 +3253,11 @@ impl ScoreCalibrationFixture {
         .expect("persist held-out Calibration Dataset")
     }
 
-    fn prepare(&self, dataset: &TrainingDatasetInfo) -> PreparedScoreCalibration {
+    fn prepare(
+        &self,
+        dataset: &TrainingDatasetInfo,
+        preset: CalibrationEvidencePreset,
+    ) -> PreparedScoreCalibration {
         let training = self
             .training
             .materialization()
@@ -2314,41 +3311,9 @@ impl ScoreCalibrationFixture {
                         snapshot_hash: self.snapshot_hash,
                     },
                 },
-                mapping: MonotoneMapping::Isotonic {
-                    knots: vec![
-                        IsotonicKnot {
-                            score: Decimal::ZERO,
-                            probability: dec!(0.55),
-                        },
-                        IsotonicKnot {
-                            score: Decimal::ONE,
-                            probability: dec!(0.65),
-                        },
-                    ],
-                },
-                reliability: ReliabilityReport {
-                    bins: vec![ReliabilityBin {
-                        predicted_lo: Decimal::ZERO,
-                        predicted_hi: Decimal::ONE,
-                        sample_count: 500,
-                        mean_predicted: Probability::new(dec!(0.60)),
-                        empirical_frequency: Probability::new(dec!(0.60)),
-                        wilson_ci: (Probability::new(dec!(0.55)), Probability::new(dec!(0.65))),
-                        mean_adverse_excursion_bps: Some(dec!(-500)),
-                    }],
-                    brier_score: dec!(0.24),
-                    log_loss: dec!(0.67),
-                    ece: dec!(0.02),
-                    n_samples: 500,
-                },
-                split_payout_rate: SplitPayoutRateEvidence {
-                    total_sample_count: 500,
-                    split_sample_count: 0,
-                    empirical_probability: Probability::ZERO,
-                    wilson_ci: (Probability::ZERO, Probability::new(dec!(0.007624))),
-                    split_payout_ratio: PayoutRatio::try_new(dec!(0.5))
-                        .expect("split payout ratio"),
-                },
+                mapping: preset.mapping(),
+                reliability: preset.reliability(),
+                split_payout_rate: preset.split_rate(),
             },
         }
     }
@@ -2380,20 +3345,23 @@ impl ScoreCalibrationFixture {
             .await
             .expect("seed running score-calibration model run");
         let outcome = PgCalibrationArtifactRepository::new(db.clone())
-            .commit_model_score(ModelScoreCalibrationCommit {
-                model_run_id,
-                artifact: NewCalibrationArtifact {
-                    artifact_id: calibration_id,
-                    kind: CalibrationKind::ModelScore,
-                    content_hash,
-                    fit_window_start: self.fit_window_start,
-                    fit_window_end: self.fit_window_end,
-                    calibration_split_hash: prepared.split_hash,
-                    sample_count: 500,
-                    payload: CalibrationArtifactPayload::ModelScore(Box::new(prepared.payload)),
-                    active: false,
-                },
-            })
+            .commit_model_score(
+                VerifiedModelScoreCalibrationCommit::try_from(ModelScoreCalibrationCommit {
+                    model_run_id,
+                    artifact: NewCalibrationArtifact {
+                        artifact_id: calibration_id,
+                        kind: CalibrationKind::ModelScore,
+                        content_hash,
+                        fit_window_start: self.fit_window_start,
+                        fit_window_end: self.fit_window_end,
+                        calibration_split_hash: prepared.split_hash,
+                        sample_count: 500,
+                        payload: CalibrationArtifactPayload::ModelScore(Box::new(prepared.payload)),
+                        active: false,
+                    },
+                })
+                .expect("verified score-calibration seed commit"),
+            )
             .await
             .expect("atomically seed inactive score-calibration fit artifact");
         outcome.artifact().artifact_id
@@ -2405,10 +3373,11 @@ pub async fn seed_score_calibration(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
     model_version_id: &ModelVersionId,
+    preset: CalibrationEvidencePreset,
 ) -> CalibrationArtifactId {
     let fixture = ScoreCalibrationFixture::load(db, store, model_version_id).await;
     let dataset = fixture.persist_dataset(db, store).await;
-    let prepared = fixture.prepare(&dataset);
+    let prepared = fixture.prepare(&dataset, preset);
     fixture.commit(db, prepared).await
 }
 
@@ -2508,8 +3477,13 @@ pub async fn seed_calibrated_model(
         .await
         .expect("persist execution parent model");
 
-    let calibration_id =
-        Box::pin(seed_score_calibration(db, store, &parent_model_version_id)).await;
+    let calibration_id = Box::pin(seed_score_calibration(
+        db,
+        store,
+        &parent_model_version_id,
+        seed.calibration_preset,
+    ))
+    .await;
     let calibration_repo = PgCalibrationArtifactRepository::new(db.clone());
     calibration_repo
         .mark_active(&calibration_id)
@@ -2562,12 +3536,26 @@ pub async fn seed_calibrated_model(
 }
 
 pub(super) struct SeedModelVersionInput<'a> {
+    pub book_timing: FixtureBookTiming,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
     pub model_name: &'a str,
     pub profile_ref: ResearchProfileRef,
     pub artifact_store: Option<&'a Arc<dyn ArtifactStore>>,
     pub head: CalibratedModelHead,
+    pub calibration_preset: CalibrationEvidencePreset,
+}
+
+impl SeedModelVersionInput<'_> {
+    fn resolve_profile(&self) -> (ResearchProfileArtifact, i64) {
+        let profile = self
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .expect("resolve execution ResearchProfile");
+        let prediction_horizon_secs = i64::try_from(profile.spec.target_horizon_secs)
+            .expect("execution ResearchProfile horizon fits i64");
+        (profile, prediction_horizon_secs)
+    }
 }
 
 fn execution_model_window(spec: &ResearchProfileSpec) -> (DateTime<Utc>, DateTime<Utc>) {
@@ -2640,19 +3628,17 @@ pub(super) async fn seed_model_version_named(
     db: &DatabaseConnection,
     input: SeedModelVersionInput<'_>,
 ) -> SeededRouteModel {
+    let (profile, prediction_horizon_secs) = input.resolve_profile();
     let SeedModelVersionInput {
+        book_timing,
         decision_policy_snapshot_id,
         model_version_id,
         model_name,
         profile_ref,
         artifact_store,
         head,
+        calibration_preset,
     } = input;
-    let profile = profile_ref
-        .resolve_builtin_research_profile()
-        .expect("resolve execution ResearchProfile");
-    let prediction_horizon_secs = i64::try_from(profile.spec.target_horizon_secs)
-        .expect("execution ResearchProfile horizon fits i64");
     let registry = PgModelRegistryRepository::new(db.clone());
     let dataset_store_fallback = ModelDatasetLedgerFixture::local_store();
     let dataset_store = artifact_store.unwrap_or(&dataset_store_fallback);
@@ -2663,6 +3649,7 @@ pub(super) async fn seed_model_version_named(
         db,
         dataset_store,
         PublishedTradePolicyFixtureInput {
+            book_timing,
             decision_policy_snapshot_id,
             profile_ref: profile_ref.clone(),
             scope: &policy_scope,
@@ -2763,12 +3750,12 @@ pub(super) async fn seed_model_version_named(
     let fixture = Box::pin(seed_calibrated_model(
         db,
         dataset_store,
-        CalibratedModelSeed {
+        CalibratedModelSeed::execution_fixture(
             model_version_id,
-            training_dataset_id: dataset.training_dataset_id,
-            training_input_hash: content_hash('7'),
+            dataset.training_dataset_id,
             head,
-        },
+            calibration_preset,
+        ),
     ))
     .await;
     let version = registry
@@ -2836,14 +3823,15 @@ fn build_report_transaction_inner(
         summary,
         as_of,
         account_capital_usd,
+        route_lineages,
     } = options;
     let recommendation_created_at = as_of + Duration::seconds(2);
     for recommendation in &mut recommendations {
         recommendation.created_at = recommendation_created_at;
     }
     let report_run_id = ReportRunId::new(ids.report.as_uuid());
-    let represented_routes =
-        RepresentedRouteSet::from_routes([BuyModelRoute::Weather]).expect("fixture Route set");
+    let represented_routes = RepresentedRouteSet::from_routes(route_lineages.keys().copied())
+        .expect("fixture Route set");
     let portfolio_policy = PortfolioConfig::default();
     let scenario_artifact =
         fixture_scenario_artifact(&represented_routes, &portfolio_policy, as_of);
@@ -2879,7 +3867,7 @@ fn build_report_transaction_inner(
             capital_base_usd,
         },
     );
-    let route_runs = fixture_route_runs(ids, &report, &recommendations);
+    let route_runs = fixture_route_runs(ids, &report, &recommendations, route_lineages);
     let sampled_feature_parity = report_fixtures::sampled_parity(&report);
     let entry_condition_instances = recommendations
         .iter()
@@ -3090,52 +4078,86 @@ fn fixture_route_runs(
     ids: &ExecutionTxnIds,
     report: &NewRecommendationReport,
     recommendations: &[NewRecommendation],
+    lineages: BTreeMap<BuyModelRoute, RouteModelLineage>,
 ) -> Vec<NewReportRouteRun> {
-    let profile_ref = fixture_profile_ref();
-    let lineage = RouteModelLineage {
-        model_version_id: ids.model_version,
-        model_run_id: Some(ids.model_run),
-        calibration_artifact_id: ids.calibration_artifact,
-        trade_policy_artifact_id: Some(ids.trade_policy.artifact_id),
-        research_profile_artifact_id: profile_ref.artifact_id(),
-        research_profile_ref: profile_ref,
-        prediction_horizon_secs: 86_400,
-        feature_contract_digest: content_hash('h'),
-        pit_lineage_digest: content_hash('i'),
-        serving_contract_digest: content_hash('j'),
-        recommendation_contract_hash: ids.trade_policy.artifact_hash,
-        report_universe_plan_hash: content_hash('k'),
-        history_serving_head_seal_id: HistoryServingHeadSealId::new(ids.report.as_uuid()),
-        history_serving_head_seal_hash: content_hash('l'),
-        serving_authority: ServingAuthority::ExecutionEligible,
-    };
-    let selected_recommendations =
-        u32::try_from(recommendations.len()).expect("fixture recommendation count fits u32");
-    vec![NewReportRouteRun {
-        report_route_run_id: ReportRouteRunId::new(ids.report.as_uuid()),
-        report_run_id: report.report_run_id,
-        route: BuyModelRoute::Weather,
-        outcome: if recommendations.is_empty() {
-            RouteRunOutcome::ZeroCandidates
-        } else {
-            RouteRunOutcome::Ready
-        },
-        model_version_id: Some(lineage.model_version_id),
-        model_run_id: lineage.model_run_id,
-        calibration_artifact_id: Some(lineage.calibration_artifact_id),
-        trade_policy_artifact_id: lineage.trade_policy_artifact_id,
-        research_profile_artifact_id: Some(lineage.research_profile_artifact_id.clone()),
-        lineage_json: Some(lineage),
-        funnel_json: RouteCandidateFunnel {
-            eligible_markets: 1,
-            feature_complete_markets: 1,
-            calibrated_candidates: selected_recommendations,
-            admitted_economic_tiers: selected_recommendations,
-            selected_recommendations,
-        },
-        diagnostic_code: None,
-        finished_at: report.decision_at,
-    }]
+    lineages
+        .into_iter()
+        .map(|(route, lineage)| {
+            let selected_recommendations = u32::try_from(
+                recommendations
+                    .iter()
+                    .filter(|row| row.route == route)
+                    .count(),
+            )
+            .expect("fixture recommendation count fits u32");
+            let selected_markets = if lineage.model_run_id.is_some() {
+                report.summary_json.market_selection_count
+            } else {
+                0
+            };
+            NewReportRouteRun {
+                report_route_run_id: if route == BuyModelRoute::Weather {
+                    ReportRouteRunId::new(ids.report.as_uuid())
+                } else {
+                    ReportRouteRunId::from_content_hash(
+                        &CanonicalDigest::content_hash_typed(
+                            "quant-pivot/fixture-report-route",
+                            1,
+                            &(ids.report, route),
+                        )
+                        .expect("fixture Route identity"),
+                    )
+                },
+                report_run_id: report.report_run_id,
+                route,
+                outcome: if selected_recommendations == 0 {
+                    RouteRunOutcome::ZeroCandidates
+                } else {
+                    RouteRunOutcome::Ready
+                },
+                model_version_id: Some(lineage.model_version_id),
+                model_run_id: lineage.model_run_id,
+                calibration_artifact_id: Some(lineage.calibration_artifact_id),
+                trade_policy_artifact_id: lineage.trade_policy_artifact_id,
+                research_profile_artifact_id: Some(lineage.research_profile_artifact_id.clone()),
+                lineage_json: Some(lineage),
+                funnel_json: RouteCandidateFunnel {
+                    eligible_markets: selected_markets,
+                    feature_complete_markets: selected_markets,
+                    calibrated_candidates: selected_recommendations,
+                    admitted_economic_tiers: selected_recommendations,
+                    selected_recommendations,
+                },
+                diagnostic_code: None,
+                finished_at: report.decision_at,
+            }
+        })
+        .collect()
+}
+
+impl ExecutionTxnIds {
+    fn report_lineage(&self) -> RouteModelLineage {
+        let profile_ref = fixture_profile_ref();
+        RouteModelLineage {
+            model_version_id: self.model_version,
+            model_run_id: Some(self.model_run),
+            calibration_artifact_id: self.calibration_artifact,
+            trade_policy_artifact_id: Some(self.trade_policy.artifact_id),
+            research_profile_artifact_id: profile_ref.artifact_id(),
+            research_profile_ref: profile_ref,
+            prediction_horizon_secs: 86_400,
+            feature_contract_digest: content_hash('h'),
+            pit_lineage_digest: content_hash('i'),
+            serving_contract_digest: content_hash('j'),
+            recommendation_contract_hash: self.trade_policy.artifact_hash,
+            report_universe_plan_hash: content_hash('k'),
+            history: RouteHistoryLineage::Runtime {
+                serving_head_seal_id: HistoryServingHeadSealId::new(self.report.as_uuid()),
+                serving_head_seal_hash: content_hash('l'),
+            },
+            serving_authority: ServingAuthority::ExecutionEligible,
+        }
+    }
 }
 
 fn fixture_scenario_artifact(
@@ -3675,10 +4697,235 @@ pub fn empty_report_summary() -> ReportSummary {
 
 #[cfg(test)]
 mod tests {
-    use quant_pivot_models::runtime_config::DecisionPolicySnapshot;
+    use chrono::{Duration, Utc};
+    use quant_pivot_models::{
+        enums::common::{OrderType, TickSize},
+        runtime_config::DecisionPolicySnapshot,
+    };
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use super::FeedbackServingFixtureConfig;
+    use super::{
+        CalibrationEvidencePreset, ContentHash, FeedbackServingFixtureConfig, FixtureBookTiming,
+        MarketId, PolymarketOrderRules, PreparedOrderFixture, Price, Probability, Result, Shares,
+        Side, TokenId, Usd, VenueOrderAmount, account_fill_amounts,
+    };
+
+    #[test]
+    fn calibration_presets_preserve_evidence() -> Result<()> {
+        let weak = CalibrationEvidencePreset::WeakBinarySignal.evidence();
+        assert_eq!(weak.mapping_min, dec!(0.45));
+        assert_eq!(weak.mapping_max, dec!(0.55));
+        assert_eq!(weak.mean_predicted, dec!(0.50));
+        assert_eq!(weak.empirical_frequency, dec!(0.50));
+        assert_eq!(weak.wilson_lower, dec!(0.45));
+        assert_eq!(weak.wilson_upper, dec!(0.55));
+        assert_eq!(weak.brier_score, dec!(0.25));
+        assert_eq!(weak.log_loss, dec!(0.693147180560));
+        assert_eq!(weak.ece, Decimal::ZERO);
+
+        let baseline = CalibrationEvidencePreset::Baseline.evidence();
+        assert_eq!(baseline.mapping_min, dec!(0.55));
+        assert_eq!(baseline.mapping_max, dec!(0.65));
+        assert_eq!(baseline.mean_predicted, dec!(0.60));
+        assert_eq!(baseline.empirical_frequency, dec!(0.60));
+        assert_eq!(baseline.wilson_lower, dec!(0.55));
+        assert_eq!(baseline.wilson_upper, dec!(0.65));
+        assert_eq!(baseline.brier_score, dec!(0.24));
+        assert_eq!(baseline.log_loss, dec!(0.67));
+        assert_eq!(baseline.ece, dec!(0.02));
+
+        let strong = CalibrationEvidencePreset::StrongBinarySignal.evidence();
+        assert_eq!(strong.mapping_min, dec!(0.80));
+        assert_eq!(strong.mapping_max, dec!(0.90));
+        assert_eq!(strong.mean_predicted, dec!(0.85));
+        assert_eq!(strong.empirical_frequency, dec!(0.85));
+        assert_eq!(strong.wilson_lower, dec!(0.80));
+        assert_eq!(strong.wilson_upper, dec!(0.90));
+        assert_eq!(strong.brier_score, dec!(0.1275));
+        assert_eq!(strong.log_loss, dec!(0.422709087806));
+        assert_eq!(strong.ece, Decimal::ZERO);
+
+        for (preset, minimum, maximum) in [
+            (
+                CalibrationEvidencePreset::WeakBinarySignal,
+                dec!(0.45),
+                dec!(0.55),
+            ),
+            (CalibrationEvidencePreset::Baseline, dec!(0.55), dec!(0.65)),
+            (
+                CalibrationEvidencePreset::StrongBinarySignal,
+                dec!(0.80),
+                dec!(0.90),
+            ),
+        ] {
+            assert_eq!(
+                preset
+                    .calibrate_distribution(Decimal::ZERO)?
+                    .winner_take_all_win_probability,
+                Probability::new(minimum)
+            );
+            assert_eq!(
+                preset
+                    .calibrate_distribution(Decimal::ONE)?
+                    .winner_take_all_win_probability,
+                Probability::new(maximum)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn strong_calibration_has_margin() -> Result<()> {
+        let strong = CalibrationEvidencePreset::StrongBinarySignal.evidence();
+        let distribution =
+            CalibrationEvidencePreset::StrongBinarySignal.calibrate_distribution(Decimal::ZERO)?;
+        assert_eq!(
+            distribution.winner_take_all_win_probability,
+            Probability::new(strong.mapping_min)
+        );
+        let stress_shift = strong.mean_predicted - strong.wilson_lower;
+        assert_eq!(stress_shift, dec!(0.05));
+
+        let stressed_minimum = strong.mapping_min - stress_shift;
+        let admission = DecisionPolicySnapshot::default()
+            .execution_risk
+            .portfolio
+            .admission;
+        let production_floor =
+            Decimal::from(admission.min_profit_probability_bps) / Decimal::from(10_000_u32);
+        assert_eq!(stressed_minimum, dec!(0.75));
+        assert_eq!(stressed_minimum - production_floor, dec!(0.23));
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_rules_reject_drift() -> Result<()> {
+        let prepared_at = Utc::now();
+        let fixture = |tick_size, requested_shares| -> Result<PreparedOrderFixture> {
+            Ok(PreparedOrderFixture {
+                market_id: MarketId::new("rule-fixture-market"),
+                token_id: TokenId::new("rule-fixture-token"),
+                side: Side::Sell,
+                order_type: OrderType::Gtc,
+                venue_amount: VenueOrderAmount::Shares(Shares::new(dec!(40))),
+                expected_fee: Usd::ZERO,
+                expected_filled_shares: requested_shares,
+                limit_price: Price::new(dec!(0.6125)),
+                order_rules: PolymarketOrderRules::new(tick_size, Shares::ONE)?,
+                book_hash: ContentHash::from_bytes([1; 32]),
+                clob_market_info_payload_hash: ContentHash::from_bytes([2; 32]),
+                prepared_at,
+                valid_until: prepared_at + Duration::hours(1),
+            })
+        };
+        let prepared = fixture(TickSize::QuarterCent, Shares::new(dec!(40)))?.build()?;
+        assert_eq!(prepared.limit_price, Price::new(dec!(0.6125)));
+        assert_eq!(prepared.total_cash_delta, dec!(24.5));
+        assert!(
+            fixture(TickSize::Hundredth, Shares::new(dec!(40)))?
+                .build()
+                .is_err()
+        );
+        assert!(
+            fixture(TickSize::QuarterCent, Shares::new(dec!(39)))?
+                .build()
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn observed_fill_units_match() -> Result<()> {
+        for (side, shares, price, principal, maker_raw, taker_raw) in [
+            (
+                Side::Buy,
+                dec!(40),
+                dec!(0.6),
+                dec!(24),
+                "24000000",
+                "40000000",
+            ),
+            (
+                Side::Sell,
+                dec!(40),
+                dec!(0.55),
+                dec!(22),
+                "40000000",
+                "22000000",
+            ),
+            (
+                Side::Sell,
+                dec!(10),
+                dec!(0.5),
+                dec!(5),
+                "10000000",
+                "5000000",
+            ),
+            (
+                Side::Buy,
+                dec!(16),
+                dec!(0.6),
+                dec!(9.6),
+                "9600000",
+                "16000000",
+            ),
+            (
+                Side::Sell,
+                dec!(16),
+                dec!(0.6),
+                dec!(9.6),
+                "16000000",
+                "9600000",
+            ),
+            (
+                Side::Sell,
+                dec!(40),
+                dec!(0.6),
+                dec!(24),
+                "40000000",
+                "24000000",
+            ),
+            (
+                Side::Buy,
+                dec!(16.123456),
+                dec!(0.5),
+                dec!(8.061728),
+                "8061728",
+                "16123456",
+            ),
+        ] {
+            let actual = account_fill_amounts(side, Shares::new(shares), Price::new(price))?;
+            assert_eq!(
+                actual,
+                (
+                    Usd::new(principal),
+                    maker_raw.to_owned(),
+                    taker_raw.to_owned()
+                )
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn inexact_fill_units_rejected() {
+        for side in [Side::Buy, Side::Sell] {
+            for (shares, price) in [
+                (dec!(1.000001), dec!(0.5)),
+                (dec!(0.0000001), dec!(1)),
+                (dec!(1), dec!(-0.5)),
+                (dec!(0), dec!(1)),
+                (Decimal::MAX, dec!(1)),
+                (dec!(1.000001), dec!(0.9999999999999999999999999999)),
+            ] {
+                assert!(
+                    account_fill_amounts(side, Shares::new(shares), Price::new(price)).is_err(),
+                    "invalid observed fill must not be rounded into chain truth",
+                );
+            }
+        }
+    }
 
     #[test]
     fn feedback_policy_is_valid() {
@@ -3687,15 +4934,22 @@ mod tests {
             (dec!(5000), dec!(500), dec!(4500), dec!(500), false),
         ] {
             let config = FeedbackServingFixtureConfig {
+                book_timing: FixtureBookTiming::standard(),
                 required_shadow_window_secs: 60,
                 shadow_diff_threshold: dec!(1),
                 feedback_budget_usd: budget,
                 outcome_reconciliation_enabled: true,
+                outcome_reconciliation_sweep_secs: 10,
                 ad_hoc_report_enabled: ad_hoc_enabled,
+                knowledge_lag_secs: 10,
             };
             let mut snapshot = DecisionPolicySnapshot::default();
             config.apply_runtime_controls(&mut snapshot);
             let portfolio = &snapshot.execution_risk.portfolio;
+            assert_eq!(
+                snapshot.operations_policy.outcome_reconciliation.sweep_secs,
+                10
+            );
             assert_eq!(portfolio.budget.cash_reserve_usd.value, reserve);
             assert_eq!(portfolio.budget.max_open_capital_usd.value, max_open);
             assert_eq!(
@@ -3731,6 +4985,13 @@ mod tests {
             );
             assert!(
                 snapshot
+                    .recommendation
+                    .data_quality
+                    .max_feature_bucket_age_secs
+                    >= config.knowledge_lag_secs.saturating_add(1)
+            );
+            assert!(
+                snapshot
                     .report_schedule
                     .schedules
                     .iter()
@@ -3748,11 +5009,14 @@ mod tests {
     #[should_panic(expected = "fund every concurrently open ResearchProfile cash tier")]
     fn underfunded_policy_rejected() {
         let config = FeedbackServingFixtureConfig {
+            book_timing: FixtureBookTiming::standard(),
             required_shadow_window_secs: 60,
             shadow_diff_threshold: dec!(1),
             feedback_budget_usd: dec!(100),
             outcome_reconciliation_enabled: true,
+            outcome_reconciliation_sweep_secs: 10,
             ad_hoc_report_enabled: true,
+            knowledge_lag_secs: 10,
         };
         config.apply_runtime_controls(&mut DecisionPolicySnapshot::default());
     }

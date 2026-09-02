@@ -20,7 +20,10 @@ use rust_decimal::{
 };
 
 use crate::{
-    model::calibrator::apply_mapping,
+    model::{
+        CancellationProbe,
+        calibrator::{apply_validated_mapping, validate_mapping_cancellable},
+    },
     precision::RESEARCH_DECIMAL_SCALE,
     stats::{count_f64, wilson_interval, wilson_z},
 };
@@ -30,6 +33,7 @@ use crate::{
 const RELIABILITY_BINS: usize = 10;
 /// `f64` floor/ceiling probabilities never touched exactly (avoids `ln(0)`).
 const LOG_LOSS_EPS: f64 = 1e-12;
+const CANCELLATION_INTERVAL: usize = 1_024;
 
 /// One calibration-split observation feeding a [`ReliabilityReport`].
 pub struct ReliabilitySample {
@@ -43,14 +47,16 @@ pub struct ReliabilitySample {
 ///
 /// # Errors
 ///
-/// Propagates `Decimal`/`f64` conversion failures only (never on empty input
-/// — an empty split yields a zeroed report; the caller's sample-count gate
-/// upstream is what actually fails closed).
+/// Propagates mapping validation, cooperative cancellation, and numeric
+/// conversion failures. An empty split yields a zeroed report; the caller's
+/// sample-count gate upstream is what fails closed.
 pub fn compute_reliability(
     mapping: &MonotoneMapping,
     samples: &[ReliabilitySample],
     ci_confidence: Decimal,
+    cancellation: &CancellationProbe,
 ) -> QuantResult<ReliabilityReport> {
+    cancellation.check("reliability start")?;
     let n = samples.len();
     if n == 0 {
         return Ok(ReliabilityReport {
@@ -61,31 +67,39 @@ pub fn compute_reliability(
             n_samples: 0,
         });
     }
+    validate_mapping_cancellable(mapping, cancellation)?;
 
-    let calibrated: Vec<Probability> = samples
-        .iter()
-        .map(|s| apply_mapping(mapping, s.score))
-        .collect::<QuantResult<_>>()?;
+    let mut calibrated = Vec::with_capacity(samples.len());
+    for (index, sample) in samples.iter().enumerate() {
+        if index % CANCELLATION_INTERVAL == 0 {
+            cancellation.check("reliability mapping application")?;
+        }
+        calibrated.push(apply_validated_mapping(mapping, sample.score)?);
+    }
 
-    let brier_score = mean_decimal(
-        &samples
-            .iter()
-            .zip(&calibrated)
-            .map(|(s, p)| {
-                let y = if s.won { Decimal::ONE } else { Decimal::ZERO };
-                (p.inner() - y) * (p.inner() - y)
-            })
-            .collect::<Vec<_>>(),
-    );
-    let log_loss_terms = samples
-        .iter()
-        .zip(&calibrated)
-        .map(|(s, p)| log_loss_term(p.inner(), s.won))
-        .collect::<QuantResult<Vec<_>>>()?;
-    let log_loss = mean_decimal(&log_loss_terms);
+    let sample_count = u64::try_from(n).map_err(|error| ResearchError::ValidationMethodology {
+        detail: format!("reliability sample count exceeds u64: {error}"),
+    })?;
+    let mut brier_sum = Decimal::ZERO;
+    let mut log_loss_sum = Decimal::ZERO;
+    for (index, (sample, probability)) in samples.iter().zip(&calibrated).enumerate() {
+        if index % CANCELLATION_INTERVAL == 0 {
+            cancellation.check("reliability metric accumulation")?;
+        }
+        let observed = if sample.won {
+            Decimal::ONE
+        } else {
+            Decimal::ZERO
+        };
+        brier_sum += (probability.inner() - observed) * (probability.inner() - observed);
+        log_loss_sum += log_loss_term(probability.inner(), sample.won)?;
+    }
+    let denominator = Decimal::from(sample_count);
+    let brier_score = (brier_sum / denominator).round_dp(RESEARCH_DECIMAL_SCALE);
+    let log_loss = (log_loss_sum / denominator).round_dp(RESEARCH_DECIMAL_SCALE);
 
     let z = wilson_z(ci_confidence)?;
-    let bins = build_bins(samples, &calibrated, z)?;
+    let bins = build_bins(samples, &calibrated, z, cancellation)?;
     let ece = expected_calibration_error(&bins, n);
 
     Ok(ReliabilityReport {
@@ -93,9 +107,7 @@ pub fn compute_reliability(
         brier_score,
         log_loss,
         ece,
-        n_samples: u64::try_from(n).map_err(|error| ResearchError::ValidationMethodology {
-            detail: format!("reliability sample count exceeds u64: {error}"),
-        })?,
+        n_samples: sample_count,
     })
 }
 
@@ -110,6 +122,7 @@ fn build_bins(
     samples: &[ReliabilitySample],
     calibrated: &[Probability],
     z: f64,
+    cancellation: &CancellationProbe,
 ) -> QuantResult<Vec<ReliabilityBin>> {
     let width = Decimal::ONE / Decimal::from(RELIABILITY_BINS as u64);
     let mut bins = Vec::new();
@@ -121,50 +134,59 @@ fn build_bins(
         } else {
             width * Decimal::from((index + 1) as u64)
         };
-        let members: Vec<usize> = (0..samples.len())
-            .filter(|&i| {
-                let p = calibrated[i].inner();
-                p >= lo && (p < hi || (top && p <= hi))
-            })
-            .collect();
-        if members.is_empty() {
+        let mut member_count = 0_u64;
+        let mut wins = 0_u64;
+        let mut predicted_sum = Decimal::ZERO;
+        let mut mae_sum = Decimal::ZERO;
+        let mut mae_count = 0_u64;
+        for (sample_index, probability) in calibrated.iter().enumerate() {
+            if sample_index % CANCELLATION_INTERVAL == 0 {
+                cancellation.check("reliability bin scan")?;
+            }
+            let value = probability.inner();
+            if value >= lo && (value < hi || (top && value <= hi)) {
+                member_count = member_count.checked_add(1).ok_or_else(|| {
+                    ResearchError::ValidationMethodology {
+                        detail: "reliability-bin sample count overflowed".to_owned(),
+                    }
+                })?;
+                wins = wins
+                    .checked_add(u64::from(samples[sample_index].won))
+                    .ok_or_else(|| ResearchError::ValidationMethodology {
+                        detail: "reliability-bin win count overflowed".to_owned(),
+                    })?;
+                predicted_sum += value;
+                if let Some(mae) = samples[sample_index].max_adverse_excursion_bps {
+                    mae_sum += mae;
+                    mae_count = mae_count.checked_add(1).ok_or_else(|| {
+                        ResearchError::ValidationMethodology {
+                            detail: "reliability-bin downside count overflowed".to_owned(),
+                        }
+                    })?;
+                }
+            }
+        }
+        if member_count == 0 {
             continue;
         }
-        let n =
-            u64::try_from(members.len()).map_err(|error| ResearchError::ValidationMethodology {
-                detail: format!("reliability-bin sample count exceeds u64: {error}"),
-            })?;
-        let wins = u64::try_from(members.iter().filter(|&&i| samples[i].won).count()).map_err(
-            |error| ResearchError::ValidationMethodology {
-                detail: format!("reliability-bin win count exceeds u64: {error}"),
-            },
-        )?;
-        let mean_predicted = mean_decimal(
-            &members
-                .iter()
-                .map(|&i| calibrated[i].inner())
-                .collect::<Vec<_>>(),
-        );
-        let p_hat = count_f64(wins)? / count_f64(n)?;
+        let mean_predicted =
+            (predicted_sum / Decimal::from(member_count)).round_dp(RESEARCH_DECIMAL_SCALE);
+        let p_hat = count_f64(wins)? / count_f64(member_count)?;
         let empirical_frequency =
             Decimal::from_f64(p_hat).ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: "empirical reliability frequency is not representable as Decimal"
                     .to_owned(),
             })?;
-        let (ci_lo, ci_hi) = wilson_interval(p_hat, n, z, RESEARCH_DECIMAL_SCALE)?;
-        let mae_values: Vec<Decimal> = members
-            .iter()
-            .filter_map(|&i| samples[i].max_adverse_excursion_bps)
-            .collect();
-        let mean_adverse_excursion_bps = if mae_values.is_empty() {
+        let (ci_lo, ci_hi) = wilson_interval(p_hat, member_count, z, RESEARCH_DECIMAL_SCALE)?;
+        let mean_adverse_excursion_bps = if mae_count == 0 {
             None
         } else {
-            Some(mean_decimal(&mae_values))
+            Some((mae_sum / Decimal::from(mae_count)).round_dp(RESEARCH_DECIMAL_SCALE))
         };
         bins.push(ReliabilityBin {
             predicted_lo: lo,
             predicted_hi: hi,
-            sample_count: n,
+            sample_count: member_count,
             mean_predicted: Probability::new(mean_predicted.round_dp(RESEARCH_DECIMAL_SCALE)),
             empirical_frequency: Probability::new(
                 empirical_frequency.round_dp(RESEARCH_DECIMAL_SCALE),
@@ -173,6 +195,7 @@ fn build_bins(
             mean_adverse_excursion_bps,
         });
     }
+    cancellation.check("reliability bins completion")?;
     Ok(bins)
 }
 
@@ -212,6 +235,7 @@ fn log_loss_term(p: Decimal, won: bool) -> QuantResult<Decimal> {
     })
 }
 
+#[cfg(test)]
 fn mean_decimal(values: &[Decimal]) -> Decimal {
     if values.is_empty() {
         return Decimal::ZERO;
@@ -222,12 +246,20 @@ fn mean_decimal(values: &[Decimal]) -> Decimal {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use quant_pivot_models::types::calibration::{IsotonicKnot, MonotoneMapping};
     use rust_decimal::{Decimal, prelude::ToPrimitive};
     use rust_decimal_macros::dec;
 
     use super::{ReliabilitySample, compute_reliability, mean_decimal};
-    use crate::model::calibrator::{ProbabilityCalibrator, isotonic::IsotonicCalibrator};
+    use crate::model::{
+        CancellationProbe,
+        calibrator::{ProbabilityCalibrator, isotonic::IsotonicCalibrator},
+    };
 
     #[test]
     fn truly_calibrated_zero_ece() {
@@ -252,7 +284,9 @@ mod tests {
             }
         }
         let calibrator = IsotonicCalibrator::new(10);
-        let mapping = calibrator.fit(&scores, &outcomes).expect("fit");
+        let mapping = calibrator
+            .fit(&scores, &outcomes, &CancellationProbe::default())
+            .expect("fit");
         let samples: Vec<ReliabilitySample> = scores
             .iter()
             .zip(&outcomes)
@@ -262,7 +296,13 @@ mod tests {
                 max_adverse_excursion_bps: Some(dec!(-150)),
             })
             .collect();
-        let report = compute_reliability(&mapping, &samples, dec!(0.95)).expect("reliability");
+        let report = compute_reliability(
+            &mapping,
+            &samples,
+            dec!(0.95),
+            &CancellationProbe::default(),
+        )
+        .expect("reliability");
         assert_eq!(report.n_samples, 1000);
         assert_eq!(report.bins.len(), 10, "{:?}", report.bins);
         assert!(
@@ -298,7 +338,13 @@ mod tests {
                 max_adverse_excursion_bps: None,
             })
             .collect();
-        let report = compute_reliability(&mapping, &samples, dec!(0.95)).expect("reliability");
+        let report = compute_reliability(
+            &mapping,
+            &samples,
+            dec!(0.95),
+            &CancellationProbe::default(),
+        )
+        .expect("reliability");
         let bin_with_score_point_five_five = report
             .bins
             .iter()
@@ -336,7 +382,13 @@ mod tests {
                 max_adverse_excursion_bps: None,
             },
         ];
-        let report = compute_reliability(&mapping, &samples, dec!(0.95)).expect("reliability");
+        let report = compute_reliability(
+            &mapping,
+            &samples,
+            dec!(0.95),
+            &CancellationProbe::default(),
+        )
+        .expect("reliability");
         // `p=0`/`p=1` is clamped to `LOG_LOSS_EPS` before taking `ln`, so the
         // term is a large-but-bounded finite number (`-ln(1e-12) ≈ 27.63`),
         // never `+inf`/`NaN` (which `Decimal` cannot even represent, but an
@@ -380,7 +432,13 @@ mod tests {
                 max_adverse_excursion_bps: None,
             })
             .collect();
-        let report = compute_reliability(&identity, &samples, dec!(0.95)).expect("reliability");
+        let report = compute_reliability(
+            &identity,
+            &samples,
+            dec!(0.95),
+            &CancellationProbe::default(),
+        )
+        .expect("reliability");
         // Golden: brier = ((0.1-0)^2+(0.4-0)^2+(0.6-1)^2+(0.9-1)^2)/4 = 0.085 exactly.
         assert_eq!(report.brier_score, dec!(0.085));
         // Golden (Python, natural log, no clamping triggered): 0.30809306971190853.
@@ -394,7 +452,8 @@ mod tests {
     #[test]
     fn empty_split_yields_report() {
         let mapping = MonotoneMapping::Isotonic { knots: Vec::new() };
-        let report = compute_reliability(&mapping, &[], dec!(0.95)).expect("reliability");
+        let report = compute_reliability(&mapping, &[], dec!(0.95), &CancellationProbe::default())
+            .expect("reliability");
         assert_eq!(report.n_samples, 0);
         assert!(report.bins.is_empty());
     }
@@ -428,12 +487,79 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         let calibrator = IsotonicCalibrator::new(10);
-        let mapping = calibrator.fit(&scores, &outcomes).expect("fit");
-        let calibrated = compute_reliability(&mapping, &samples, dec!(0.95)).expect("calibrated");
+        let mapping = calibrator
+            .fit(&scores, &outcomes, &CancellationProbe::default())
+            .expect("fit");
+        let calibrated = compute_reliability(
+            &mapping,
+            &samples,
+            dec!(0.95),
+            &CancellationProbe::default(),
+        )
+        .expect("calibrated");
         assert!(
             calibrated.brier_score <= raw_brier,
             "isotonic calibration must not worsen Brier: raw={raw_brier} calibrated={}",
             calibrated.brier_score
         );
+    }
+
+    #[test]
+    fn isotonic_reliability_scales() {
+        let sample_count = 20_000_u64;
+        let knots = (0..sample_count)
+            .map(|index| IsotonicKnot {
+                score: Decimal::from(index) / Decimal::from(sample_count),
+                probability: Decimal::from(index) / Decimal::from(sample_count),
+            })
+            .collect::<Vec<_>>();
+        let mapping = MonotoneMapping::Isotonic { knots };
+        let samples = (0..sample_count)
+            .map(|index| ReliabilitySample {
+                score: Decimal::from(index) / Decimal::from(sample_count),
+                won: index % 2 == 0,
+                max_adverse_excursion_bps: Some(dec!(-10)),
+            })
+            .collect::<Vec<_>>();
+        let report = compute_reliability(
+            &mapping,
+            &samples,
+            dec!(0.95),
+            &CancellationProbe::default(),
+        )
+        .expect("large isotonic reliability report");
+        assert_eq!(report.n_samples, sample_count);
+    }
+
+    #[test]
+    fn reliability_observes_cancellation() {
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&checks);
+        let cancellation =
+            CancellationProbe::new(move || observed.fetch_add(1, Ordering::Relaxed) >= 4);
+        let knots = (0..20_000_u64)
+            .map(|index| IsotonicKnot {
+                score: Decimal::from(index) / Decimal::from(20_000_u64),
+                probability: Decimal::from(index) / Decimal::from(20_000_u64),
+            })
+            .collect::<Vec<_>>();
+        let samples = (0..20_000_u64)
+            .map(|index| ReliabilitySample {
+                score: Decimal::from(index) / Decimal::from(20_000_u64),
+                won: index % 2 == 0,
+                max_adverse_excursion_bps: None,
+            })
+            .collect::<Vec<_>>();
+        let result = compute_reliability(
+            &MonotoneMapping::Isotonic { knots },
+            &samples,
+            dec!(0.95),
+            &cancellation,
+        );
+        assert!(
+            result.is_err(),
+            "running reliability kernel must observe cancellation"
+        );
+        assert!(checks.load(Ordering::Relaxed) > 4);
     }
 }

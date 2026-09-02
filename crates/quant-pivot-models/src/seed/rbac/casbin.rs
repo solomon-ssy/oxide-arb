@@ -141,7 +141,7 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
     policies.extend([
         (ResourceType::System, Operation::Halt),
         (ResourceType::System, Operation::Resume),
-        (ResourceType::System, Operation::SwitchMode),
+        (ResourceType::System, Operation::UpdateRuntimeControl),
         (ResourceType::System, Operation::Emergency),
         (ResourceType::Market, Operation::Update),
         // Operators run and revoke recommendation reports.
@@ -201,7 +201,7 @@ fn admin_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::Permission, Operation::Read),
         (ResourceType::System, Operation::Halt),
         (ResourceType::System, Operation::Resume),
-        (ResourceType::System, Operation::SwitchMode),
+        (ResourceType::System, Operation::UpdateRuntimeControl),
         (ResourceType::System, Operation::Emergency),
         (ResourceType::Reconciliation, Operation::Resolve),
         (ResourceType::SettlementRedeem, Operation::Create),

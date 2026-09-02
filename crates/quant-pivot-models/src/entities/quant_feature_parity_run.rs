@@ -37,7 +37,7 @@ pub struct Model {
     pub matched_count: i64,
     pub mismatched_count: i64,
     pub pending_materialization_count: i64,
-    pub feature_contract_hash: Option<ContentHash>,
+    pub feature_contract_hash: ContentHash,
     pub transform_hash: Option<ContentHash>,
     pub failure_code: Option<DiagnosticCode>,
     pub failure_detail: Option<String>,

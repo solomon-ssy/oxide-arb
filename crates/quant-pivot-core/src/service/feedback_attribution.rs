@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
     fmt::Display,
+    mem,
     sync::Arc,
     time::Duration as StdDuration,
 };
@@ -144,6 +145,12 @@ struct MaterializedPrediction {
     explanation_hash: ContentHash,
     outcome_hash: ContentHash,
     outcome: Decimal,
+}
+
+struct ExecutionPredictionEvidence {
+    model_version_id: ModelVersionId,
+    explanation_hash: ContentHash,
+    contributions: Vec<PredictionContribution>,
 }
 
 #[derive(Clone)]
@@ -468,26 +475,37 @@ impl FeedbackAttributionMaterializer {
             )
             .map_err(Self::invalid_contract)?;
             let page = self.cohorts.list_page(query).await?;
-            let eligible = page
-                .candidates()
-                .iter()
-                .filter_map(|candidate| {
-                    match evaluate_feedback_cohort(
-                        FeedbackCohort::ModelLearning,
-                        &cohort_snapshot,
-                        candidate.context(),
-                        candidate.resolution_outcome(),
-                        None,
-                    ) {
-                        Ok(FeedbackCohortDecision::Eligible(_)) => Some(Ok(candidate.clone())),
-                        Ok(
-                            FeedbackCohortDecision::Censored(_)
-                            | FeedbackCohortDecision::Excluded(_),
-                        ) => None,
-                        Err(error) => Some(Err(Self::invalid_contract(error))),
-                    }
+            let next_cursor = page.next_cursor();
+            let page_candidates = page.candidates().to_vec();
+            let page_snapshot = cohort_snapshot.clone();
+            let page_cancel = cancel.clone();
+            let eligible = self
+                .run_compute(cancel, move || {
+                    page_candidates
+                        .into_iter()
+                        .filter_map(|candidate| {
+                            if let Err(error) = Self::require_active(&page_cancel) {
+                                return Some(Err(error));
+                            }
+                            match evaluate_feedback_cohort(
+                                FeedbackCohort::ModelLearning,
+                                &page_snapshot,
+                                candidate.context(),
+                                candidate.resolution_outcome(),
+                                None,
+                                None,
+                            ) {
+                                Ok(FeedbackCohortDecision::Eligible(_)) => Some(Ok(candidate)),
+                                Ok(
+                                    FeedbackCohortDecision::Censored(_)
+                                    | FeedbackCohortDecision::Excluded(_),
+                                ) => None,
+                                Err(error) => Some(Err(Self::invalid_contract(error))),
+                            }
+                        })
+                        .collect::<QuantResult<Vec<_>>>()
                 })
-                .collect::<QuantResult<Vec<_>>>()?;
+                .await?;
             let page_samples = self
                 .materialize_page(params, eligible, &mut model_cache, cancel)
                 .await?;
@@ -495,31 +513,47 @@ impl FeedbackAttributionMaterializer {
                 prediction_explanations.saturating_add(u64::try_from(page_samples.len()).map_err(
                     |error| Self::invalid(format!("attribution page size overflow: {error}")),
                 )?);
-            for prediction in page_samples {
-                let model_version_id = prediction.context.model_version_id();
+            let fanout_cancel = cancel.clone();
+            let (page_associations, page_predictions) = self
+                .run_compute(cancel, move || {
+                    let mut page_associations =
+                        HashMap::<ModelVersionId, Vec<ResolutionOutcomeAssociationSample>>::new();
+                    let mut page_predictions = Vec::with_capacity(page_samples.len());
+                    for prediction in page_samples {
+                        Self::require_active(&fanout_cancel)?;
+                        page_associations
+                            .entry(prediction.context.model_version_id())
+                            .or_default()
+                            .push(ResolutionOutcomeAssociationSample {
+                                recommendation_id: prediction.context.recommendation_id(),
+                                explanation_hash: prediction.explanation_hash,
+                                outcome_hash: prediction.outcome_hash,
+                                outcome: prediction.outcome,
+                                contributions: prediction.explanation.contributions.clone(),
+                            });
+                        page_predictions.push(prediction);
+                    }
+                    Ok((page_associations, page_predictions))
+                })
+                .await?;
+            for (model_version_id, mut samples) in page_associations {
                 association_samples
                     .entry(model_version_id)
                     .or_default()
-                    .push(ResolutionOutcomeAssociationSample {
-                        recommendation_id: prediction.context.recommendation_id(),
-                        explanation_hash: prediction.explanation_hash,
-                        outcome_hash: prediction.outcome_hash,
-                        outcome: prediction.outcome,
-                        contributions: prediction.explanation.contributions.clone(),
-                    });
-                decision_predictions.push(prediction);
+                    .append(&mut samples);
             }
+            decision_predictions.extend(page_predictions);
             progress.report(ResearchJobProgress::indeterminate(
                 format!("attribution-predictions:{prediction_explanations}"),
                 prediction_explanations,
             ));
-            cursor = page.next_cursor();
+            cursor = next_cursor;
             if cursor.is_none() {
                 break;
             }
         }
-        let execution_samples = self
-            .load_execution_samples(params, &decision_predictions)
+        let (execution_samples, decision_predictions) = self
+            .load_execution_samples(params, decision_predictions, cancel)
             .await?;
         let resolution_outcome_associations = self
             .materialize_resolution_associations(params, association_samples, cancel)
@@ -528,7 +562,7 @@ impl FeedbackAttributionMaterializer {
             .materialize_execution_associations(params, execution_samples, cancel)
             .await?;
         let decision_intervention_replays = self
-            .materialize_decisions(params, &decision_predictions, &model_cache, cancel)
+            .materialize_decisions(params, decision_predictions, &model_cache, cancel)
             .await?;
         let (execution_trajectories, policy_counterfactuals) = self
             .materialize_trajectories(params, progress, cancel)
@@ -574,89 +608,86 @@ impl FeedbackAttributionMaterializer {
         &self,
         params: &FeedbackAttributionJobParams,
         candidates: Vec<FeedbackCohortCandidate>,
-        model_cache: &mut HashMap<ModelVersionId, ModelArtifact>,
+        model_cache: &mut HashMap<ModelVersionId, Arc<ModelArtifact>>,
         cancel: &CancellationToken,
     ) -> QuantResult<Vec<MaterializedPrediction>> {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
-        let feature_vector_ids = candidates
-            .iter()
-            .map(|candidate| candidate.context().feature_vector_id())
-            .collect::<Vec<_>>();
+        let prepare_cancel = cancel.clone();
+        let (
+            candidates,
+            feature_vector_ids,
+            factor_definition_ids,
+            selection_ids,
+            serving_run_ids,
+            model_version_ids,
+        ) = self
+            .run_compute(cancel, move || {
+                Self::require_active(&prepare_cancel)?;
+                let feature_vector_ids = candidates
+                    .iter()
+                    .map(|candidate| candidate.context().feature_vector_id())
+                    .collect::<Vec<_>>();
+                let factor_definition_ids = candidates
+                    .iter()
+                    .flat_map(|candidate| candidate.context().factor_definition_versions())
+                    .copied()
+                    .collect::<Vec<_>>();
+                let selection_ids = candidates
+                    .iter()
+                    .map(|candidate| candidate.context().market_selection_id())
+                    .collect::<Vec<_>>();
+                let mut serving_run_ids = candidates
+                    .iter()
+                    .map(|candidate| candidate.context().model_run_id())
+                    .collect::<Vec<_>>();
+                serving_run_ids.sort_by_key(|run_id| run_id.as_uuid());
+                serving_run_ids.dedup();
+                let mut model_version_ids = candidates
+                    .iter()
+                    .map(|candidate| candidate.context().model_version_id())
+                    .collect::<Vec<_>>();
+                model_version_ids.sort_by_key(|model_version_id| model_version_id.as_uuid());
+                model_version_ids.dedup();
+                Ok((
+                    candidates,
+                    feature_vector_ids,
+                    factor_definition_ids,
+                    selection_ids,
+                    serving_run_ids,
+                    model_version_ids,
+                ))
+            })
+            .await?;
         let factor_rows = self
             .factors
             .find_values_by_vectors(&feature_vector_ids)
             .await?;
-        let factor_definition_ids = candidates
-            .iter()
-            .flat_map(|candidate| candidate.context().factor_definition_versions())
-            .copied()
-            .collect::<Vec<_>>();
         let definitions = self
             .factors
             .find_definitions_by_ids(&factor_definition_ids)
             .await?;
-        let selection_ids = candidates
-            .iter()
-            .map(|candidate| candidate.context().market_selection_id())
-            .collect::<Vec<_>>();
         let selection_members = self
             .selections
             .list_snapshot_members(&selection_ids)
             .await?;
-        let definition_index = definitions
-            .into_iter()
-            .map(|definition| (definition.factor_definition_id, definition))
-            .collect::<HashMap<_, _>>();
-        let mut serving_run_ids = candidates
-            .iter()
-            .map(|candidate| candidate.context().model_run_id())
-            .collect::<Vec<_>>();
-        serving_run_ids.sort_by_key(|run_id| run_id.as_uuid());
-        serving_run_ids.dedup();
         let serving = self
-            .load_serving_evidence(&serving_run_ids, params.cutoff)
+            .load_serving_evidence(&serving_run_ids, params.cutoff, cancel)
             .await?;
-        Self::validate_serving_page(&candidates, &serving)?;
-        let mut model_version_ids = candidates
-            .iter()
-            .map(|candidate| candidate.context().model_version_id())
-            .collect::<Vec<_>>();
-        model_version_ids.sort_by_key(|model_version_id| model_version_id.as_uuid());
-        model_version_ids.dedup();
-        for model_version_id in &model_version_ids {
-            if let Entry::Vacant(entry) = model_cache.entry(*model_version_id) {
-                let version = self
-                    .models
-                    .find_model_version(model_version_id)
-                    .await?
-                    .ok_or_else(|| {
-                        Self::invalid(format!(
-                            "attribution model version {model_version_id} does not exist"
-                        ))
-                    })?;
-                let artifact =
-                    ModelArtifact::load_verified(self.artifacts.as_ref(), &version).await?;
-                entry.insert(artifact);
-            }
-        }
-        let page_models = model_version_ids
-            .into_iter()
-            .map(|model_version_id| {
-                let artifact = model_cache.get(&model_version_id).cloned().ok_or_else(|| {
-                    Self::invalid(format!(
-                        "attribution model cache lost version {model_version_id}"
-                    ))
-                })?;
-                Ok((model_version_id, artifact))
-            })
-            .collect::<QuantResult<HashMap<_, _>>>()?;
+        let page_models = self
+            .load_page_models(model_version_ids, model_cache, cancel)
+            .await?;
         let worker = self.clone();
         let compute_params = params.clone();
         let compute_cancel = cancel.clone();
         let pending = self
             .run_compute(cancel, move || {
+                Self::validate_serving_page(&candidates, &serving)?;
+                let definition_index = definitions
+                    .into_iter()
+                    .map(|definition| (definition.factor_definition_id, definition))
+                    .collect::<HashMap<_, _>>();
                 let page_evidence = PredictionPageEvidence {
                     params: &compute_params,
                     factor_rows: &factor_rows,
@@ -696,20 +727,98 @@ impl FeedbackAttributionMaterializer {
             .await?;
         let mut samples = Vec::with_capacity(pending.len());
         for (context, explanation, outcome_hash, outcome) in pending {
-            let persisted = self
-                .persist(AttributionArtifact::PredictionExplanation(Box::new(
-                    explanation.clone(),
-                )))
+            let (persisted, artifact) = self
+                .persist(
+                    AttributionArtifact::PredictionExplanation(Box::new(explanation)),
+                    cancel,
+                )
                 .await?;
+            let AttributionArtifact::PredictionExplanation(explanation) = artifact else {
+                return Err(Self::invalid(
+                    "prediction persistence changed artifact kind",
+                ));
+            };
             samples.push(MaterializedPrediction {
                 context,
-                explanation,
+                explanation: *explanation,
                 explanation_hash: persisted.artifact_hash,
                 outcome_hash,
                 outcome,
             });
         }
         Ok(samples)
+    }
+
+    async fn load_page_models(
+        &self,
+        model_version_ids: Vec<ModelVersionId>,
+        model_cache: &mut HashMap<ModelVersionId, Arc<ModelArtifact>>,
+        cancel: &CancellationToken,
+    ) -> QuantResult<HashMap<ModelVersionId, Arc<ModelArtifact>>> {
+        for model_version_id in &model_version_ids {
+            if let Entry::Vacant(entry) = model_cache.entry(*model_version_id) {
+                let version = self
+                    .models
+                    .find_model_version(model_version_id)
+                    .await?
+                    .ok_or_else(|| {
+                        Self::invalid(format!(
+                            "attribution model version {model_version_id} does not exist"
+                        ))
+                    })?;
+                let preflight_cancel = cancel.clone();
+                let (persisted_contract, recorded_hash, key) = self
+                    .run_compute(cancel, move || {
+                        Self::require_active(&preflight_cancel)?;
+                        let persisted_contract = version
+                            .verified_serving_contract()
+                            .map_err(|error| ResearchError::InvalidModelArtifact {
+                                detail: format!("invalid persisted serving contract: {error}"),
+                            })?
+                            .clone();
+                        let recorded_hash = version.artifact_hash;
+                        let key = ModelArtifact::artifact_key(&recorded_hash)?;
+                        Ok((persisted_contract, recorded_hash, key))
+                    })
+                    .await?;
+                let bytes = self.artifacts.get_by_key(&key).await?;
+                let decode_cancel = cancel.clone();
+                let artifact = self
+                    .run_compute(cancel, move || {
+                        Self::require_active(&decode_cancel)?;
+                        let artifact = ModelArtifact::from_bytes(&bytes)?;
+                        let recomputed = artifact.content_hash()?;
+                        if recomputed != recorded_hash {
+                            return Err(ResearchError::ArtifactHashMismatch {
+                                expected: recorded_hash.to_string(),
+                                actual: recomputed.to_string(),
+                            }
+                            .into());
+                        }
+                        if artifact.header().serving_contract() != &persisted_contract {
+                            return Err(ResearchError::InvalidModelArtifact {
+                                detail: "artifact header differs from the exact persisted serving contract"
+                                    .to_owned(),
+                            }
+                            .into());
+                        }
+                        Ok(artifact)
+                    })
+                    .await?;
+                entry.insert(Arc::new(artifact));
+            }
+        }
+        model_version_ids
+            .into_iter()
+            .map(|model_version_id| {
+                let artifact = model_cache.get(&model_version_id).cloned().ok_or_else(|| {
+                    Self::invalid(format!(
+                        "attribution model cache lost version {model_version_id}"
+                    ))
+                })?;
+                Ok((model_version_id, artifact))
+            })
+            .collect()
     }
 
     fn validate_serving_page(
@@ -895,101 +1004,134 @@ impl FeedbackAttributionMaterializer {
         &self,
         run_ids: &[ModelRunId],
         cutoff: DateTime<Utc>,
+        cancel: &CancellationToken,
     ) -> QuantResult<ServingEvidencePage> {
-        let mut run_ids = run_ids.to_vec();
-        run_ids.sort_by_key(|run_id| run_id.as_uuid());
-        run_ids.dedup();
+        let run_ids = run_ids.to_vec();
         let cutoff_millis = cutoff.timestamp_millis();
-        let completions = Self::canonical_completions(
-            self.serving_evidence
-                .completions_for_runs(&run_ids)
-                .await?
-                .into_iter()
-                .filter(|row| row.ingestion_time <= cutoff_millis)
-                .collect(),
-        )?;
-        if completions.len() != run_ids.len() {
-            return Err(Self::invalid(format!(
-                "attribution requires {} serving completions visible by cutoff, found {}",
-                run_ids.len(),
-                completions.len()
-            )));
-        }
-        let mut vector_ids = Vec::new();
-        for run_id in &run_ids {
-            let marker = completions.get(run_id).ok_or_else(|| {
-                Self::invalid(format!(
-                    "model run {run_id} has no serving completion visible by cutoff"
-                ))
-            })?;
-            let mut marker_vectors = serde_json::from_str::<Vec<_>>(
-                &marker.feature_vector_ids_json,
-            )
-            .map_err(|error| {
-                Self::invalid(format!(
-                    "model run {run_id} has invalid completion vector ids: {error}"
-                ))
-            })?;
-            vector_ids.append(&mut marker_vectors);
-        }
-        vector_ids.sort_by_key(ToString::to_string);
-        vector_ids.dedup();
-        let inputs = Self::canonical_model_inputs(
-            self.serving_evidence
-                .model_inputs_for_runs(&run_ids)
-                .await?
-                .into_iter()
-                .filter(|row| row.ingestion_time <= cutoff_millis)
-                .collect(),
-        )?;
-        let features = Self::canonical_feature_rows(
-            self.serving_evidence
-                .feature_cells_for_vectors(&vector_ids)
-                .await?
-                .into_iter()
-                .filter(|row| row.ingestion_time <= cutoff_millis)
-                .collect(),
-        )?;
-        let mut inputs_by_run = HashMap::new();
-        for row in inputs {
-            inputs_by_run
-                .entry(row.model_run_id)
-                .or_insert_with(Vec::new)
-                .push(row);
-        }
-        let mut completion_hashes = HashMap::new();
-        for run_id in run_ids {
-            let marker = completions.get(&run_id).ok_or_else(|| {
-                Self::invalid(format!("model run {run_id} lost its canonical completion"))
-            })?;
-            let run_inputs = inputs_by_run.get(&run_id).ok_or_else(|| {
-                Self::invalid(format!("model run {run_id} has no durable encoded inputs"))
-            })?;
-            let marker_vectors =
-                serde_json::from_str::<HashSet<FeatureVectorId>>(&marker.feature_vector_ids_json)
+        let completion_rows = self.serving_evidence.completions_for_runs(&run_ids).await?;
+        let plan_run_ids = run_ids.clone();
+        let plan_cancel = cancel.clone();
+        let (completions, vector_ids, vector_runs) = self
+            .run_compute(cancel, move || {
+                Self::require_active(&plan_cancel)?;
+                let completions = Self::canonical_completions(
+                    completion_rows
+                        .into_iter()
+                        .filter(|row| row.ingestion_time <= cutoff_millis)
+                        .collect(),
+                )?;
+                if completions.len() != plan_run_ids.len() {
+                    return Err(Self::invalid(format!(
+                        "attribution requires {} serving completions visible by cutoff, found {}",
+                        plan_run_ids.len(),
+                        completions.len()
+                    )));
+                }
+                let mut vector_ids = Vec::new();
+                let mut vector_runs = HashMap::<FeatureVectorId, Vec<ModelRunId>>::new();
+                for run_id in &plan_run_ids {
+                    Self::require_active(&plan_cancel)?;
+                    let marker = completions.get(run_id).ok_or_else(|| {
+                        Self::invalid(format!(
+                            "model run {run_id} has no serving completion visible by cutoff"
+                        ))
+                    })?;
+                    let marker_vectors = serde_json::from_str::<Vec<_>>(
+                        &marker.feature_vector_ids_json,
+                    )
                     .map_err(|error| {
+                        Self::invalid(format!(
+                            "model run {run_id} has invalid completion vector ids: {error}"
+                        ))
+                    })?;
+                    for vector_id in marker_vectors {
+                        vector_runs.entry(vector_id).or_default().push(*run_id);
+                        vector_ids.push(vector_id);
+                    }
+                }
+                vector_ids.sort_by_key(ToString::to_string);
+                vector_ids.dedup();
+                Ok((completions, vector_ids, vector_runs))
+            })
+            .await?;
+        Self::require_active(cancel)?;
+        let input_rows = self
+            .serving_evidence
+            .model_inputs_for_runs(&run_ids)
+            .await?;
+        let feature_rows = self
+            .serving_evidence
+            .feature_cells_for_vectors(&vector_ids)
+            .await?;
+        let verify_cancel = cancel.clone();
+        self.run_compute(cancel, move || {
+            let inputs = Self::canonical_model_inputs(
+                input_rows
+                    .into_iter()
+                    .filter(|row| row.ingestion_time <= cutoff_millis)
+                    .collect(),
+            )?;
+            let features = Self::canonical_feature_rows(
+                feature_rows
+                    .into_iter()
+                    .filter(|row| row.ingestion_time <= cutoff_millis)
+                    .collect(),
+            )?;
+            let mut inputs_by_run = HashMap::new();
+            for row in inputs {
+                inputs_by_run
+                    .entry(row.model_run_id)
+                    .or_insert_with(Vec::new)
+                    .push(row);
+            }
+            let mut features_by_run = HashMap::<ModelRunId, Vec<QuantFeatureEventRow>>::new();
+            for row in features {
+                let run_ids = vector_runs.get(&row.feature_vector_id).ok_or_else(|| {
                     Self::invalid(format!(
-                        "model run {run_id} has invalid completion vector ids: {error}"
+                        "feature vector {} is outside the serving completion set",
+                        row.feature_vector_id
                     ))
                 })?;
-            let run_features = features
-                .iter()
-                .filter(|row| marker_vectors.contains(&row.feature_vector_id))
-                .cloned()
-                .collect::<Vec<_>>();
-            verify_completion(marker, &run_features, run_inputs)?;
-            completion_hashes.insert(
-                run_id,
-                marker
-                    .completion_hash
-                    .parse()
-                    .map_err(Self::invalid_contract)?,
-            );
-        }
-        Ok(ServingEvidencePage {
-            completion_hashes,
-            model_inputs: inputs_by_run,
+                let Some((last, shared)) = run_ids.split_last() else {
+                    return Err(Self::invalid("serving feature ownership set is empty"));
+                };
+                for run_id in shared {
+                    features_by_run
+                        .entry(*run_id)
+                        .or_default()
+                        .push(row.clone());
+                }
+                features_by_run.entry(*last).or_default().push(row);
+            }
+            let mut completion_hashes = HashMap::new();
+            for run_id in run_ids {
+                Self::require_active(&verify_cancel)?;
+                let marker = completions.get(&run_id).ok_or_else(|| {
+                    Self::invalid(format!("model run {run_id} lost its canonical completion"))
+                })?;
+                let run_inputs = inputs_by_run.get(&run_id).ok_or_else(|| {
+                    Self::invalid(format!("model run {run_id} has no durable encoded inputs"))
+                })?;
+                let run_features = features_by_run.get(&run_id).ok_or_else(|| {
+                    Self::invalid(format!(
+                        "model run {run_id} has no durable feature evidence"
+                    ))
+                })?;
+                verify_completion(marker, run_features, run_inputs)?;
+                completion_hashes.insert(
+                    run_id,
+                    marker
+                        .completion_hash
+                        .parse()
+                        .map_err(Self::invalid_contract)?,
+                );
+            }
+            Ok(ServingEvidencePage {
+                completion_hashes,
+                model_inputs: inputs_by_run,
+            })
         })
+        .await
     }
 
     fn canonical_completions(
@@ -1060,14 +1202,40 @@ impl FeedbackAttributionMaterializer {
     async fn load_execution_samples(
         &self,
         params: &FeedbackAttributionJobParams,
-        predictions: &[MaterializedPrediction],
-    ) -> QuantResult<HashMap<ModelVersionId, Vec<ExecutionOutcomeAssociationSample>>> {
-        let prediction_index = predictions
-            .iter()
-            .map(|prediction| (prediction.context.recommendation_id(), prediction))
-            .collect::<HashMap<_, _>>();
+        predictions: Vec<MaterializedPrediction>,
+        cancel: &CancellationToken,
+    ) -> QuantResult<(
+        HashMap<ModelVersionId, Vec<ExecutionOutcomeAssociationSample>>,
+        Vec<MaterializedPrediction>,
+    )> {
+        let index_cancel = cancel.clone();
+        let (predictions, mut prediction_index) = self
+            .run_compute(cancel, move || {
+                let mut index = HashMap::with_capacity(predictions.len());
+                for prediction in &predictions {
+                    Self::require_active(&index_cancel)?;
+                    if index
+                        .insert(
+                            prediction.context.recommendation_id(),
+                            ExecutionPredictionEvidence {
+                                model_version_id: prediction.context.model_version_id(),
+                                explanation_hash: prediction.explanation_hash,
+                                contributions: prediction.explanation.contributions.clone(),
+                            },
+                        )
+                        .is_some()
+                    {
+                        return Err(Self::invalid(format!(
+                            "execution prediction index contains duplicate recommendation {}",
+                            prediction.context.recommendation_id()
+                        )));
+                    }
+                }
+                Ok((predictions, index))
+            })
+            .await?;
         if prediction_index.is_empty() {
-            return Ok(HashMap::new());
+            return Ok((HashMap::new(), predictions));
         }
         let cohort_snapshot = params.cohort_snapshot()?;
         let mut groups = HashMap::<ModelVersionId, Vec<ExecutionOutcomeAssociationSample>>::new();
@@ -1082,20 +1250,26 @@ impl FeedbackAttributionMaterializer {
             )
             .map_err(Self::invalid_contract)?;
             let page = self.cohorts.list_page(query).await?;
-            for candidate in page.candidates() {
+            let candidates = page.candidates().to_vec();
+            let page_snapshot = cohort_snapshot.clone();
+            let page_cancel = cancel.clone();
+            let state = self.run_compute(cancel, move || {
+            for candidate in &candidates {
+                Self::require_active(&page_cancel)?;
                 let decision = evaluate_feedback_cohort(
                     FeedbackCohort::ExecutionLearning,
-                    &cohort_snapshot,
+                    &page_snapshot,
                     candidate.context(),
                     None,
                     candidate.execution_rollup(),
+                    None,
                 )
                 .map_err(Self::invalid_contract)?;
                 if !matches!(decision, FeedbackCohortDecision::Eligible(_)) {
                     continue;
                 }
                 let recommendation_id = candidate.context().recommendation_id();
-                let Some(prediction) = prediction_index.get(&recommendation_id) else {
+                let Some(prediction) = prediction_index.get_mut(&recommendation_id) else {
                     continue;
                 };
                 if !included.insert(recommendation_id) {
@@ -1121,115 +1295,123 @@ impl FeedbackAttributionMaterializer {
                     available_at: rollup.available_at,
                 };
                 groups
-                    .entry(prediction.context.model_version_id())
+                    .entry(prediction.model_version_id)
                     .or_default()
                     .push(ExecutionOutcomeAssociationSample {
                         explanation_hash: prediction.explanation_hash,
                         binding,
-                        contributions: prediction.explanation.contributions.clone(),
+                        contributions: mem::take(&mut prediction.contributions),
                     });
             }
+            Ok((prediction_index, groups, included))
+            }).await?;
+            (prediction_index, groups, included) = state;
             cursor = page.next_cursor();
             if cursor.is_none() {
                 break;
             }
         }
-        Ok(groups)
+        Ok((groups, predictions))
     }
 
     async fn materialize_execution_associations(
         &self,
         params: &FeedbackAttributionJobParams,
-        mut groups: HashMap<ModelVersionId, Vec<ExecutionOutcomeAssociationSample>>,
+        groups: HashMap<ModelVersionId, Vec<ExecutionOutcomeAssociationSample>>,
         cancel: &CancellationToken,
     ) -> QuantResult<u64> {
         let mut count = 0_u64;
-        for (model_version_id, samples) in &mut groups {
+        for (model_version_id, mut samples) in groups {
             Self::require_active(cancel)?;
-            samples.sort_by_key(|sample| sample.binding.recommendation_id.as_uuid());
-            if samples.len() < 3 || !Self::execution_association_varies(samples) {
-                continue;
-            }
-            let estimator_contract_hash = CanonicalDigest::content_hash_typed(
-                ASSOCIATION_ESTIMATOR_DOMAIN,
-                ASSOCIATION_VERSION,
-                &"univariate_ols_classical_95pct_noncausal",
-            )?;
-            let conditioning_policy_hash = CanonicalDigest::content_hash_typed(
-                ASSOCIATION_CONDITIONING_DOMAIN,
-                ASSOCIATION_VERSION,
-                &(
-                    &params.window,
-                    *model_version_id,
-                    ExecutionOutcomeAssociationTarget::RealizedNetPnlUsd,
-                ),
-            )?;
-            let recommendation_ids = samples
-                .iter()
-                .map(|sample| sample.binding.recommendation_id)
-                .collect::<Vec<_>>();
-            let explanation_hashes = samples
-                .iter()
-                .map(|sample| sample.explanation_hash)
-                .collect::<Vec<_>>();
-            let bindings = samples
-                .iter()
-                .map(|sample| &sample.binding)
-                .collect::<Vec<_>>();
-            let cohort_manifest_hash = CanonicalDigest::content_hash_typed(
-                ASSOCIATION_COHORT_DOMAIN,
-                ASSOCIATION_VERSION,
-                &recommendation_ids,
-            )?;
-            let explanation_set_hash = CanonicalDigest::content_hash_typed(
-                ASSOCIATION_EXPLANATIONS_DOMAIN,
-                ASSOCIATION_VERSION,
-                &explanation_hashes,
-            )?;
-            let execution_rollup_set_hash = CanonicalDigest::content_hash_typed(
-                ASSOCIATION_EXECUTIONS_DOMAIN,
-                ASSOCIATION_VERSION,
-                &bindings,
-            )?;
-            let mut source_hashes = vec![
-                params.truth_artifact.content_hash,
-                estimator_contract_hash,
-                conditioning_policy_hash,
-                cohort_manifest_hash,
-                explanation_set_hash,
-                execution_rollup_set_hash,
-            ];
-            source_hashes.extend(
-                samples.iter().flat_map(|sample| {
-                    [sample.binding.rollup_hash, sample.binding.attempt_set_hash]
-                }),
-            );
-            let lineage = AttributionLineage::try_new(
-                params.feedback_cycle_id,
-                AttributionCohort::Evaluation,
-                params.cutoff,
-                params.generated_at,
-                source_hashes,
-            )?;
-            let association_input = ExecutionOutcomeAssociationInput {
-                lineage,
-                model_version_id: *model_version_id,
-                target: ExecutionOutcomeAssociationTarget::RealizedNetPnlUsd,
-                estimator_contract_hash,
-                conditioning_policy_hash,
-                cohort_manifest_hash,
-                explanation_set_hash,
-                execution_rollup_set_hash,
-                samples: samples.clone(),
-            };
+            let compute_params = params.clone();
+            let compute_cancel = cancel.clone();
             let artifact = self
                 .run_compute(cancel, move || {
-                    ExecutionOutcomeAssociationArtifact::estimate(association_input)
+                    samples.sort_by_key(|sample| sample.binding.recommendation_id.as_uuid());
+                    if samples.len() < 3 || !Self::execution_association_varies(&samples) {
+                        return Ok(None);
+                    }
+                    Self::require_active(&compute_cancel)?;
+                    let estimator_contract_hash = CanonicalDigest::content_hash_typed(
+                        ASSOCIATION_ESTIMATOR_DOMAIN,
+                        ASSOCIATION_VERSION,
+                        &"univariate_ols_classical_95pct_noncausal",
+                    )?;
+                    let conditioning_policy_hash = CanonicalDigest::content_hash_typed(
+                        ASSOCIATION_CONDITIONING_DOMAIN,
+                        ASSOCIATION_VERSION,
+                        &(
+                            &compute_params.window,
+                            model_version_id,
+                            ExecutionOutcomeAssociationTarget::RealizedNetPnlUsd,
+                        ),
+                    )?;
+                    let recommendation_ids = samples
+                        .iter()
+                        .map(|sample| sample.binding.recommendation_id)
+                        .collect::<Vec<_>>();
+                    let explanation_hashes = samples
+                        .iter()
+                        .map(|sample| sample.explanation_hash)
+                        .collect::<Vec<_>>();
+                    let bindings = samples
+                        .iter()
+                        .map(|sample| &sample.binding)
+                        .collect::<Vec<_>>();
+                    let cohort_manifest_hash = CanonicalDigest::content_hash_typed(
+                        ASSOCIATION_COHORT_DOMAIN,
+                        ASSOCIATION_VERSION,
+                        &recommendation_ids,
+                    )?;
+                    let explanation_set_hash = CanonicalDigest::content_hash_typed(
+                        ASSOCIATION_EXPLANATIONS_DOMAIN,
+                        ASSOCIATION_VERSION,
+                        &explanation_hashes,
+                    )?;
+                    let execution_rollup_set_hash = CanonicalDigest::content_hash_typed(
+                        ASSOCIATION_EXECUTIONS_DOMAIN,
+                        ASSOCIATION_VERSION,
+                        &bindings,
+                    )?;
+                    let mut source_hashes = vec![
+                        compute_params.truth_artifact.content_hash,
+                        estimator_contract_hash,
+                        conditioning_policy_hash,
+                        cohort_manifest_hash,
+                        explanation_set_hash,
+                        execution_rollup_set_hash,
+                    ];
+                    source_hashes.extend(samples.iter().flat_map(|sample| {
+                        [sample.binding.rollup_hash, sample.binding.attempt_set_hash]
+                    }));
+                    let lineage = AttributionLineage::try_new(
+                        compute_params.feedback_cycle_id,
+                        AttributionCohort::Evaluation,
+                        compute_params.cutoff,
+                        compute_params.generated_at,
+                        source_hashes,
+                    )?;
+                    let input = ExecutionOutcomeAssociationInput {
+                        lineage,
+                        model_version_id,
+                        target: ExecutionOutcomeAssociationTarget::RealizedNetPnlUsd,
+                        estimator_contract_hash,
+                        conditioning_policy_hash,
+                        cohort_manifest_hash,
+                        explanation_set_hash,
+                        execution_rollup_set_hash,
+                        samples,
+                    };
+                    ExecutionOutcomeAssociationArtifact::estimate(input).map(Some)
                 })
                 .await?;
-            self.persist(AttributionArtifact::ExecutionOutcomeAssociation(Box::new(
-                artifact,
-            )))
+            let Some(artifact) = artifact else {
+                continue;
+            };
+            self.persist(
+                AttributionArtifact::ExecutionOutcomeAssociation(Box::new(artifact)),
+                cancel,
+            )
             .await?;
             count = count.saturating_add(1);
         }
@@ -1239,90 +1421,97 @@ impl FeedbackAttributionMaterializer {
     async fn materialize_resolution_associations(
         &self,
         params: &FeedbackAttributionJobParams,
-        mut groups: HashMap<ModelVersionId, Vec<ResolutionOutcomeAssociationSample>>,
+        groups: HashMap<ModelVersionId, Vec<ResolutionOutcomeAssociationSample>>,
         cancel: &CancellationToken,
     ) -> QuantResult<u64> {
         let mut count = 0_u64;
-        for (model_version_id, samples) in &mut groups {
+        for (model_version_id, mut samples) in groups {
             Self::require_active(cancel)?;
-            samples.sort_by_key(|sample| sample.recommendation_id.as_uuid());
-            if samples.len() < 3 || !Self::association_varies(samples) {
-                continue;
-            }
-            let estimator_contract_hash = CanonicalDigest::content_hash_typed(
-                ASSOCIATION_ESTIMATOR_DOMAIN,
-                ASSOCIATION_VERSION,
-                &"univariate_ols_classical_95pct_noncausal",
-            )?;
-            let conditioning_policy_hash = CanonicalDigest::content_hash_typed(
-                ASSOCIATION_CONDITIONING_DOMAIN,
-                ASSOCIATION_VERSION,
-                &(
-                    &params.window,
-                    *model_version_id,
-                    ResolutionOutcomeAssociationTarget::FinalTokenPayoutRatio,
-                ),
-            )?;
-            let recommendation_ids = samples
-                .iter()
-                .map(|sample| sample.recommendation_id)
-                .collect::<Vec<_>>();
-            let explanation_hashes = samples
-                .iter()
-                .map(|sample| sample.explanation_hash)
-                .collect::<Vec<_>>();
-            let resolution_hashes = samples
-                .iter()
-                .map(|sample| sample.outcome_hash)
-                .collect::<Vec<_>>();
-            let cohort_manifest_hash = CanonicalDigest::content_hash_typed(
-                ASSOCIATION_COHORT_DOMAIN,
-                ASSOCIATION_VERSION,
-                &recommendation_ids,
-            )?;
-            let explanation_set_hash = CanonicalDigest::content_hash_typed(
-                ASSOCIATION_EXPLANATIONS_DOMAIN,
-                ASSOCIATION_VERSION,
-                &explanation_hashes,
-            )?;
-            let resolution_set_hash = CanonicalDigest::content_hash_typed(
-                ASSOCIATION_RESOLUTIONS_DOMAIN,
-                ASSOCIATION_VERSION,
-                &resolution_hashes,
-            )?;
-            let lineage = AttributionLineage::try_new(
-                params.feedback_cycle_id,
-                AttributionCohort::Evaluation,
-                params.cutoff,
-                params.generated_at,
-                vec![
-                    params.truth_artifact.content_hash,
-                    estimator_contract_hash,
-                    conditioning_policy_hash,
-                    cohort_manifest_hash,
-                    explanation_set_hash,
-                    resolution_set_hash,
-                ],
-            )?;
-            let association_input = ResolutionOutcomeAssociationInput {
-                lineage,
-                model_version_id: *model_version_id,
-                target: ResolutionOutcomeAssociationTarget::FinalTokenPayoutRatio,
-                estimator_contract_hash,
-                conditioning_policy_hash,
-                cohort_manifest_hash,
-                explanation_set_hash,
-                resolution_set_hash,
-                samples: samples.clone(),
-            };
+            let compute_params = params.clone();
+            let compute_cancel = cancel.clone();
             let artifact = self
                 .run_compute(cancel, move || {
-                    ResolutionOutcomeAssociationArtifact::estimate(association_input)
+                    samples.sort_by_key(|sample| sample.recommendation_id.as_uuid());
+                    if samples.len() < 3 || !Self::association_varies(&samples) {
+                        return Ok(None);
+                    }
+                    Self::require_active(&compute_cancel)?;
+                    let estimator_contract_hash = CanonicalDigest::content_hash_typed(
+                        ASSOCIATION_ESTIMATOR_DOMAIN,
+                        ASSOCIATION_VERSION,
+                        &"univariate_ols_classical_95pct_noncausal",
+                    )?;
+                    let conditioning_policy_hash = CanonicalDigest::content_hash_typed(
+                        ASSOCIATION_CONDITIONING_DOMAIN,
+                        ASSOCIATION_VERSION,
+                        &(
+                            &compute_params.window,
+                            model_version_id,
+                            ResolutionOutcomeAssociationTarget::FinalTokenPayoutRatio,
+                        ),
+                    )?;
+                    let recommendation_ids = samples
+                        .iter()
+                        .map(|sample| sample.recommendation_id)
+                        .collect::<Vec<_>>();
+                    let explanation_hashes = samples
+                        .iter()
+                        .map(|sample| sample.explanation_hash)
+                        .collect::<Vec<_>>();
+                    let resolution_hashes = samples
+                        .iter()
+                        .map(|sample| sample.outcome_hash)
+                        .collect::<Vec<_>>();
+                    let cohort_manifest_hash = CanonicalDigest::content_hash_typed(
+                        ASSOCIATION_COHORT_DOMAIN,
+                        ASSOCIATION_VERSION,
+                        &recommendation_ids,
+                    )?;
+                    let explanation_set_hash = CanonicalDigest::content_hash_typed(
+                        ASSOCIATION_EXPLANATIONS_DOMAIN,
+                        ASSOCIATION_VERSION,
+                        &explanation_hashes,
+                    )?;
+                    let resolution_set_hash = CanonicalDigest::content_hash_typed(
+                        ASSOCIATION_RESOLUTIONS_DOMAIN,
+                        ASSOCIATION_VERSION,
+                        &resolution_hashes,
+                    )?;
+                    let lineage = AttributionLineage::try_new(
+                        compute_params.feedback_cycle_id,
+                        AttributionCohort::Evaluation,
+                        compute_params.cutoff,
+                        compute_params.generated_at,
+                        vec![
+                            compute_params.truth_artifact.content_hash,
+                            estimator_contract_hash,
+                            conditioning_policy_hash,
+                            cohort_manifest_hash,
+                            explanation_set_hash,
+                            resolution_set_hash,
+                        ],
+                    )?;
+                    let input = ResolutionOutcomeAssociationInput {
+                        lineage,
+                        model_version_id,
+                        target: ResolutionOutcomeAssociationTarget::FinalTokenPayoutRatio,
+                        estimator_contract_hash,
+                        conditioning_policy_hash,
+                        cohort_manifest_hash,
+                        explanation_set_hash,
+                        resolution_set_hash,
+                        samples,
+                    };
+                    ResolutionOutcomeAssociationArtifact::estimate(input).map(Some)
                 })
                 .await?;
-            self.persist(AttributionArtifact::ResolutionOutcomeAssociation(Box::new(
-                artifact,
-            )))
+            let Some(artifact) = artifact else {
+                continue;
+            };
+            self.persist(
+                AttributionArtifact::ResolutionOutcomeAssociation(Box::new(artifact)),
+                cancel,
+            )
             .await?;
             count = count.saturating_add(1);
         }
@@ -1369,26 +1558,32 @@ impl FeedbackAttributionMaterializer {
     async fn materialize_decisions(
         &self,
         params: &FeedbackAttributionJobParams,
-        predictions: &[MaterializedPrediction],
-        model_cache: &HashMap<ModelVersionId, ModelArtifact>,
+        predictions: Vec<MaterializedPrediction>,
+        model_cache: &HashMap<ModelVersionId, Arc<ModelArtifact>>,
         cancel: &CancellationToken,
     ) -> QuantResult<u64> {
-        let mut grouped = HashMap::<ModelRunId, Vec<MaterializedPrediction>>::new();
-        for prediction in predictions {
-            grouped
-                .entry(prediction.context.model_run_id())
-                .or_default()
-                .push(prediction.clone());
-        }
-        let mut run_ids = grouped.keys().copied().collect::<Vec<_>>();
-        run_ids.sort_by_key(|model_run_id| model_run_id.as_uuid());
-        let mut groups = Vec::with_capacity(run_ids.len());
-        for model_run_id in run_ids {
-            Self::require_active(cancel)?;
-            let mut predictions = grouped.remove(&model_run_id).ok_or_else(|| {
-                Self::invalid(format!("decision replay group {model_run_id} disappeared"))
-            })?;
-            predictions.sort_by_key(|prediction| prediction.context.recommendation_id().as_uuid());
+        let group_cancel = cancel.clone();
+        let grouped = self
+            .run_compute(cancel, move || {
+                let mut grouped = HashMap::<ModelRunId, Vec<MaterializedPrediction>>::new();
+                for prediction in predictions {
+                    Self::require_active(&group_cancel)?;
+                    grouped
+                        .entry(prediction.context.model_run_id())
+                        .or_default()
+                        .push(prediction);
+                }
+                let mut groups = grouped.into_iter().collect::<Vec<_>>();
+                groups.sort_by_key(|(model_run_id, _)| model_run_id.as_uuid());
+                for (_, predictions) in &mut groups {
+                    predictions
+                        .sort_by_key(|prediction| prediction.context.recommendation_id().as_uuid());
+                }
+                Ok(groups)
+            })
+            .await?;
+        let mut groups_with_artifacts = Vec::with_capacity(grouped.len());
+        for (_, predictions) in grouped {
             let first = predictions
                 .first()
                 .ok_or_else(|| Self::invalid("decision replay group is empty"))?;
@@ -1398,20 +1593,22 @@ impl FeedbackAttributionMaterializer {
                     "decision replay model cache lost version {model_version_id}"
                 ))
             })?;
-            groups.push((predictions, artifact));
+            groups_with_artifacts.push((predictions, artifact));
         }
 
         let concurrency = self.compute_budget.max_concurrency;
-        let mut pending = stream::iter(groups.into_iter().map(|(predictions, artifact)| {
-            let materializer = self.clone();
-            let params = params.clone();
-            let cancel = cancel.clone();
-            async move {
-                materializer
-                    .materialize_decision_group(&params, predictions, &artifact, &cancel)
-                    .await
-            }
-        }))
+        let mut pending = stream::iter(groups_with_artifacts.into_iter().map(
+            |(predictions, artifact)| {
+                let materializer = self.clone();
+                let params = params.clone();
+                let cancel = cancel.clone();
+                async move {
+                    materializer
+                        .materialize_decision_group(&params, predictions, artifact, &cancel)
+                        .await
+                }
+            },
+        ))
         .buffer_unordered(concurrency);
         let mut count = 0_u64;
         while let Some(result) = pending.next().await {
@@ -1424,14 +1621,23 @@ impl FeedbackAttributionMaterializer {
         &self,
         params: &FeedbackAttributionJobParams,
         predictions: Vec<MaterializedPrediction>,
-        artifact: &ModelArtifact,
+        artifact: Arc<ModelArtifact>,
         cancel: &CancellationToken,
     ) -> QuantResult<u64> {
         Self::require_active(cancel)?;
         let first = predictions
             .first()
             .ok_or_else(|| Self::invalid("decision replay group is empty"))?;
-        let universe = self.build_decision_universe(first, artifact).await?;
+        let replay_context = first.context.clone();
+        let explanation_input_contract_hash = first.explanation.input_contract_hash;
+        let universe = self
+            .build_decision_universe(
+                replay_context,
+                explanation_input_contract_hash,
+                artifact,
+                cancel,
+            )
+            .await?;
         let count = u64::try_from(predictions.len()).map_err(|error| {
             Self::invalid(format!("decision replay group size overflow: {error}"))
         })?;
@@ -1446,9 +1652,10 @@ impl FeedbackAttributionMaterializer {
             .await?;
         for replay in replays {
             Self::require_active(cancel)?;
-            self.persist(AttributionArtifact::DecisionInterventionReplay(Box::new(
-                replay,
-            )))
+            self.persist(
+                AttributionArtifact::DecisionInterventionReplay(Box::new(replay)),
+                cancel,
+            )
             .await?;
         }
         Ok(count)
@@ -1456,19 +1663,25 @@ impl FeedbackAttributionMaterializer {
 
     async fn build_decision_universe(
         &self,
-        prediction: &MaterializedPrediction,
-        artifact: &ModelArtifact,
+        context: FeedbackRecommendationContext,
+        explanation_input_contract_hash: ContentHash,
+        artifact: Arc<ModelArtifact>,
+        cancel: &CancellationToken,
     ) -> QuantResult<DecisionUniverse> {
+        if matches!(artifact.payload(), ModelPayload::WeightedFactor(_)) {
+            return self
+                .build_weighted_universe(context, explanation_input_contract_hash, artifact, cancel)
+                .await;
+        }
         match artifact.payload() {
-            ModelPayload::WeightedFactor(payload) => {
-                self.build_weighted_universe(prediction, artifact, payload)
-                    .await
-            }
+            ModelPayload::WeightedFactor(_) => Err(Self::invalid(
+                "weighted replay dispatch changed while materializing attribution",
+            )),
             ModelPayload::Classical(_) => Err(ResearchError::NotEligible {
                 code: "exact_decision_intervention_replay_unavailable",
                 detail: format!(
                     "shadow-only classical model {} cannot enter recommendation replay",
-                    prediction.context.model_version_id()
+                    context.model_version_id()
                 ),
             }
             .into()),
@@ -1476,7 +1689,7 @@ impl FeedbackAttributionMaterializer {
                 code: "exact_decision_intervention_replay_unavailable",
                 detail: format!(
                     "sell model {} is outside recommendation counterfactual replay",
-                    prediction.context.model_version_id()
+                    context.model_version_id()
                 ),
             }
             .into()),
@@ -1485,11 +1698,17 @@ impl FeedbackAttributionMaterializer {
 
     async fn build_weighted_universe(
         &self,
-        prediction: &MaterializedPrediction,
-        artifact: &ModelArtifact,
-        payload: &WeightedFactorModelPayload,
+        context: FeedbackRecommendationContext,
+        explanation_input_contract_hash: ContentHash,
+        artifact: Arc<ModelArtifact>,
+        cancel: &CancellationToken,
     ) -> QuantResult<DecisionUniverse> {
-        let context = &prediction.context;
+        Self::require_active(cancel)?;
+        let ModelPayload::WeightedFactor(_payload) = artifact.payload() else {
+            return Err(Self::invalid(
+                "weighted replay received a non-weighted model",
+            ));
+        };
         let plane = &artifact
             .header()
             .serving_contract()
@@ -1508,23 +1727,21 @@ impl FeedbackAttributionMaterializer {
         let definitions = self
             .factors
             .find_definitions_by_ids(&definition_ids)
-            .await?
-            .into_iter()
-            .map(|definition| (definition.factor_definition_id, definition))
-            .collect::<HashMap<_, _>>();
-        let mut vector_ids = factor_rows
-            .iter()
-            .map(|row| row.feature_vector_id)
-            .collect::<Vec<_>>();
-        vector_ids.sort_by_key(|feature_vector_id| feature_vector_id.as_uuid());
-        vector_ids.dedup();
-        let features = self
-            .features
-            .find_by_ids(&vector_ids)
-            .await?
-            .into_iter()
-            .map(|feature| (feature.feature_vector_id, feature))
-            .collect::<HashMap<_, _>>();
+            .await?;
+        let vector_cancel = cancel.clone();
+        let (factor_rows, vector_ids) = self
+            .run_compute(cancel, move || {
+                Self::require_active(&vector_cancel)?;
+                let mut vector_ids = factor_rows
+                    .iter()
+                    .map(|row| row.feature_vector_id)
+                    .collect::<Vec<_>>();
+                vector_ids.sort_by_key(|feature_vector_id| feature_vector_id.as_uuid());
+                vector_ids.dedup();
+                Ok((factor_rows, vector_ids))
+            })
+            .await?;
+        let features = self.features.find_by_ids(&vector_ids).await?;
         let members = self
             .selections
             .list_members(&context.market_selection_id())
@@ -1539,47 +1756,72 @@ impl FeedbackAttributionMaterializer {
                     context.decision_policy_snapshot_id()
                 ))
             })?;
-        let mut replay = BTreeMap::new();
-        let evidence = WeightedUniverseEvidence {
-            context,
-            artifact,
-            payload,
-            plane,
-            factor_rows: &factor_rows,
-            definitions: &definitions,
-            features: &features,
-        };
-        for member in members {
-            let Some(candidate) = Self::weighted_candidate(&evidence, &member)? else {
-                continue;
+        let compute_cancel = cancel.clone();
+        self.run_compute(cancel, move || {
+            let context = &context;
+            let ModelPayload::WeightedFactor(payload) = artifact.payload() else {
+                return Err(Self::invalid(
+                    "weighted replay received a non-weighted model",
+                ));
             };
-            if replay.insert(candidate.key, candidate.state).is_some() {
+            let plane = &artifact
+                .header()
+                .serving_contract()
+                .bindings()
+                .factors
+                .plane;
+            let definitions = definitions
+                .into_iter()
+                .map(|definition| (definition.factor_definition_id, definition))
+                .collect::<HashMap<_, _>>();
+            let features = features
+                .into_iter()
+                .map(|feature| (feature.feature_vector_id, feature))
+                .collect::<HashMap<_, _>>();
+            let evidence = WeightedUniverseEvidence {
+                context,
+                artifact: artifact.as_ref(),
+                payload,
+                plane,
+                factor_rows: &factor_rows,
+                definitions: &definitions,
+                features: &features,
+            };
+            let mut replay = BTreeMap::new();
+            for member in members {
+                Self::require_active(&compute_cancel)?;
+                let Some(candidate) = Self::weighted_candidate(&evidence, &member)? else {
+                    continue;
+                };
+                if replay.insert(candidate.key, candidate.state).is_some() {
+                    return Err(Self::invalid(format!(
+                        "weighted replay duplicated market {} candidate",
+                        member.market_id
+                    )));
+                }
+            }
+            if replay.is_empty() {
                 return Err(Self::invalid(format!(
-                    "weighted replay duplicated market {} candidate",
-                    member.market_id
+                    "model run {} replayed no Route model states",
+                    context.model_run_id()
                 )));
             }
-        }
-        if replay.is_empty() {
-            return Err(Self::invalid(format!(
-                "model run {} replayed no Route model states",
-                context.model_run_id()
-            )));
-        }
-        let input_contract_hash = model_input_contract_hash(&payload.input_contract)?;
-        if input_contract_hash != prediction.explanation.input_contract_hash {
-            return Err(Self::invalid(format!(
-                "weighted replay input contract differs from explanation for model {}",
-                context.model_version_id()
-            )));
-        }
-        Ok(DecisionUniverse {
-            policy: DecisionReplayPolicy::try_new(policy.snapshot_hash)?,
-            replay: DecisionReplayModel::Weighted(replay),
-            model_artifact_hash: artifact.content_hash()?,
-            input_contract_hash,
-            input_transform_hash: payload.input_transform_hash()?,
+            let input_contract_hash = model_input_contract_hash(&payload.input_contract)?;
+            if input_contract_hash != explanation_input_contract_hash {
+                return Err(Self::invalid(format!(
+                    "weighted replay input contract differs from explanation for model {}",
+                    context.model_version_id()
+                )));
+            }
+            Ok(DecisionUniverse {
+                policy: DecisionReplayPolicy::try_new(policy.snapshot_hash)?,
+                replay: DecisionReplayModel::Weighted(replay),
+                model_artifact_hash: artifact.content_hash()?,
+                input_contract_hash,
+                input_transform_hash: payload.input_transform_hash()?,
+            })
         })
+        .await
     }
 
     fn weighted_candidate(
@@ -1743,28 +1985,39 @@ impl FeedbackAttributionMaterializer {
             )
             .map_err(Self::invalid_contract)?;
             let page = self.cohorts.list_page(query).await?;
-            let candidates = page
-                .candidates()
-                .iter()
-                .filter_map(|candidate| {
-                    match evaluate_feedback_cohort(
-                        FeedbackCohort::ExecutionLearning,
-                        &cohort_snapshot,
-                        candidate.context(),
-                        None,
-                        candidate.execution_rollup(),
-                    ) {
-                        Ok(FeedbackCohortDecision::Eligible(_)) => Some(Ok(candidate.clone())),
-                        Ok(
-                            FeedbackCohortDecision::Censored(_)
-                            | FeedbackCohortDecision::Excluded(_),
-                        ) => None,
-                        Err(error) => Some(Err(Self::invalid_contract(error))),
-                    }
+            let next_cursor = page.next_cursor();
+            let page_candidates = page.candidates().to_vec();
+            let page_snapshot = cohort_snapshot.clone();
+            let page_cancel = cancel.clone();
+            let candidates = self
+                .run_compute(cancel, move || {
+                    page_candidates
+                        .into_iter()
+                        .filter_map(|candidate| {
+                            if let Err(error) = Self::require_active(&page_cancel) {
+                                return Some(Err(error));
+                            }
+                            match evaluate_feedback_cohort(
+                                FeedbackCohort::ExecutionLearning,
+                                &page_snapshot,
+                                candidate.context(),
+                                None,
+                                candidate.execution_rollup(),
+                                None,
+                            ) {
+                                Ok(FeedbackCohortDecision::Eligible(_)) => Some(Ok(candidate)),
+                                Ok(
+                                    FeedbackCohortDecision::Censored(_)
+                                    | FeedbackCohortDecision::Excluded(_),
+                                ) => None,
+                                Err(error) => Some(Err(Self::invalid_contract(error))),
+                            }
+                        })
+                        .collect::<QuantResult<Vec<_>>>()
                 })
-                .collect::<QuantResult<Vec<_>>>()?;
+                .await?;
             let (trajectories, counterfactuals) = self
-                .materialize_trajectory_page(params, &candidates, cancel)
+                .materialize_trajectory_page(params, candidates, cancel)
                 .await?;
             trajectory_count = trajectory_count.saturating_add(trajectories);
             counterfactual_count = counterfactual_count.saturating_add(counterfactuals);
@@ -1774,7 +2027,7 @@ impl FeedbackAttributionMaterializer {
                 ),
                 trajectory_count.saturating_add(counterfactual_count),
             ));
-            cursor = page.next_cursor();
+            cursor = next_cursor;
             if cursor.is_none() {
                 break;
             }
@@ -1785,7 +2038,7 @@ impl FeedbackAttributionMaterializer {
     async fn materialize_trajectory_page(
         &self,
         params: &FeedbackAttributionJobParams,
-        candidates: &[FeedbackCohortCandidate],
+        candidates: Vec<FeedbackCohortCandidate>,
         cancel: &CancellationToken,
     ) -> QuantResult<(u64, u64)> {
         if candidates.is_empty() {
@@ -1799,32 +2052,36 @@ impl FeedbackAttributionMaterializer {
             .attempts
             .list_by_recommendations(&recommendation_ids, params.cutoff)
             .await?;
-        let seeds = Self::trajectory_seeds(candidates, attempts, params.cutoff)?;
+        let seed_cancel = cancel.clone();
+        let source_cutoff = params.cutoff;
+        let (seeds, token_ids, market_ids, from, until) = self
+            .run_compute(cancel, move || {
+                Self::require_active(&seed_cancel)?;
+                let seeds = Self::trajectory_seeds(&candidates, attempts, source_cutoff)?;
+                let mut token_ids = seeds
+                    .iter()
+                    .map(|seed| seed.attempt.token_id.clone())
+                    .collect::<Vec<_>>();
+                token_ids.sort();
+                token_ids.dedup();
+                let mut market_ids = seeds
+                    .iter()
+                    .map(|seed| seed.context.market_id().clone())
+                    .collect::<Vec<_>>();
+                market_ids.sort();
+                market_ids.dedup();
+                let from = seeds.iter().map(|seed| seed.entry_at).min();
+                let until = seeds.iter().map(|seed| seed.horizon_end).max();
+                Ok((seeds, token_ids, market_ids, from, until))
+            })
+            .await?;
         if seeds.is_empty() {
             return Ok((0, 0));
         }
-        let mut token_ids = seeds
-            .iter()
-            .map(|seed| seed.attempt.token_id.clone())
-            .collect::<Vec<_>>();
-        token_ids.sort();
-        token_ids.dedup();
-        let mut market_ids = seeds
-            .iter()
-            .map(|seed| seed.context.market_id().clone())
-            .collect::<Vec<_>>();
-        market_ids.sort();
-        market_ids.dedup();
-        let from = seeds
-            .iter()
-            .map(|seed| seed.entry_at)
-            .min()
-            .ok_or_else(|| Self::invalid("trajectory seed set has no entry frontier"))?;
-        let until = seeds
-            .iter()
-            .map(|seed| seed.horizon_end)
-            .max()
-            .ok_or_else(|| Self::invalid("trajectory seed set has no horizon frontier"))?;
+        let from =
+            from.ok_or_else(|| Self::invalid("trajectory seed set has no entry frontier"))?;
+        let until =
+            until.ok_or_else(|| Self::invalid("trajectory seed set has no horizon frontier"))?;
         let rows = self
             .facts
             .book_ledger_snapshots_between(
@@ -1903,17 +2160,38 @@ impl FeedbackAttributionMaterializer {
                     .collect::<QuantResult<Vec<_>>>()
             })
             .await?;
+        self.persist_trajectories(
+            trajectories,
+            alternative_policy_hash,
+            alternative_policy,
+            cancel,
+        )
+        .await
+    }
+
+    async fn persist_trajectories(
+        &self,
+        trajectories: Vec<ExecutionTrajectoryArtifact>,
+        alternative_policy_hash: ContentHash,
+        alternative_policy: AlternativeExitPolicy,
+        cancel: &CancellationToken,
+    ) -> QuantResult<(u64, u64)> {
         let mut trajectory_count = 0_u64;
         let mut counterfactual_count = 0_u64;
         for trajectory in trajectories {
             Self::require_active(cancel)?;
-            let persisted = self
-                .persist(AttributionArtifact::ExecutionTrajectory(Box::new(
-                    trajectory.clone(),
-                )))
+            let (persisted, artifact) = self
+                .persist(
+                    AttributionArtifact::ExecutionTrajectory(Box::new(trajectory)),
+                    cancel,
+                )
                 .await?;
             trajectory_count = trajectory_count.saturating_add(1);
-            let replay_trajectory = trajectory.clone();
+            let AttributionArtifact::ExecutionTrajectory(replay_trajectory) = artifact else {
+                return Err(Self::invalid(
+                    "trajectory persistence changed artifact kind",
+                ));
+            };
             let trajectory_hash = persisted.artifact_hash;
             let counterfactual = self
                 .run_compute(cancel, move || {
@@ -1925,9 +2203,10 @@ impl FeedbackAttributionMaterializer {
                     )
                 })
                 .await?;
-            self.persist(AttributionArtifact::PolicyCounterfactualOutcome(Box::new(
-                counterfactual,
-            )))
+            self.persist(
+                AttributionArtifact::PolicyCounterfactualOutcome(Box::new(counterfactual)),
+                cancel,
+            )
             .await?;
             counterfactual_count = counterfactual_count.saturating_add(1);
         }
@@ -2333,20 +2612,30 @@ impl FeedbackAttributionMaterializer {
             .collect()
     }
 
-    async fn persist(&self, artifact: AttributionArtifact) -> QuantResult<AttributionArtifactInfo> {
-        let bytes = AttributionArtifactCodec::encode(&artifact)?;
-        let artifact_hash = AttributionArtifactCodec::hash(&bytes);
-        let key = ArtifactKey::new(ArtifactNamespace::Attribution, artifact_hash.hex(), "json")?;
+    async fn persist(
+        &self,
+        artifact: AttributionArtifact,
+        cancel: &CancellationToken,
+    ) -> QuantResult<(AttributionArtifactInfo, AttributionArtifact)> {
+        Self::require_active(cancel)?;
+        let (artifact, bytes, artifact_hash, key) = self
+            .run_compute(cancel, move || {
+                let bytes = AttributionArtifactCodec::encode(&artifact)?;
+                let artifact_hash = AttributionArtifactCodec::hash(&bytes);
+                let key =
+                    ArtifactKey::new(ArtifactNamespace::Attribution, artifact_hash.hex(), "json")?;
+                Ok((artifact, bytes, artifact_hash, key))
+            })
+            .await?;
+        Self::require_active(cancel)?;
         let uri = self.artifacts.put(key, &bytes).await?;
+        Self::require_active(cancel)?;
         let persisted = self.artifacts.get(&uri).await?;
-        if AttributionArtifactCodec::hash(&persisted) != artifact_hash {
-            return Err(ResearchError::ArtifactHashMismatch {
-                expected: artifact_hash.to_string(),
-                actual: AttributionArtifactCodec::hash(&persisted).to_string(),
-            }
-            .into());
-        }
-        AttributionArtifactCodec::decode(&persisted)?;
+        self.run_compute(cancel, move || {
+            Self::verify_artifact_readback(&persisted, artifact_hash)
+        })
+        .await?;
+        Self::require_active(cancel)?;
         let lineage = artifact.lineage();
         let insert = NewAttributionArtifact::try_new(
             lineage.source_cohort,
@@ -2357,10 +2646,39 @@ impl FeedbackAttributionMaterializer {
             lineage.source_cutoff,
         )
         .map_err(Self::invalid_contract)?;
-        match self.index.insert(insert).await? {
+        let expected_id = insert.attribution_artifact_id;
+        let expected_kind = insert.artifact_kind;
+        let expected_uri = insert.artifact_uri.clone();
+        let info = match self.index.insert(insert).await? {
             AttributionArtifactWriteOutcome::Inserted(info)
-            | AttributionArtifactWriteOutcome::AlreadyPresent(info) => Ok(info),
+            | AttributionArtifactWriteOutcome::AlreadyPresent(info) => info,
+        };
+        // The repository insert is the commit point. Cancellation observed after
+        // this await must not disguise a durable success as a cancelled job.
+        info.validate().map_err(Self::invalid_contract)?;
+        if info.attribution_artifact_id != expected_id
+            || info.artifact_kind != expected_kind
+            || info.artifact_uri != expected_uri
+            || info.artifact_hash != artifact_hash
+        {
+            return Err(Self::invalid(
+                "attribution index commit returned a different immutable artifact",
+            ));
         }
+        Ok((info, artifact))
+    }
+
+    fn verify_artifact_readback(bytes: &[u8], expected: ContentHash) -> QuantResult<()> {
+        let actual = AttributionArtifactCodec::hash(bytes);
+        if actual != expected {
+            return Err(ResearchError::ArtifactHashMismatch {
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+            }
+            .into());
+        }
+        AttributionArtifactCodec::decode(bytes)?;
+        Ok(())
     }
 
     fn require_active(cancel: &CancellationToken) -> QuantResult<()> {
@@ -2382,5 +2700,75 @@ impl FeedbackAttributionMaterializer {
 
     fn invalid_contract(error: impl Display) -> QuantError {
         Self::invalid(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        hint,
+        sync::Arc,
+        thread,
+        time::{Duration, Instant as StdInstant},
+    };
+
+    use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
+    use quant_pivot_research::attribution::AttributionArtifactCodec;
+    use tokio::time::{Instant as TokioInstant, sleep};
+    use tokio_util::sync::CancellationToken;
+
+    use super::FeedbackAttributionMaterializer;
+
+    #[tokio::test]
+    async fn offline_compute_preserves_heartbeat() {
+        let compute = Arc::new(ComputeExecutor::new().expect("compute executor"));
+        let cancel = CancellationToken::new();
+        let worker = Arc::clone(&compute);
+        let worker_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            worker
+                .run_offline_cancellable(
+                    OfflineMemory::try_bytes(1).expect("offline memory"),
+                    &worker_cancel,
+                    move || {
+                        let until = StdInstant::now() + Duration::from_millis(100);
+                        while StdInstant::now() < until {
+                            hint::spin_loop();
+                        }
+                        Ok(thread::current().name().unwrap_or("unnamed").to_owned())
+                    },
+                )
+                .await
+        });
+        let heartbeat = TokioInstant::now();
+        sleep(Duration::from_millis(10)).await;
+        assert!(heartbeat.elapsed() < Duration::from_millis(80));
+        let worker_name = task.await.expect("offline task").expect("offline compute");
+        assert!(worker_name.starts_with("quant-offline"));
+    }
+
+    #[test]
+    fn corrupted_readback_fails_closed() {
+        let expected = AttributionArtifactCodec::hash(b"expected canonical artifact");
+        let result = FeedbackAttributionMaterializer::verify_artifact_readback(
+            b"corrupted artifact",
+            expected,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_readback_fails_decode() {
+        let malformed = br#"{"not":"an attribution artifact"}"#;
+        let expected = AttributionArtifactCodec::hash(malformed);
+        let result = FeedbackAttributionMaterializer::verify_artifact_readback(malformed, expected);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cancelled_materialization_fails_closed() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert!(FeedbackAttributionMaterializer::require_active(&cancel).is_err());
     }
 }

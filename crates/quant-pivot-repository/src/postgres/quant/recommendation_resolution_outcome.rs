@@ -43,7 +43,8 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::primitives::statement_timestamp, traits::RecommendationResolutionOutcomeRepository,
+    postgres::primitives::{self, statement_timestamp},
+    traits::RecommendationResolutionOutcomeRepository,
 };
 
 const MAX_ERROR_CHARS: usize = 4_096;
@@ -319,10 +320,11 @@ impl PgRecommendationResolutionOutcomeRepository {
         let inserted = u64::try_from(recommendation_ids.len())
             .map_err(|error| queue_invariant(format!("task batch size overflow: {error}")))?;
         let now = statement_timestamp(transaction).await?;
+        let ready_at = primitives::queue_ready_at(available_through, now);
         for recommendation_id in recommendation_ids {
             TaskEntity::insert(TaskActiveModel {
                 recommendation_id: ActiveValue::Set(recommendation_id),
-                ready_at: ActiveValue::Set(available_through),
+                ready_at: ActiveValue::Set(ready_at),
                 status: ActiveValue::Set(OutcomeReconciliationTaskStatus::Pending),
                 attempt_count: ActiveValue::Set(0),
                 claim_owner: ActiveValue::Set(None),

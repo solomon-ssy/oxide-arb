@@ -7,8 +7,8 @@ use quant_pivot_models::{
         api::CalibrationArtifactListQuery,
         pagination::Paginated,
         quant::{
-            CalibrationArtifactInfo, ModelScoreCalibrationCommit,
-            ModelScoreCalibrationCommitOutcome, NewCalibrationArtifact,
+            CalibrationArtifactInfo, ModelScoreCalibrationCommitOutcome, NewCalibrationArtifact,
+            VerifiedModelScoreCalibrationCommit,
         },
     },
     types::{CalibrationArtifactId, ContentHash, calibration::PublishedWeatherStationLeadBias},
@@ -26,11 +26,13 @@ pub trait CalibrationArtifactRepository: Send + Sync {
 
     /// Atomically append one canonical `model_score` artifact and transition
     /// its locked `Running` Calibration run to `Succeeded` with the artifact
-    /// hash. Exact retries return `ExistingExact`; every other collision fails
-    /// closed and rolls back.
+    /// hash. The input is already schema/self-hash verified by the governed
+    /// offline producer; this async boundary performs lineage I/O plus light
+    /// identity/CAS checks only. Exact retries return `ExistingExact`; every
+    /// other collision fails closed and rolls back.
     async fn commit_model_score(
         &self,
-        commit: ModelScoreCalibrationCommit,
+        commit: VerifiedModelScoreCalibrationCommit,
     ) -> Result<ModelScoreCalibrationCommitOutcome, StorageError>;
 
     /// Look up a calibration artifact by id.

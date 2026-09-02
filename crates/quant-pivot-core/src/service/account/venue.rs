@@ -1,4 +1,4 @@
-//! The single venue account provider (all modes, credential-gated).
+//! The single venue account provider, credential-gated and independent of entry authorization.
 
 use std::sync::Arc;
 
@@ -54,6 +54,14 @@ impl VenueAccountProvider {
 impl AccountProvider for VenueAccountProvider {
     async fn snapshot(&self, as_of: DateTime<Utc>) -> QuantResult<AccountSnapshot> {
         let collateral = self.client.available_collateral().await?;
+        self.snapshot_with_collateral(as_of, collateral).await
+    }
+
+    async fn snapshot_with_collateral(
+        &self,
+        as_of: DateTime<Utc>,
+        collateral: Usd,
+    ) -> QuantResult<AccountSnapshot> {
         let venue_positions = self.client.positions(&self.funder).await?;
         let positions = venue_positions
             .iter()
@@ -121,6 +129,19 @@ mod tests {
     impl ReservedCapitalReader for StubReserved {
         async fn sum_locked(&self) -> QuantResult<Usd> {
             Ok(self.0)
+        }
+    }
+
+    struct ProvidedCollateralClient;
+
+    #[async_trait]
+    impl PolymarketAccountClient for ProvidedCollateralClient {
+        async fn available_collateral(&self) -> QuantResult<Usd> {
+            panic!("provided-collateral snapshot must not call collateral client")
+        }
+
+        async fn positions(&self, _funder: &str) -> QuantResult<Vec<VenuePosition>> {
+            Ok(Vec::new())
         }
     }
 
@@ -201,5 +222,24 @@ mod tests {
             true,
         );
         assert!(provider.snapshot(Utc::now()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn provided_skips_collateral() {
+        let provider = VenueAccountProvider::new(
+            Arc::new(ProvidedCollateralClient),
+            Arc::new(MarketRegistry::new(Arc::new(DataPlane::new()))),
+            Arc::new(StubReserved(Usd::new(dec!(25)))),
+            Usd::new(dec!(1000)),
+            "0xfunder".to_owned(),
+        );
+
+        let snapshot = provider
+            .snapshot_with_collateral(Utc::now(), Usd::new(dec!(500)))
+            .await
+            .expect("provided collateral snapshot");
+
+        assert_eq!(snapshot.venue_net_liquidation_usd, Usd::new(dec!(500)));
+        assert_eq!(snapshot.available_usd, Usd::new(dec!(475)));
     }
 }

@@ -2,6 +2,9 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
+    io::{Error as IoError, Result as IoResult, Write},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -12,20 +15,294 @@ use alloy::{
 use blake3::Hasher;
 use chrono::Utc;
 use futures_util::{StreamExt, stream};
-use hypersync_client::{
-    Client as HyperSyncClient, ClientConfig as HyperSyncClientConfig,
-    format::Quantity as HyperSyncQuantity,
-    net_types::{LogFilter, Query, block::BlockField, log::LogField},
-    simple_types::{Block as HyperSyncBlock, Log as HyperSyncLog},
+use hypersync_format::{
+    Address as HyperSyncAddress, BlockNumber as HyperSyncBlockNumber, Data as HyperSyncData,
+    Hash as HyperSyncHash, LogArgument as HyperSyncLogArgument, LogIndex as HyperSyncLogIndex,
+    Quantity as HyperSyncQuantity, TransactionIndex as HyperSyncTransactionIndex,
 };
-use quant_pivot_models::config::FinalizedExchangeHistoryConfig;
-use reqwest::Client as ReqwestClient;
+use hypersync_net_types::{JoinMode, LogFilter, Query, block::BlockField, log::LogField};
+use quant_pivot_models::config::{FinalizedExchangeHistoryConfig, secret::SecretText};
+use reqwest::{Client as ReqwestClient, StatusCode, Url};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use tokio::{
+    runtime::{Builder as RuntimeBuilder, Runtime},
+    sync::Semaphore,
+};
 
 use super::constants::EXCHANGE_CONTRACTS;
 
 const CHAIN_ID: u64 = 137;
+// HyperSync JSON decoding is synchronous CPU work. Keep it and its network
+// reactor off the three application workers. One request may be in flight;
+// streamed body and canonical-chunk budgets bound accepted bytes, while one
+// async worker and at most three blocking replacements bound thread ownership.
+const HYPERSYNC_RUNTIME_THREADS: usize = 1;
+const HYPERSYNC_BLOCKING_THREADS: usize = 3;
+const HYPERSYNC_REQUESTS: usize = 1;
+
+#[derive(Debug, Deserialize)]
+struct HyperSyncBlock {
+    number: Option<u64>,
+    hash: Option<HyperSyncHash>,
+    parent_hash: Option<HyperSyncHash>,
+    timestamp: Option<HyperSyncQuantity>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HyperSyncLog {
+    removed: Option<bool>,
+    log_index: Option<HyperSyncLogIndex>,
+    transaction_index: Option<HyperSyncTransactionIndex>,
+    transaction_hash: Option<HyperSyncHash>,
+    block_hash: Option<HyperSyncHash>,
+    block_number: Option<HyperSyncBlockNumber>,
+    address: Option<HyperSyncAddress>,
+    data: Option<HyperSyncData>,
+    topic0: Option<HyperSyncLogArgument>,
+    topic1: Option<HyperSyncLogArgument>,
+    topic2: Option<HyperSyncLogArgument>,
+    topic3: Option<HyperSyncLogArgument>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HyperSyncJsonData {
+    #[serde(default)]
+    blocks: Vec<HyperSyncBlock>,
+    #[serde(default)]
+    logs: Vec<HyperSyncLog>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HyperSyncRollbackGuard {
+    block_number: u64,
+    #[serde(rename = "timestamp")]
+    _timestamp: i64,
+    hash: String,
+    first_block_number: u64,
+    first_parent_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HyperSyncJsonResponse {
+    archive_height: Option<u64>,
+    next_block: u64,
+    data: HyperSyncJsonData,
+    rollback_guard: Option<HyperSyncRollbackGuard>,
+}
+
+struct HyperSyncJsonClient {
+    client: ReqwestClient,
+    endpoint: Url,
+    api_token: SecretText,
+    max_response_body_bytes: usize,
+}
+
+impl HyperSyncJsonClient {
+    fn connect(config: &FinalizedExchangeHistoryConfig) -> Result<Self, HistoryClientError> {
+        let mut endpoint = Url::parse(&config.hypersync.endpoint).map_err(|_| {
+            HistoryClientError::InvalidConfig("HyperSync endpoint is invalid".to_owned())
+        })?;
+        endpoint
+            .path_segments_mut()
+            .map_err(|()| {
+                HistoryClientError::InvalidConfig(
+                    "HyperSync endpoint cannot own a query path".to_owned(),
+                )
+            })?
+            .pop_if_empty()
+            .push("query");
+        let client = ReqwestClient::builder()
+            .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
+            .timeout(Duration::from_millis(config.request_timeout_ms))
+            .no_gzip()
+            .build()
+            .map_err(|_| {
+                HistoryClientError::InvalidConfig(
+                    "HyperSync HTTP client rejected deploy values".to_owned(),
+                )
+            })?;
+        Ok(Self {
+            client,
+            endpoint,
+            api_token: config.hypersync.api_token.clone(),
+            max_response_body_bytes: config.max_hypersync_response_body_bytes,
+        })
+    }
+
+    async fn query(
+        self: Arc<Self>,
+        query: Query,
+    ) -> Result<HyperSyncJsonResponse, HistoryClientError> {
+        let response = self
+            .client
+            .post(self.endpoint.clone())
+            .bearer_auth(self.api_token.expose_secret())
+            .json(&query)
+            .send()
+            .await
+            .map_err(|_| HistoryClientError::Network {
+                provider: "HyperSync",
+                operation: "query",
+            })?;
+        let status = response.status();
+        if status == StatusCode::PAYLOAD_TOO_LARGE {
+            return Err(HistoryClientError::HyperSyncPayloadTooLarge);
+        }
+        if !status.is_success() {
+            return Err(HistoryClientError::HyperSyncHttpStatus {
+                status: status.as_u16(),
+            });
+        }
+        let declared_limit = u64::try_from(self.max_response_body_bytes).unwrap_or(u64::MAX);
+        if response
+            .content_length()
+            .is_some_and(|length| length > declared_limit)
+        {
+            return Err(HistoryClientError::HyperSyncResponseBodyBudget {
+                limit: self.max_response_body_bytes,
+            });
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| HistoryClientError::Network {
+                provider: "HyperSync",
+                operation: "response body",
+            })?;
+            let next_length = body.len().checked_add(chunk.len()).ok_or(
+                HistoryClientError::HyperSyncResponseBodyBudget {
+                    limit: self.max_response_body_bytes,
+                },
+            )?;
+            if next_length > self.max_response_body_bytes {
+                return Err(HistoryClientError::HyperSyncResponseBodyBudget {
+                    limit: self.max_response_body_bytes,
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&body).map_err(|_| HistoryClientError::InvalidPayload {
+            provider: "HyperSync",
+            operation: "query response",
+        })
+    }
+}
+
+struct HyperSyncRuntimeState {
+    runtime: Option<Runtime>,
+    closing: bool,
+}
+
+struct HyperSyncRuntime {
+    state: Mutex<HyperSyncRuntimeState>,
+    requests: Arc<Semaphore>,
+}
+
+impl HyperSyncRuntime {
+    fn new() -> Result<Self, HistoryClientError> {
+        let runtime = RuntimeBuilder::new_multi_thread()
+            .worker_threads(HYPERSYNC_RUNTIME_THREADS)
+            .max_blocking_threads(HYPERSYNC_BLOCKING_THREADS)
+            .thread_name("quant-hypersync")
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                HistoryClientError::InvalidConfig(format!(
+                    "cannot build bounded HyperSync runtime: {error}"
+                ))
+            })?;
+        Ok(Self {
+            state: Mutex::new(HyperSyncRuntimeState {
+                runtime: Some(runtime),
+                closing: false,
+            }),
+            requests: Arc::new(Semaphore::new(HYPERSYNC_REQUESTS)),
+        })
+    }
+
+    fn lock_state(&self) -> Result<MutexGuard<'_, HyperSyncRuntimeState>, HistoryClientError> {
+        self.state
+            .lock()
+            .map_err(|_| HistoryClientError::RuntimeStatePoisoned {
+                provider: "HyperSync",
+            })
+    }
+
+    async fn run<T, F>(&self, operation: &'static str, future: F) -> Result<T, HistoryClientError>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, HistoryClientError>> + Send + 'static,
+    {
+        let task = {
+            // Admission and transition to closing are serialized by this lock.
+            // The permit moves into the task so caller cancellation cannot make
+            // shutdown mistake detached SDK work for an idle runtime.
+            let state = self.lock_state()?;
+            let runtime = state.runtime.as_ref().filter(|_| !state.closing).ok_or(
+                HistoryClientError::RuntimeUnavailable {
+                    provider: "HyperSync",
+                },
+            )?;
+            let permit = Arc::clone(&self.requests)
+                .try_acquire_owned()
+                .map_err(|_| HistoryClientError::CapacityUnavailable {
+                    provider: "HyperSync",
+                    resource: "isolated request slot",
+                })?;
+            let handle = runtime.handle().clone();
+            drop(state);
+            handle.spawn(async move {
+                let _permit = permit;
+                future.await
+            })
+        };
+        task.await
+            .map_err(|_| HistoryClientError::RuntimeTaskFailed {
+                provider: "HyperSync",
+                operation,
+            })?
+    }
+
+    async fn shutdown(&self) -> Result<(), HistoryClientError> {
+        {
+            let mut state = self.lock_state()?;
+            if state.runtime.is_none() {
+                return Ok(());
+            }
+            state.closing = true;
+        }
+
+        // Once closing is visible, no new task can consume the sole permit.
+        // An in-flight task owns it even if its original caller was cancelled.
+        let permit = Arc::clone(&self.requests)
+            .acquire_owned()
+            .await
+            .map_err(|_| HistoryClientError::RuntimeUnavailable {
+                provider: "HyperSync",
+            })?;
+        let runtime = self.lock_state()?.runtime.take();
+        drop(permit);
+        if let Some(runtime) = runtime {
+            // The sole request permit proves that no SDK task is still active.
+            // Background shutdown avoids blocking an application Tokio worker.
+            runtime.shutdown_background();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for HyperSyncRuntime {
+    fn drop(&mut self) {
+        if let Ok(state) = self.state.get_mut()
+            && let Some(runtime) = state.runtime.take()
+        {
+            // Explicit async shutdown is the clean path. This is only a
+            // best-effort fallback for construction unwinds or owner misuse.
+            runtime.shutdown_background();
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalBlockHeader {
@@ -33,6 +310,29 @@ pub struct CanonicalBlockHeader {
     pub hash: String,
     pub parent_hash: String,
     pub timestamp: u64,
+}
+
+#[derive(Serialize)]
+struct CanonicalHeaderBudget<'a> {
+    number: u64,
+    hash: &'a str,
+    parent_hash: &'a str,
+    timestamp: u64,
+}
+
+impl CanonicalBlockHeader {
+    fn canonical_budget_bytes(&self) -> Result<usize, HistoryClientError> {
+        let budget = CanonicalHeaderBudget {
+            number: u64::MAX,
+            hash: &self.hash,
+            parent_hash: &self.parent_hash,
+            timestamp: u64::MAX,
+        };
+        let mut counter = CanonicalByteCounter::default();
+        serde_json::to_writer(&mut counter, &budget)
+            .map_err(|_| HistoryClientError::CanonicalEncoding)?;
+        Ok(counter.bytes)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +349,41 @@ pub struct CanonicalExchangeLog {
     pub topics: Vec<String>,
     pub data: String,
     pub removed: bool,
+}
+
+#[derive(Serialize)]
+struct CanonicalLogBudget<'a> {
+    address: &'a str,
+    block_number: u64,
+    block_hash: &'a str,
+    block_timestamp: u64,
+    model_available_timestamp: u64,
+    parent_block_hash: &'a str,
+    transaction_hash: &'a str,
+    transaction_index: u64,
+    log_index: u64,
+    topics: &'a [String],
+    data: &'a str,
+    removed: bool,
+}
+
+#[derive(Default)]
+struct CanonicalByteCounter {
+    bytes: usize,
+}
+
+impl Write for CanonicalByteCounter {
+    fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(buffer.len())
+            .ok_or_else(|| IoError::other("canonical log byte count overflow"))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> IoResult<()> {
+        Ok(())
+    }
 }
 
 impl CanonicalExchangeLog {
@@ -100,6 +435,51 @@ impl CanonicalExchangeLog {
             log_index: Some(self.log_index),
             removed: self.removed,
         })
+    }
+
+    fn canonical_budget_bytes(&self) -> Result<usize, HistoryClientError> {
+        let parent_block_hash = if self.parent_block_hash.is_empty() {
+            &self.block_hash
+        } else {
+            &self.parent_block_hash
+        };
+        let budget = CanonicalLogBudget {
+            address: &self.address,
+            block_number: u64::MAX,
+            block_hash: &self.block_hash,
+            block_timestamp: u64::MAX,
+            model_available_timestamp: u64::MAX,
+            parent_block_hash,
+            transaction_hash: &self.transaction_hash,
+            transaction_index: u64::MAX,
+            log_index: u64::MAX,
+            topics: &self.topics,
+            data: &self.data,
+            removed: false,
+        };
+        let mut counter = CanonicalByteCounter::default();
+        serde_json::to_writer(&mut counter, &budget)
+            .map_err(|_| HistoryClientError::CanonicalEncoding)?;
+        Ok(counter.bytes)
+    }
+
+    fn validate_range(
+        &self,
+        from_block: u64,
+        to_block: u64,
+        provider: &'static str,
+    ) -> Result<(), HistoryClientError> {
+        if (from_block..=to_block).contains(&self.block_number) {
+            Ok(())
+        } else {
+            Err(HistoryClientError::UnexpectedBlock {
+                provider,
+                entity: "log",
+                number: self.block_number,
+                from_block,
+                to_block,
+            })
+        }
     }
 }
 
@@ -165,6 +545,20 @@ pub enum HistoryClientError {
         provider: &'static str,
         operation: &'static str,
     },
+    #[error("{provider} is not accepting isolated runtime requests")]
+    RuntimeUnavailable { provider: &'static str },
+    #[error("{provider} {resource} capacity is unavailable")]
+    CapacityUnavailable {
+        provider: &'static str,
+        resource: &'static str,
+    },
+    #[error("{provider} isolated runtime task failed during {operation}")]
+    RuntimeTaskFailed {
+        provider: &'static str,
+        operation: &'static str,
+    },
+    #[error("{provider} isolated runtime state is poisoned")]
+    RuntimeStatePoisoned { provider: &'static str },
     #[error("archive RPC returned HTTP status {status} during {method}")]
     HttpStatus { method: &'static str, status: u16 },
     #[error("archive RPC rejected {method} with code {code}: {message}")]
@@ -173,8 +567,23 @@ pub enum HistoryClientError {
         code: i64,
         message: String,
     },
-    #[error("archive RPC response exceeded the configured {limit} byte budget")]
-    ResponseBudget { limit: usize },
+    #[error("archive RPC response body exceeded the configured {limit} byte budget")]
+    RpcResponseBodyBudget { limit: usize },
+    #[error("HyperSync response body exceeded the configured {limit} byte budget")]
+    HyperSyncResponseBodyBudget { limit: usize },
+    #[error("canonical history chunk exceeded the configured {limit} byte budget")]
+    CanonicalChunkBudget { limit: usize },
+    #[error("canonical exchange-history log encoding failed")]
+    CanonicalEncoding,
+    #[error("{provider} returned an invalid payload during {operation}")]
+    InvalidPayload {
+        provider: &'static str,
+        operation: &'static str,
+    },
+    #[error("HyperSync returned HTTP status {status}")]
+    HyperSyncHttpStatus { status: u16 },
+    #[error("HyperSync response exceeded the provider payload limit")]
+    HyperSyncPayloadTooLarge,
     #[error("{provider} omitted required {field}")]
     MissingField {
         provider: &'static str,
@@ -190,6 +599,18 @@ pub enum HistoryClientError {
         first: Option<u64>,
         last: Option<u64>,
     },
+    #[error(
+        "{provider} returned {entity} block {number} outside requested range {from_block}..={to_block}"
+    )]
+    UnexpectedBlock {
+        provider: &'static str,
+        entity: &'static str,
+        number: u64,
+        from_block: u64,
+        to_block: u64,
+    },
+    #[error("{provider} returned duplicate block header {number}")]
+    DuplicateBlockHeader { provider: &'static str, number: u64 },
     #[error("{provider} returned malformed {field}")]
     InvalidField {
         provider: &'static str,
@@ -202,6 +623,24 @@ pub enum HistoryClientError {
     },
     #[error("HyperSync pagination did not advance from block {block}")]
     StalledPagination { block: u64 },
+    #[error(
+        "{provider} pagination advanced to block {next_block} beyond requested exclusive end {requested_end}"
+    )]
+    PaginationOverrun {
+        provider: &'static str,
+        next_block: u64,
+        requested_end: u64,
+    },
+    #[error(
+        "{provider} returned {actual} unique headers for page {from_block}..={to_block}; expected {expected}"
+    )]
+    IncompleteHeaderPage {
+        provider: &'static str,
+        from_block: u64,
+        to_block: u64,
+        expected: usize,
+        actual: usize,
+    },
     #[error("contract {contract_key} bytecode attestation failed")]
     CodeMismatch { contract_key: &'static str },
     #[error("contract {contract_key} {boundary} block hash attestation failed")]
@@ -217,31 +656,100 @@ pub enum HistoryClientError {
     BrokenParentChain { provider: &'static str, number: u64 },
 }
 
+struct CanonicalLogBuffer {
+    rows: Vec<CanonicalExchangeLog>,
+    canonical_bytes: usize,
+    limit: usize,
+}
+
+impl CanonicalLogBuffer {
+    fn new(limit: usize, prefix_bytes: usize) -> Result<Self, HistoryClientError> {
+        let canonical_bytes = prefix_bytes
+            .checked_add(2)
+            .ok_or(HistoryClientError::CanonicalChunkBudget { limit })?;
+        if canonical_bytes > limit {
+            return Err(HistoryClientError::CanonicalChunkBudget { limit });
+        }
+        Ok(Self {
+            rows: Vec::new(),
+            canonical_bytes,
+            limit,
+        })
+    }
+
+    fn push(&mut self, row: CanonicalExchangeLog) -> Result<(), HistoryClientError> {
+        let separator_bytes = usize::from(!self.rows.is_empty());
+        let row_bytes = row.canonical_budget_bytes()?;
+        let canonical_bytes = self
+            .canonical_bytes
+            .checked_add(separator_bytes)
+            .and_then(|bytes| bytes.checked_add(row_bytes))
+            .ok_or(HistoryClientError::CanonicalChunkBudget { limit: self.limit })?;
+        if canonical_bytes > self.limit {
+            return Err(HistoryClientError::CanonicalChunkBudget { limit: self.limit });
+        }
+        self.rows.push(row);
+        self.canonical_bytes = canonical_bytes;
+        Ok(())
+    }
+
+    fn extend<I>(&mut self, rows: I) -> Result<(), HistoryClientError>
+    where
+        I: IntoIterator<Item = CanonicalExchangeLog>,
+    {
+        for row in rows {
+            self.push(row)?;
+        }
+        Ok(())
+    }
+}
+
+impl From<CanonicalLogBuffer> for (Vec<CanonicalExchangeLog>, usize) {
+    fn from(buffer: CanonicalLogBuffer) -> Self {
+        (buffer.rows, buffer.canonical_bytes)
+    }
+}
+
+fn add_header_bytes(
+    canonical_bytes: usize,
+    header_count: usize,
+    header: &CanonicalBlockHeader,
+    limit: usize,
+) -> Result<usize, HistoryClientError> {
+    let separator_bytes = usize::from(header_count > 0);
+    let header_bytes = header.canonical_budget_bytes()?;
+    let canonical_bytes = canonical_bytes
+        .checked_add(separator_bytes)
+        .and_then(|bytes| bytes.checked_add(header_bytes))
+        .ok_or(HistoryClientError::CanonicalChunkBudget { limit })?;
+    if canonical_bytes > limit {
+        Err(HistoryClientError::CanonicalChunkBudget { limit })
+    } else {
+        Ok(canonical_bytes)
+    }
+}
+
 pub struct ExchangeHistoryExtractor {
-    client: HyperSyncClient,
+    client: Arc<HyperSyncJsonClient>,
+    runtime: HyperSyncRuntime,
     confirmation_blocks: u64,
-    max_response_bytes: usize,
+    max_blocks_per_chunk: u64,
+    max_canonical_chunk_bytes: usize,
 }
 
 impl ExchangeHistoryExtractor {
     pub fn connect(config: &FinalizedExchangeHistoryConfig) -> Result<Self, HistoryClientError> {
-        let client = HyperSyncClient::new(HyperSyncClientConfig {
-            url: config.hypersync.endpoint.clone(),
-            api_token: config.hypersync.api_token.expose_secret().to_owned(),
-            http_req_timeout_millis: config.request_timeout_ms,
-            retry_backoff_ms: config.retry_initial_ms,
-            retry_base_ms: config.retry_initial_ms,
-            retry_ceiling_ms: config.retry_max_ms,
-            ..HyperSyncClientConfig::default()
-        })
-        .map_err(|_| {
-            HistoryClientError::InvalidConfig("HyperSync client rejected deploy values".to_owned())
-        })?;
         Ok(Self {
-            client,
+            client: Arc::new(HyperSyncJsonClient::connect(config)?),
+            runtime: HyperSyncRuntime::new()?,
             confirmation_blocks: config.model_confirmation_blocks,
-            max_response_bytes: config.max_response_bytes,
+            max_blocks_per_chunk: config.max_blocks_per_chunk,
+            max_canonical_chunk_bytes: config.max_canonical_chunk_bytes,
         })
+    }
+
+    pub async fn shutdown(&self) -> Result<(), HistoryClientError> {
+        self.runtime.shutdown().await
     }
 
     pub async fn fetch_chunk(
@@ -254,11 +762,73 @@ impl ExchangeHistoryExtractor {
                 "chunk end precedes chunk start".to_owned(),
             ));
         }
+        let block_span = to_block
+            .checked_sub(from_block)
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| HistoryClientError::InvalidConfig("chunk span overflow".to_owned()))?;
+        if block_span > self.max_blocks_per_chunk {
+            return Err(HistoryClientError::InvalidConfig(
+                "chunk span exceeds the configured maximum".to_owned(),
+            ));
+        }
         let confirmation_end = to_block
             .checked_add(self.confirmation_blocks)
             .ok_or_else(|| {
                 HistoryClientError::InvalidConfig("confirmation range overflow".to_owned())
             })?;
+        let (mut archive_height, blocks, header_proof, header_bytes) = self
+            .fetch_headers(from_block, confirmation_end, to_block)
+            .await?;
+        validate_header_chain(&blocks, from_block, confirmation_end, "HyperSync")?;
+        if archive_height < confirmation_end {
+            return Err(HistoryClientError::ArchiveLag {
+                archive_height,
+                required_block: confirmation_end,
+            });
+        }
+        let (mut logs, log_archive_height, log_proof) =
+            self.fetch_logs(from_block, to_block, header_bytes).await?;
+        archive_height = archive_height.max(log_archive_height);
+        let continuity_proof = header_proof.or(log_proof);
+        hydrate_log_times(&mut logs, &blocks, self.confirmation_blocks, "HyperSync")?;
+        canonical_sort(&mut logs);
+        let first_block = required_block(&blocks, from_block, "HyperSync")?.clone();
+        let last_block = required_block(&blocks, to_block, "HyperSync")?.clone();
+        let confirmation_anchor = required_block(&blocks, confirmation_end, "HyperSync")?.clone();
+        let continuity_proof = continuity_proof.unwrap_or_else(|| HistoryContinuityProof {
+            basis: HistoryContinuityProofBasis::HyperSyncBoundaryHeaders,
+            attested_block_number: last_block.number,
+            attested_block_hash: last_block.hash.clone(),
+            first_block_number: first_block.number,
+            first_parent_hash: first_block.parent_hash.clone(),
+        });
+        Ok(ExtractedHistoryChunk {
+            from_block,
+            to_block,
+            archive_height,
+            first_block,
+            last_block,
+            confirmation_anchor,
+            digest: canonical_digest(&logs),
+            logs,
+            continuity_proof,
+            observed_at_millis: Utc::now().timestamp_millis(),
+        })
+    }
+
+    async fn fetch_logs(
+        &self,
+        from_block: u64,
+        to_block: u64,
+        header_bytes: usize,
+    ) -> Result<
+        (
+            Vec<CanonicalExchangeLog>,
+            u64,
+            Option<HistoryContinuityProof>,
+        ),
+        HistoryClientError,
+    > {
         let log_end_exclusive = to_block
             .checked_add(1)
             .ok_or_else(|| HistoryClientError::InvalidConfig("query range overflow".to_owned()))?;
@@ -285,13 +855,14 @@ impl ExchangeHistoryExtractor {
             })?;
         let mut cursor = from_block;
         let mut archive_height = 0_u64;
-        let mut logs = Vec::new();
         let mut continuity_proof = None;
+        let mut logs = CanonicalLogBuffer::new(self.max_canonical_chunk_bytes, header_bytes)?;
         while cursor < log_end_exclusive {
             let query = Query::new()
                 .from_block(cursor)
                 .to_block_excl(log_end_exclusive)
                 .where_logs(log_filter.clone())
+                .join_mode(JoinMode::JoinNothing)
                 .select_log_fields([
                     LogField::Address,
                     LogField::BlockNumber,
@@ -306,14 +877,8 @@ impl ExchangeHistoryExtractor {
                     LogField::Data,
                     LogField::Removed,
                 ]);
-            let response =
-                self.client
-                    .get(&query)
-                    .await
-                    .map_err(|_| HistoryClientError::Network {
-                        provider: "HyperSync",
-                        operation: "query",
-                    })?;
+            let client = Arc::clone(&self.client);
+            let response = self.runtime.run("query", client.query(query)).await?;
             let page_archive = response
                 .archive_height
                 .ok_or(HistoryClientError::MissingField {
@@ -324,8 +889,18 @@ impl ExchangeHistoryExtractor {
             if response.next_block <= cursor {
                 return Err(HistoryClientError::StalledPagination { block: cursor });
             }
-            for log in response.data.logs.into_iter().flatten() {
-                logs.push(hypersync_log(log)?);
+            if response.next_block > log_end_exclusive {
+                return Err(HistoryClientError::PaginationOverrun {
+                    provider: "HyperSync",
+                    next_block: response.next_block,
+                    requested_end: log_end_exclusive,
+                });
+            }
+            let page_end = response.next_block;
+            for log in response.data.logs {
+                let log = CanonicalExchangeLog::try_from(log)?;
+                log.validate_range(cursor, page_end.saturating_sub(1), "HyperSync")?;
+                logs.push(log)?;
             }
             if continuity_proof.is_none()
                 && let Some(guard) = response.rollback_guard
@@ -335,53 +910,15 @@ impl ExchangeHistoryExtractor {
                 continuity_proof = Some(HistoryContinuityProof {
                     basis: HistoryContinuityProofBasis::HyperSyncRollbackGuard,
                     attested_block_number: guard.block_number,
-                    attested_block_hash: guard.hash.to_string(),
+                    attested_block_hash: guard.hash,
                     first_block_number: guard.first_block_number,
-                    first_parent_hash: guard.first_parent_hash.to_string(),
+                    first_parent_hash: guard.first_parent_hash,
                 });
             }
-            cursor = response.next_block.min(log_end_exclusive);
+            cursor = page_end;
         }
-        let (header_archive_height, header_blocks, header_proof) = self
-            .fetch_headers(from_block, confirmation_end, to_block)
-            .await?;
-        archive_height = archive_height.max(header_archive_height);
-        let blocks = header_blocks;
-        validate_header_chain(&blocks, from_block, confirmation_end, "HyperSync")?;
-        if continuity_proof.is_none() {
-            continuity_proof = header_proof;
-        }
-        if archive_height < confirmation_end {
-            return Err(HistoryClientError::ArchiveLag {
-                archive_height,
-                required_block: confirmation_end,
-            });
-        }
-        hydrate_log_times(&mut logs, &blocks, self.confirmation_blocks, "HyperSync")?;
-        canonical_sort(&mut logs);
-        enforce_budget(&logs, self.max_response_bytes)?;
-        let first_block = required_block(&blocks, from_block, "HyperSync")?.clone();
-        let last_block = required_block(&blocks, to_block, "HyperSync")?.clone();
-        let confirmation_anchor = required_block(&blocks, confirmation_end, "HyperSync")?.clone();
-        let continuity_proof = continuity_proof.unwrap_or_else(|| HistoryContinuityProof {
-            basis: HistoryContinuityProofBasis::HyperSyncBoundaryHeaders,
-            attested_block_number: last_block.number,
-            attested_block_hash: last_block.hash.clone(),
-            first_block_number: first_block.number,
-            first_parent_hash: first_block.parent_hash.clone(),
-        });
-        Ok(ExtractedHistoryChunk {
-            from_block,
-            to_block,
-            archive_height,
-            first_block,
-            last_block,
-            confirmation_anchor,
-            digest: canonical_digest(&logs),
-            logs,
-            continuity_proof,
-            observed_at_millis: Utc::now().timestamp_millis(),
-        })
+        let (logs, _) = logs.into();
+        Ok((logs, archive_height, continuity_proof))
     }
 
     async fn fetch_headers(
@@ -394,6 +931,7 @@ impl ExchangeHistoryExtractor {
             u64,
             BTreeMap<u64, CanonicalBlockHeader>,
             Option<HistoryContinuityProof>,
+            usize,
         ),
         HistoryClientError,
     > {
@@ -404,8 +942,9 @@ impl ExchangeHistoryExtractor {
         let mut archive_height = 0_u64;
         let mut blocks = BTreeMap::new();
         let mut proof = None;
+        let mut canonical_bytes = 2_usize;
         while cursor < end_exclusive {
-            let query = Query::new()
+            let mut query = Query::new()
                 .from_block(cursor)
                 .to_block_excl(end_exclusive)
                 .include_all_blocks()
@@ -415,14 +954,13 @@ impl ExchangeHistoryExtractor {
                     BlockField::ParentHash,
                     BlockField::Timestamp,
                 ]);
-            let response =
-                self.client
-                    .get(&query)
-                    .await
-                    .map_err(|_| HistoryClientError::Network {
-                        provider: "HyperSync",
-                        operation: "block header query",
-                    })?;
+            query.max_num_blocks =
+                Some(usize::try_from(end_exclusive.saturating_sub(cursor)).unwrap_or(usize::MAX));
+            let client = Arc::clone(&self.client);
+            let response = self
+                .runtime
+                .run("block header query", client.query(query))
+                .await?;
             let page_archive = response
                 .archive_height
                 .ok_or(HistoryClientError::MissingField {
@@ -433,9 +971,50 @@ impl ExchangeHistoryExtractor {
             if response.next_block <= cursor {
                 return Err(HistoryClientError::StalledPagination { block: cursor });
             }
-            for block in response.data.blocks.into_iter().flatten() {
-                let header = hypersync_block(block)?;
-                blocks.insert(header.number, header);
+            if response.next_block > end_exclusive {
+                return Err(HistoryClientError::PaginationOverrun {
+                    provider: "HyperSync",
+                    next_block: response.next_block,
+                    requested_end: end_exclusive,
+                });
+            }
+            let page_end = response.next_block;
+            let initial_count = blocks.len();
+            for block in response.data.blocks {
+                let header = CanonicalBlockHeader::try_from(block)?;
+                if !(cursor..page_end).contains(&header.number) {
+                    return Err(HistoryClientError::UnexpectedBlock {
+                        provider: "HyperSync",
+                        entity: "header",
+                        number: header.number,
+                        from_block: cursor,
+                        to_block: page_end.saturating_sub(1),
+                    });
+                }
+                let number = header.number;
+                canonical_bytes = add_header_bytes(
+                    canonical_bytes,
+                    blocks.len(),
+                    &header,
+                    self.max_canonical_chunk_bytes,
+                )?;
+                if blocks.insert(number, header).is_some() {
+                    return Err(HistoryClientError::DuplicateBlockHeader {
+                        provider: "HyperSync",
+                        number,
+                    });
+                }
+            }
+            let actual = blocks.len().saturating_sub(initial_count);
+            let expected = usize::try_from(page_end.saturating_sub(cursor)).unwrap_or(usize::MAX);
+            if actual != expected {
+                return Err(HistoryClientError::IncompleteHeaderPage {
+                    provider: "HyperSync",
+                    from_block: cursor,
+                    to_block: page_end.saturating_sub(1),
+                    expected,
+                    actual,
+                });
             }
             if proof.is_none()
                 && let Some(guard) = response.rollback_guard
@@ -445,24 +1024,26 @@ impl ExchangeHistoryExtractor {
                 proof = Some(HistoryContinuityProof {
                     basis: HistoryContinuityProofBasis::HyperSyncRollbackGuard,
                     attested_block_number: guard.block_number,
-                    attested_block_hash: guard.hash.to_string(),
+                    attested_block_hash: guard.hash,
                     first_block_number: guard.first_block_number,
-                    first_parent_hash: guard.first_parent_hash.to_string(),
+                    first_parent_hash: guard.first_parent_hash,
                 });
             }
-            cursor = response.next_block.min(end_exclusive);
+            cursor = page_end;
         }
-        Ok((archive_height, blocks, proof))
+        Ok((archive_height, blocks, proof, canonical_bytes))
     }
 }
 
 pub struct ExchangeHistoryAttestor {
     client: ReqwestClient,
     endpoint: String,
-    max_response_bytes: usize,
+    max_rpc_response_body_bytes: usize,
+    max_canonical_chunk_bytes: usize,
     max_blocks_per_log_request: u64,
     max_concurrent_log_requests: usize,
     confirmation_blocks: u64,
+    max_blocks_per_chunk: u64,
 }
 
 impl ExchangeHistoryAttestor {
@@ -479,10 +1060,12 @@ impl ExchangeHistoryAttestor {
         Ok(Self {
             client,
             endpoint: config.attestor.rpc_url().to_owned(),
-            max_response_bytes: config.max_response_bytes,
+            max_rpc_response_body_bytes: config.max_rpc_response_body_bytes,
+            max_canonical_chunk_bytes: config.max_canonical_chunk_bytes,
             max_blocks_per_log_request: config.attestor.max_blocks_per_log_request,
             max_concurrent_log_requests: config.attestor.max_concurrent_log_requests,
             confirmation_blocks: config.model_confirmation_blocks,
+            max_blocks_per_chunk: config.max_blocks_per_chunk,
         })
     }
 
@@ -579,7 +1162,23 @@ impl ExchangeHistoryAttestor {
         from_block: u64,
         to_block: u64,
     ) -> Result<AttestedHistoryChunk, HistoryClientError> {
-        let mut logs = self.fetch_logs(from_block, to_block).await?;
+        if to_block < from_block {
+            return Err(HistoryClientError::InvalidConfig(
+                "attestor chunk end precedes chunk start".to_owned(),
+            ));
+        }
+        let block_span = to_block
+            .checked_sub(from_block)
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| {
+                HistoryClientError::InvalidConfig("attestor chunk span overflow".to_owned())
+            })?;
+        if block_span > self.max_blocks_per_chunk {
+            return Err(HistoryClientError::InvalidConfig(
+                "attestor chunk span exceeds the configured maximum".to_owned(),
+            ));
+        }
+        let (mut logs, log_bytes) = self.fetch_logs(from_block, to_block).await?;
         let confirmation_anchor_number = to_block
             .checked_add(self.confirmation_blocks)
             .ok_or_else(|| {
@@ -599,17 +1198,41 @@ impl ExchangeHistoryAttestor {
                     })?,
             );
         }
-        let headers = stream::iter(required_blocks)
+        let mut headers = stream::iter(required_blocks)
             .map(
                 |number| async move { self.block_by_number(number).await.map(|row| (number, row)) },
             )
-            .buffer_unordered(self.max_concurrent_log_requests)
-            .collect::<Vec<_>>()
-            .await;
+            .buffer_unordered(self.max_concurrent_log_requests);
         let mut blocks = BTreeMap::new();
-        for header in headers {
+        let mut canonical_bytes =
+            log_bytes
+                .checked_add(2)
+                .ok_or(HistoryClientError::CanonicalChunkBudget {
+                    limit: self.max_canonical_chunk_bytes,
+                })?;
+        while let Some(header) = headers.next().await {
             let (number, header) = header?;
-            blocks.insert(number, header);
+            if header.number != number {
+                return Err(HistoryClientError::UnexpectedBlock {
+                    provider: "archive RPC",
+                    entity: "header",
+                    number: header.number,
+                    from_block: number,
+                    to_block: number,
+                });
+            }
+            canonical_bytes = add_header_bytes(
+                canonical_bytes,
+                blocks.len(),
+                &header,
+                self.max_canonical_chunk_bytes,
+            )?;
+            if blocks.insert(number, header).is_some() {
+                return Err(HistoryClientError::DuplicateBlockHeader {
+                    provider: "archive RPC",
+                    number,
+                });
+            }
         }
         hydrate_log_times(&mut logs, &blocks, self.confirmation_blocks, "archive RPC")?;
         canonical_sort(&mut logs);
@@ -642,7 +1265,7 @@ impl ExchangeHistoryAttestor {
         &self,
         from_block: u64,
         to_block: u64,
-    ) -> Result<Vec<CanonicalExchangeLog>, HistoryClientError> {
+    ) -> Result<(Vec<CanonicalExchangeLog>, usize), HistoryClientError> {
         if to_block < from_block {
             return Err(HistoryClientError::InvalidConfig(
                 "log range end precedes its start".to_owned(),
@@ -667,17 +1290,14 @@ impl ExchangeHistoryAttestor {
                 HistoryClientError::InvalidConfig("log range overflow".to_owned())
             })?;
         }
-        let pages = stream::iter(ranges)
+        let mut pages = stream::iter(ranges)
             .map(|(start, end)| self.fetch_log_range(start, end))
-            .buffer_unordered(self.max_concurrent_log_requests)
-            .collect::<Vec<_>>()
-            .await;
-        let mut logs = Vec::new();
-        for page in pages {
-            logs.extend(page?);
+            .buffer_unordered(self.max_concurrent_log_requests);
+        let mut logs = CanonicalLogBuffer::new(self.max_canonical_chunk_bytes, 0)?;
+        while let Some(page) = pages.next().await {
+            logs.extend(page?)?;
         }
-        enforce_budget(&logs, self.max_response_bytes)?;
-        Ok(logs)
+        Ok(logs.into())
     }
 
     async fn fetch_log_range(
@@ -709,9 +1329,13 @@ impl ExchangeHistoryAttestor {
         let rows: Vec<RpcLog> = self
             .call_rpc("eth_getLogs", serde_json::json!([filter]))
             .await?;
-        rows.into_iter()
-            .map(CanonicalExchangeLog::try_from)
-            .collect()
+        let mut logs = Vec::with_capacity(rows.len());
+        for row in rows {
+            let log = CanonicalExchangeLog::try_from(row)?;
+            log.validate_range(from_block, to_block, "archive RPC")?;
+            logs.push(log);
+        }
+        Ok(logs)
     }
 
     async fn block_by_number(
@@ -775,9 +1399,9 @@ impl ExchangeHistoryAttestor {
                 provider: "archive RPC",
                 operation: method,
             })?;
-            if body.len().saturating_add(chunk.len()) > self.max_response_bytes {
-                return Err(HistoryClientError::ResponseBudget {
-                    limit: self.max_response_bytes,
+            if body.len().saturating_add(chunk.len()) > self.max_rpc_response_body_bytes {
+                return Err(HistoryClientError::RpcResponseBodyBudget {
+                    limit: self.max_rpc_response_body_bytes,
                 });
             }
             body.extend_from_slice(&chunk);
@@ -875,28 +1499,6 @@ fn canonical_sort(logs: &mut [CanonicalExchangeLog]) {
     });
 }
 
-fn enforce_budget(
-    logs: &[CanonicalExchangeLog],
-    max_response_bytes: usize,
-) -> Result<(), HistoryClientError> {
-    let estimated = logs.iter().fold(0_usize, |total, log| {
-        total
-            .saturating_add(log.address.len())
-            .saturating_add(log.block_hash.len())
-            .saturating_add(log.transaction_hash.len())
-            .saturating_add(log.data.len())
-            .saturating_add(log.topics.iter().map(String::len).sum::<usize>())
-            .saturating_add(64)
-    });
-    if estimated > max_response_bytes {
-        Err(HistoryClientError::ResponseBudget {
-            limit: max_response_bytes,
-        })
-    } else {
-        Ok(())
-    }
-}
-
 fn required_block<'a>(
     blocks: &'a BTreeMap<u64, CanonicalBlockHeader>,
     number: u64,
@@ -965,102 +1567,121 @@ fn validate_header_chain(
     Ok(())
 }
 
-fn hypersync_block(block: HyperSyncBlock) -> Result<CanonicalBlockHeader, HistoryClientError> {
-    let timestamp = quantity_u64(
-        block
-            .timestamp
-            .as_ref()
-            .ok_or(HistoryClientError::MissingField {
+impl TryFrom<HyperSyncBlock> for CanonicalBlockHeader {
+    type Error = HistoryClientError;
+
+    fn try_from(block: HyperSyncBlock) -> Result<Self, Self::Error> {
+        let timestamp = quantity_u64(
+            block
+                .timestamp
+                .as_ref()
+                .ok_or(HistoryClientError::MissingField {
+                    provider: "HyperSync",
+                    field: "block.timestamp",
+                })?,
+            "block.timestamp",
+        )?;
+        Ok(Self {
+            number: block.number.ok_or(HistoryClientError::MissingField {
                 provider: "HyperSync",
-                field: "block.timestamp",
+                field: "block.number",
             })?,
-        "block.timestamp",
-    )?;
-    Ok(CanonicalBlockHeader {
-        number: block.number.ok_or(HistoryClientError::MissingField {
-            provider: "HyperSync",
-            field: "block.number",
-        })?,
-        hash: block
-            .hash
-            .ok_or(HistoryClientError::MissingField {
-                provider: "HyperSync",
-                field: "block.hash",
-            })?
-            .to_string(),
-        parent_hash: block
-            .parent_hash
-            .ok_or(HistoryClientError::MissingField {
-                provider: "HyperSync",
-                field: "block.parent_hash",
-            })?
-            .to_string(),
-        timestamp,
-    })
+            hash: block
+                .hash
+                .ok_or(HistoryClientError::MissingField {
+                    provider: "HyperSync",
+                    field: "block.hash",
+                })?
+                .to_string(),
+            parent_hash: block
+                .parent_hash
+                .ok_or(HistoryClientError::MissingField {
+                    provider: "HyperSync",
+                    field: "block.parent_hash",
+                })?
+                .to_string(),
+            timestamp,
+        })
+    }
 }
 
-fn hypersync_log(log: HyperSyncLog) -> Result<CanonicalExchangeLog, HistoryClientError> {
-    let topics = log
-        .topics
-        .into_iter()
-        .flatten()
-        .map(|topic| topic.to_string())
-        .collect::<Vec<_>>();
-    Ok(CanonicalExchangeLog {
-        address: log
-            .address
-            .ok_or(HistoryClientError::MissingField {
-                provider: "HyperSync",
-                field: "log.address",
-            })?
-            .to_string(),
-        block_number: log
-            .block_number
-            .map(Into::into)
-            .ok_or(HistoryClientError::MissingField {
-                provider: "HyperSync",
-                field: "log.block_number",
-            })?,
-        block_hash: log
-            .block_hash
-            .ok_or(HistoryClientError::MissingField {
-                provider: "HyperSync",
-                field: "log.block_hash",
-            })?
-            .to_string(),
-        block_timestamp: 0,
-        model_available_timestamp: 0,
-        parent_block_hash: String::new(),
-        transaction_hash: log
-            .transaction_hash
-            .ok_or(HistoryClientError::MissingField {
-                provider: "HyperSync",
-                field: "log.transaction_hash",
-            })?
-            .to_string(),
-        transaction_index: log.transaction_index.map(Into::into).ok_or(
-            HistoryClientError::MissingField {
-                provider: "HyperSync",
-                field: "log.transaction_index",
-            },
-        )?,
-        log_index: log
-            .log_index
-            .map(Into::into)
-            .ok_or(HistoryClientError::MissingField {
-                provider: "HyperSync",
-                field: "log.log_index",
-            })?,
-        topics,
-        data: log
-            .data
-            .map(|data| format!("0x{}", hex::encode(data.as_ref())))
-            .ok_or(HistoryClientError::MissingField {
-                provider: "HyperSync",
-                field: "log.data",
-            })?,
-        removed: log.removed.unwrap_or(false),
-    })
+impl TryFrom<HyperSyncLog> for CanonicalExchangeLog {
+    type Error = HistoryClientError;
+
+    fn try_from(log: HyperSyncLog) -> Result<Self, Self::Error> {
+        let signature_topic = log.topic0.ok_or(HistoryClientError::MissingField {
+            provider: "HyperSync",
+            field: "log.topic0",
+        })?;
+        let mut canonical_topics = vec![signature_topic.to_string()];
+        let mut found_gap = false;
+        for topic in [log.topic1, log.topic2, log.topic3] {
+            match topic {
+                Some(_) if found_gap => {
+                    return Err(HistoryClientError::InvalidField {
+                        provider: "HyperSync",
+                        field: "log.topics",
+                    });
+                }
+                Some(topic) => canonical_topics.push(topic.to_string()),
+                None => found_gap = true,
+            }
+        }
+        Ok(Self {
+            address: log
+                .address
+                .ok_or(HistoryClientError::MissingField {
+                    provider: "HyperSync",
+                    field: "log.address",
+                })?
+                .to_string(),
+            block_number: log.block_number.map(Into::into).ok_or(
+                HistoryClientError::MissingField {
+                    provider: "HyperSync",
+                    field: "log.block_number",
+                },
+            )?,
+            block_hash: log
+                .block_hash
+                .ok_or(HistoryClientError::MissingField {
+                    provider: "HyperSync",
+                    field: "log.block_hash",
+                })?
+                .to_string(),
+            block_timestamp: 0,
+            model_available_timestamp: 0,
+            parent_block_hash: String::new(),
+            transaction_hash: log
+                .transaction_hash
+                .ok_or(HistoryClientError::MissingField {
+                    provider: "HyperSync",
+                    field: "log.transaction_hash",
+                })?
+                .to_string(),
+            transaction_index: log.transaction_index.map(Into::into).ok_or(
+                HistoryClientError::MissingField {
+                    provider: "HyperSync",
+                    field: "log.transaction_index",
+                },
+            )?,
+            log_index: log
+                .log_index
+                .map(Into::into)
+                .ok_or(HistoryClientError::MissingField {
+                    provider: "HyperSync",
+                    field: "log.log_index",
+                })?,
+            topics: canonical_topics,
+            data: log
+                .data
+                .map(|data| format!("0x{}", hex::encode(data.as_ref())))
+                .ok_or(HistoryClientError::MissingField {
+                    provider: "HyperSync",
+                    field: "log.data",
+                })?,
+            removed: log.removed.unwrap_or(false),
+        })
+    }
 }
 
 fn quantity_u64(value: &HyperSyncQuantity, field: &'static str) -> Result<u64, HistoryClientError> {
@@ -1190,33 +1811,261 @@ pub const fn polygon_chain_id() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
+    use std::{
+        error::Error,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        thread,
+        time::Duration,
+    };
 
+    use hypersync_net_types::Query;
+    use quant_pivot_models::config::FinalizedExchangeHistoryConfig;
     use reqwest::{Client as ReqwestClient, Error as ReqwestError};
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use tokio::{sync::Notify, task, time::timeout};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_partial_json, method},
     };
 
     use super::{
-        AttestedHistoryChunk, CanonicalBlockHeader, ExchangeHistoryAttestor, ExtractedHistoryChunk,
-        HistoryClientError, HistoryContinuityProof, HistoryContinuityProofBasis, HistoryDigest,
-        chunks_agree,
+        AttestedHistoryChunk, CanonicalBlockHeader, CanonicalExchangeLog, CanonicalLogBuffer,
+        ExchangeHistoryAttestor, ExtractedHistoryChunk, HistoryClientError, HistoryContinuityProof,
+        HistoryContinuityProofBasis, HistoryDigest, HyperSyncJsonClient, HyperSyncLog,
+        HyperSyncRuntime, add_header_bytes, chunks_agree,
     };
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hypersync_runtime_is_isolated() -> Result<(), Box<dyn Error>> {
+        let runtime = HyperSyncRuntime::new()?;
+        let thread_name = runtime
+            .run("thread isolation", async {
+                task::block_in_place(|| {
+                    thread::current().name().map(str::to_owned).ok_or_else(|| {
+                        HistoryClientError::InvalidConfig(
+                            "isolated runtime thread has no name".to_owned(),
+                        )
+                    })
+                })
+            })
+            .await?;
+
+        assert!(thread_name.starts_with("quant-hypersync"));
+        runtime.shutdown().await?;
+        runtime.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_admission_is_bounded() -> Result<(), Box<dyn Error>> {
+        let runtime = Arc::new(HyperSyncRuntime::new()?);
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let first_runtime = Arc::clone(&runtime);
+        let first_started = Arc::clone(&started);
+        let first_release = Arc::clone(&release);
+        let first = task::spawn(async move {
+            first_runtime
+                .run("held request", async move {
+                    first_started.notify_one();
+                    first_release.notified().await;
+                    Ok(())
+                })
+                .await
+        });
+        started.notified().await;
+
+        let error = runtime
+            .run("overflow request", async { Ok(()) })
+            .await
+            .expect_err("a second request must fail without entering a waiter queue");
+        assert!(matches!(
+            error,
+            HistoryClientError::CapacityUnavailable {
+                provider: "HyperSync",
+                resource: "isolated request slot"
+            }
+        ));
+
+        release.notify_one();
+        first.await??;
+        runtime.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_waits_after_cancellation() -> Result<(), Box<dyn Error>> {
+        let runtime = Arc::new(HyperSyncRuntime::new()?);
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let request_runtime = Arc::clone(&runtime);
+        let request = task::spawn(async move {
+            request_runtime
+                .run("cancelled caller", async move {
+                    task::block_in_place(move || {
+                        started_tx.send(()).map_err(|_| {
+                            HistoryClientError::InvalidConfig(
+                                "cancellation test start receiver closed".to_owned(),
+                            )
+                        })?;
+                        release_rx.recv().map_err(|_| {
+                            HistoryClientError::InvalidConfig(
+                                "cancellation test release sender closed".to_owned(),
+                            )
+                        })?;
+                        Ok(())
+                    })
+                })
+                .await
+        });
+        task::block_in_place(|| started_rx.recv_timeout(Duration::from_secs(5)))?;
+        request.abort();
+        assert!(
+            request
+                .await
+                .expect_err("request caller must be cancelled")
+                .is_cancelled()
+        );
+
+        let shutdown_runtime = Arc::clone(&runtime);
+        let mut shutdown = task::spawn(async move { shutdown_runtime.shutdown().await });
+        let executed = Arc::new(AtomicBool::new(false));
+        loop {
+            let attempt_executed = Arc::clone(&executed);
+            match runtime
+                .run("closing race", async move {
+                    attempt_executed.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+            {
+                Err(HistoryClientError::CapacityUnavailable { .. }) => task::yield_now().await,
+                Err(HistoryClientError::RuntimeUnavailable {
+                    provider: "HyperSync",
+                }) => break,
+                result => panic!("unexpected run-versus-shutdown result: {result:?}"),
+            }
+        }
+        assert!(!executed.load(Ordering::SeqCst));
+        assert!(
+            timeout(Duration::from_millis(50), &mut shutdown)
+                .await
+                .is_err()
+        );
+
+        release_tx.send(())?;
+        timeout(Duration::from_secs(5), &mut shutdown).await???;
+        runtime.shutdown().await?;
+        let error = runtime
+            .run("after shutdown", async { Ok(()) })
+            .await
+            .expect_err("closed runtime must reject admission");
+        assert!(matches!(
+            error,
+            HistoryClientError::RuntimeUnavailable {
+                provider: "HyperSync"
+            }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_panic_is_typed() -> Result<(), Box<dyn Error>> {
+        let runtime = HyperSyncRuntime::new()?;
+        let error = runtime
+            .run::<(), _>("panic probe", async {
+                panic!("isolated runtime probe panic")
+            })
+            .await
+            .expect_err("task panic must cross the runtime boundary as a typed error");
+        assert!(matches!(
+            error,
+            HistoryClientError::RuntimeTaskFailed {
+                provider: "HyperSync",
+                operation: "panic probe"
+            }
+        ));
+        runtime.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hypersync_body_is_bounded() -> Result<(), Box<dyn Error>> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(33)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut config = FinalizedExchangeHistoryConfig::default();
+        config.hypersync.endpoint = server.uri();
+        config.hypersync.api_token = "00000000-0000-0000-0000-000000000137".into();
+        config.max_hypersync_response_body_bytes = 32;
+        let client = Arc::new(HyperSyncJsonClient::connect(&config)?);
+
+        let error = client
+            .query(Query::new().from_block(1).to_block_excl(2))
+            .await
+            .expect_err("declared or streamed HyperSync body must fail before decoding");
+        assert!(matches!(
+            error,
+            HistoryClientError::HyperSyncResponseBodyBudget { limit: 32 }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn hypersync_wire_decodes_topics() -> Result<(), Box<dyn Error>> {
+        let base = json!({
+            "removed": false,
+            "log_index": "0x0",
+            "transaction_index": "0x1",
+            "transaction_hash": format!("0x{:064x}", 2),
+            "block_hash": format!("0x{:064x}", 3),
+            "block_number": "0x4",
+            "address": "0x0000000000000000000000000000000000000005",
+            "data": "0x00",
+            "topic0": format!("0x{:064x}", 6),
+            "topic1": format!("0x{:064x}", 7),
+            "topic2": format!("0x{:064x}", 8),
+            "topic3": null
+        });
+        let canonical =
+            CanonicalExchangeLog::try_from(serde_json::from_value::<HyperSyncLog>(base.clone())?)?;
+        assert_eq!(canonical.topics.len(), 3);
+
+        let mut gap = base;
+        gap["topic1"] = Value::Null;
+        let error = CanonicalExchangeLog::try_from(serde_json::from_value::<HyperSyncLog>(gap)?)
+            .expect_err("a non-empty topic after a gap must fail closed");
+        assert!(matches!(
+            error,
+            HistoryClientError::InvalidField {
+                provider: "HyperSync",
+                field: "log.topics"
+            }
+        ));
+        Ok(())
+    }
 
     fn attestor_for(
         server: &MockServer,
-        max_response_bytes: usize,
+        max_response_body_bytes: usize,
         max_blocks_per_log_request: u64,
     ) -> Result<ExchangeHistoryAttestor, ReqwestError> {
         Ok(ExchangeHistoryAttestor {
             client: ReqwestClient::builder().build()?,
             endpoint: server.uri(),
-            max_response_bytes,
+            max_rpc_response_body_bytes: max_response_body_bytes,
+            max_canonical_chunk_bytes: max_response_body_bytes,
             max_blocks_per_log_request,
             max_concurrent_log_requests: 2,
             confirmation_blocks: 12,
+            max_blocks_per_chunk: 2_000,
         })
     }
 
@@ -1227,6 +2076,58 @@ mod tests {
             parent_hash: format!("0x{:064x}", number.saturating_sub(1)),
             timestamp: 1_700_000_000 + number,
         }
+    }
+
+    fn log_with_data(data: &str) -> CanonicalExchangeLog {
+        CanonicalExchangeLog {
+            address: "0x0000000000000000000000000000000000000001".to_owned(),
+            block_number: 1,
+            block_hash: format!("0x{:064x}", 1),
+            block_timestamp: 1_700_000_001,
+            model_available_timestamp: 1_700_000_013,
+            parent_block_hash: format!("0x{:064x}", 0),
+            transaction_hash: format!("0x{:064x}", 2),
+            transaction_index: 0,
+            log_index: 0,
+            topics: vec![format!("0x{:064x}", 3)],
+            data: data.to_owned(),
+            removed: false,
+        }
+    }
+
+    #[test]
+    fn canonical_budget_rejects_extension() -> Result<(), HistoryClientError> {
+        let first = log_with_data("0x01");
+        let limit = first.canonical_budget_bytes()?.saturating_add(2);
+        let mut buffer = CanonicalLogBuffer::new(limit, 0)?;
+        buffer.push(first)?;
+
+        let error = buffer
+            .push(log_with_data("0x02"))
+            .expect_err("overflowing row must be rejected before aggregate extension");
+        assert!(matches!(
+            error,
+            HistoryClientError::CanonicalChunkBudget { limit: value } if value == limit
+        ));
+        assert_eq!(buffer.rows.len(), 1);
+        assert_eq!(buffer.canonical_bytes, limit);
+        Ok(())
+    }
+
+    #[test]
+    fn header_budget_rejects_extension() -> Result<(), HistoryClientError> {
+        let header = header(1, &format!("0x{:064x}", 1));
+        let limit = header.canonical_budget_bytes()?.saturating_add(2);
+        let accepted = add_header_bytes(2, 0, &header, limit)?;
+        assert_eq!(accepted, limit);
+
+        let error = add_header_bytes(accepted, 1, &header, limit)
+            .expect_err("second header must include a separator and exceed the chunk budget");
+        assert!(matches!(
+            error,
+            HistoryClientError::CanonicalChunkBudget { limit: value } if value == limit
+        ));
+        Ok(())
     }
 
     #[tokio::test]
@@ -1246,7 +2147,7 @@ mod tests {
 
         let logs = attestor.fetch_logs(10, 14).await?;
 
-        assert!(logs.is_empty());
+        assert!(logs.0.is_empty());
         Ok(())
     }
 
@@ -1315,7 +2216,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Some(HistoryClientError::ResponseBudget { limit: 32 })
+            Some(HistoryClientError::RpcResponseBodyBudget { limit: 32 })
         ));
         Ok(())
     }

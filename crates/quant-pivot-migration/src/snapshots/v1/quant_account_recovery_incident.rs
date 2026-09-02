@@ -42,7 +42,12 @@ pub struct Model {
     pub quant_account_chain_execution:
         BelongsTo<Option<super::quant_account_chain_execution::Entity>>,
     #[sea_orm(has_many)]
-    pub quant_account_pause_submissions: HasMany<super::quant_account_pause_submission::Entity>,
+    pub quant_account_pause_operations: HasMany<super::quant_account_pause_operation::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_account_recovery_manifests: HasMany<super::quant_account_recovery_manifest::Entity>,
+    #[sea_orm(has_one)]
+    pub quant_account_clean_funder_blocker:
+        HasOne<super::quant_account_clean_funder_blocker::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

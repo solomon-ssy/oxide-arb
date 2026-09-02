@@ -100,7 +100,7 @@ pub struct PermitLifecycleEvidence {
 pub struct PermitBindingEvidence {
     pub scope_exact: bool,
     pub preflight_hash_exact: bool,
-    pub runtime_mode_exact: bool,
+    pub authorization_policy_exact: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -386,7 +386,7 @@ impl DecisionPathEvidence {
             assert!(permit.lifecycle.not_revoked);
             assert!(permit.bindings.scope_exact);
             assert!(permit.bindings.preflight_hash_exact);
-            assert!(permit.bindings.runtime_mode_exact);
+            assert!(permit.bindings.authorization_policy_exact);
         }
     }
 

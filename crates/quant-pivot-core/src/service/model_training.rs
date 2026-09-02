@@ -13,7 +13,7 @@
 use std::future;
 use std::{collections::BTreeSet, sync::Arc};
 
-use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory, OfflineMemoryLease};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
@@ -35,8 +35,8 @@ use quant_pivot_models::{
     },
     types::{
         CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, ModelInputContract,
-        ModelRunId, ModelVersionId, ResearchJobProgress, ResearchProfileArtifact,
-        TrainingDatasetId,
+        ModelRunId, ModelSpecId, ModelVersionId, ResearchJobProgress, ResearchProfileArtifact,
+        ResearchProfileRef, TradePolicyArtifactId, TrainingDatasetId,
         factor::{FactorDefinitionRef, FactorServingPlane},
         model_lineage::ModelVersionDerivation,
         model_metrics::{
@@ -69,8 +69,19 @@ use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, FactorRepository, ModelRegistryRepository, ModelRunRepository,
     TrainingDatasetRepository,
 };
+#[cfg(feature = "ml-classical")]
 use quant_pivot_research::{
-    artifact::ArtifactStore,
+    artifact::ArtifactNamespace,
+    model::{
+        ClassicalAdapterRegistry, ClassicalOutputSemantics, ScoreMultiplierSpec,
+        artifact::ClassicalModelPayload,
+    },
+    training::{
+        TOKEN_PAYOUT_RATIO, TrainingMatrix, build_borrowed_matrix, matrix_spec_from_contract,
+    },
+};
+use quant_pivot_research::{
+    artifact::{ArtifactKey, ArtifactStore},
     factors::{FactorEngine, names::STRUCT_FAVORITE_LONGSHOT},
     features::{ExecutableFeatureSchema, SourceRequirement},
     hashing::ResearchHasher,
@@ -88,22 +99,11 @@ use quant_pivot_research::{
     training::{LabelName, TrainingExample, label_names_for_sources},
     validation::PurgeConfig,
 };
-#[cfg(feature = "ml-classical")]
-use quant_pivot_research::{
-    artifact::{ArtifactKey, ArtifactNamespace},
-    model::{
-        ClassicalAdapterRegistry, ClassicalOutputSemantics, ScoreMultiplierSpec,
-        artifact::ClassicalModelPayload,
-    },
-    training::{
-        TOKEN_PAYOUT_RATIO, TrainingMatrix, build_borrowed_matrix, matrix_spec_from_contract,
-    },
-};
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use crate::service::{
-    model_serving_preimage::ModelServingPreimageService,
+    model_serving_preimage::{ModelPreimageReadContext, ModelServingPreimageService},
     trade_policy_evidence::TradePolicyEvidenceDurability,
     trade_policy_preimage::{TradePolicyPreimageTarget, TradePolicyPreimageVerifier},
     training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
@@ -127,6 +127,73 @@ fn ensure_not_cancelled(cancel: &CancellationToken, phase: &str) -> QuantResult<
 fn cancellation_probe(cancel: &CancellationToken) -> CancellationProbe {
     let cancel = cancel.clone();
     CancellationProbe::new(move || cancel.is_cancelled())
+}
+
+fn verify_model_readback(
+    persisted: &[u8],
+    expected_bytes: &[u8],
+    expected_artifact: &ModelArtifact,
+    expected_hash: ContentHash,
+) -> QuantResult<()> {
+    verify_model_bytes(persisted, expected_bytes, expected_hash)?;
+    let decoded = ModelArtifact::from_bytes(persisted)?;
+    let actual_hash = decoded.content_hash()?;
+    if actual_hash != expected_hash || &decoded != expected_artifact {
+        return Err(ResearchError::ArtifactHashMismatch {
+            expected: expected_hash.to_string(),
+            actual: actual_hash.to_string(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn verify_model_bytes(
+    persisted: &[u8],
+    expected_bytes: &[u8],
+    expected_hash: ContentHash,
+) -> QuantResult<()> {
+    if persisted != expected_bytes {
+        return Err(ResearchError::ArtifactHashMismatch {
+            expected: expected_hash.to_string(),
+            actual: "stored model bytes differ from canonical upload".to_owned(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ml-classical")]
+fn verify_classical_readback(
+    persisted: &[u8],
+    expected_bytes: &[u8],
+    expected_hash: ContentHash,
+) -> QuantResult<()> {
+    let expected_actual = CanonicalDigest::content_hash_bytes(expected_bytes);
+    if expected_actual != expected_hash {
+        return Err(ResearchError::ArtifactHashMismatch {
+            expected: expected_hash.to_string(),
+            actual: expected_actual.to_string(),
+        }
+        .into());
+    }
+    let actual_hash = CanonicalDigest::content_hash_bytes(persisted);
+    if persisted != expected_bytes || actual_hash != expected_hash {
+        return Err(ResearchError::ArtifactHashMismatch {
+            expected: expected_hash.to_string(),
+            actual: actual_hash.to_string(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn is_retryable_training_error(error: &QuantError) -> bool {
+    match error {
+        QuantError::Research(ResearchError::ArtifactTransport { .. }) => true,
+        QuantError::Storage(error) => error.is_transient(),
+        _ => false,
+    }
 }
 
 /// Repository + store dependencies for the trainer service.
@@ -158,6 +225,7 @@ pub struct ModelTrainerConfig {
 }
 
 /// A training request resolved by the admin port.
+#[derive(Clone)]
 pub struct TrainModelInput {
     /// Pre-assigned registry id (async job engine) or minted for direct calls.
     pub model_version_id: ModelVersionId,
@@ -210,16 +278,134 @@ struct PreparedModelPayload {
     transform: ModelServingTransformBinding,
     metrics: PendingModelMetrics,
     objective: ModelTrainingObjective,
+    has_commit_intent: bool,
 }
 
-struct ModelTrainingCommit<'a> {
-    model_run_id: &'a ModelRunId,
-    model_version_id: &'a ModelVersionId,
-    input: &'a TrainModelInput,
-    dataset: &'a TrainingDatasetInfo,
-    examples: &'a Arc<[TrainingExample]>,
-    serving: &'a VerifiedServingInputs,
-    cancel: &'a CancellationToken,
+struct FinalizedModelCommit {
+    model_version_id: ModelVersionId,
+    model_spec_id: ModelSpecId,
+    training_dataset_id: TrainingDatasetId,
+    category_scope: Option<MarketCategory>,
+    profile_ref: ResearchProfileRef,
+    trade_policy: Option<(TradePolicyArtifactId, ContentHash)>,
+    serving_contract: ModelServingContract,
+    metrics: ModelVersionMetrics,
+    objective: ModelTrainingObjective,
+    artifact_hash: ContentHash,
+    key: ArtifactKey,
+    bytes: Vec<u8>,
+    artifact: ModelArtifact,
+}
+
+struct ModelFinalizeInput {
+    model_version_id: ModelVersionId,
+    input: TrainModelInput,
+    dataset: TrainingDatasetInfo,
+    serving: VerifiedServingInputs,
+    prepared: PreparedModelPayload,
+    cancel: CancellationToken,
+}
+
+impl ModelFinalizeInput {
+    fn finalize(self) -> QuantResult<FinalizedModelCommit> {
+        let Self {
+            model_version_id,
+            input,
+            dataset,
+            serving,
+            prepared,
+            cancel,
+        } = self;
+        let has_commit_intent = prepared.has_commit_intent;
+        if !has_commit_intent {
+            ensure_not_cancelled(&cancel, "artifact finalize start")?;
+        }
+        let materialization = require_dataset_materialization(&dataset)?;
+        let category_scope = serving.profile.spec.category;
+        let required_domain_families = ModelTrainerService::required_domain_families(
+            &serving.feature_schema,
+            &serving.factor_plane,
+            &input.model_spec.input_contract,
+            category_scope,
+        )?;
+        let estimator = prepared
+            .payload
+            .serving_estimator_binding(&serving.factor_plane)?;
+        let prediction_horizon_secs = input.prediction_horizon()?;
+        let contract = ModelServingContract::try_seal(ModelServingBindings {
+            policy_snapshot: serving.policy_snapshot,
+            required_domain_families,
+            capability_registry_hashes: dataset.source_lineage.capability_registry_hashes.clone(),
+            factors: ModelServingFactorBinding {
+                plane: serving.factor_plane,
+                bias_table: serving.bias_table,
+            },
+            schemas: ModelServingSchemaBinding {
+                feature_schema_hash: *materialization.feature_schema_hash,
+                label_schema_hash: *materialization.label_schema_hash,
+            },
+            transform: prepared.transform,
+            model: ModelServingModelBinding {
+                model_version_id,
+                model_spec_id: input.model_spec.model_spec_id,
+                model_spec_definition_hash: input.model_spec.definition_hash,
+                model_family: input.model_spec.model_family,
+                category_scope,
+                profile_ref: serving.profile.profile_ref.clone(),
+                prediction_horizon_secs,
+                estimator,
+                calibration: None,
+            },
+            trade_policy: serving.trade_policy,
+            dataset: ModelServingDatasetBinding {
+                manifest: materialization.manifest.clone(),
+                manifest_hash: *materialization.manifest_hash,
+                artifact_bytes_hash: *materialization.artifact_bytes_hash,
+            },
+        })
+        .map_err(|error| ResearchError::InvalidModelArtifact {
+            detail: format!("seal complete model-serving contract: {error}"),
+        })?;
+        let artifact = ModelArtifact::try_seal(contract, prepared.payload)?;
+        let metrics = prepared.metrics.finalize(&artifact)?;
+        let serving_contract = artifact.header().serving_contract().clone();
+        let trade_policy = serving_contract
+            .bindings()
+            .trade_policy
+            .as_ref()
+            .map(|binding| (binding.artifact_id, binding.content_hash));
+        let artifact_hash = artifact.content_hash()?;
+        let key = ModelArtifact::artifact_key(&artifact_hash)?;
+        let bytes = artifact.to_bytes()?;
+        if !has_commit_intent {
+            ensure_not_cancelled(&cancel, "artifact finalize completion")?;
+        }
+        Ok(FinalizedModelCommit {
+            model_version_id,
+            model_spec_id: input.model_spec.model_spec_id,
+            training_dataset_id: input.training_dataset_id,
+            category_scope,
+            profile_ref: serving.profile.profile_ref,
+            trade_policy,
+            serving_contract,
+            metrics,
+            objective: prepared.objective,
+            artifact_hash,
+            key,
+            bytes,
+            artifact,
+        })
+    }
+}
+
+struct ModelTrainingCommit {
+    model_run_id: ModelRunId,
+    model_version_id: ModelVersionId,
+    input: TrainModelInput,
+    dataset: TrainingDatasetInfo,
+    examples: Arc<[TrainingExample]>,
+    serving: VerifiedServingInputs,
+    cancel: CancellationToken,
 }
 
 /// Offline trainer service.
@@ -352,9 +538,10 @@ impl ModelTrainerService {
         let policy_snapshot = self.config.verified_policy_binding()?;
         let (feature_schema, factor_plane, profile) =
             self.validate_dataset_contracts(&dataset, &input, &policy_snapshot)?;
+        let context = ModelPreimageReadContext::new(cancel, None);
         self.deps
             .serving_preimages
-            .verify_dataset_objects(&dataset, &profile)
+            .verify_dataset_objects(&dataset, &profile, &context)
             .await?;
         let bias_table = self
             .load_bias_table(&factor_plane, input.model_spec.model_family)
@@ -368,9 +555,11 @@ impl ModelTrainerService {
                 profile: &profile,
             },
             TradePolicyEvidenceDurability::ContentVerified,
+            &context,
         ))
         .await?
         .map(|verified| verified.binding().clone());
+        drop(context);
         let training_dataset_hash = *require_dataset_materialization(&dataset)?.dataset_hash;
         let serving_inputs = VerifiedServingInputs {
             feature_schema,
@@ -381,10 +570,21 @@ impl ModelTrainerService {
             bias_table,
             trade_policy,
         };
+        let memory_lease = self
+            .deps
+            .compute
+            .acquire_offline_memory_cancellable(OfflineMemory::try_gib(8)?, cancel)
+            .await?;
         progress.report(ResearchJobProgress::indeterminate("decode", 0));
-        let examples: Arc<[TrainingExample]> = self.decode_examples(&dataset).await?.into();
-        Self::validate_example_contracts(&dataset, &input, &examples)?;
-        Self::validate_example_scope(&serving_inputs.profile, &examples)?;
+        let examples = self
+            .decode_examples(
+                &dataset,
+                &input,
+                &serving_inputs.profile,
+                cancel,
+                &memory_lease,
+            )
+            .await?;
         ensure_not_cancelled(cancel, "verify")?;
         progress.report(ResearchJobProgress::indeterminate(
             "verify",
@@ -404,31 +604,43 @@ impl ModelTrainerService {
         let model_run_id = input.model_run_id;
         self.create_run(&model_run_id, &dataset).await?;
 
-        let result = async {
+        let result = Box::pin(async {
             ensure_not_cancelled(cancel, "fit")?;
             progress.report(ResearchJobProgress::indeterminate(
                 "fit",
                 examples.len() as u64,
             ));
-            let version = self
-                .train_and_commit(ModelTrainingCommit {
-                    model_run_id: &model_run_id,
-                    model_version_id: &model_version_id,
-                    input: &input,
-                    dataset: &dataset,
-                    examples: &examples,
-                    serving: &serving_inputs,
-                    cancel,
-                })
-                .await?;
+            let version = Box::pin(self.train_and_commit(
+                ModelTrainingCommit {
+                    model_run_id,
+                    model_version_id,
+                    input,
+                    dataset,
+                    examples,
+                    serving: serving_inputs,
+                    cancel: cancel.clone(),
+                },
+                &memory_lease,
+            ))
+            .await?;
             QuantResult::Ok(version)
-        }
+        })
         .await;
+        // The reservation spans dataset decoding, fitting, exact artifact
+        // readback, and the atomic model/run registration. Release it only
+        // after that complete durability boundary has returned.
+        drop(memory_lease);
         match result {
             Ok(version) => Ok(TrainModelOutcome {
                 version,
                 model_run_id,
             }),
+            Err(error)
+                if is_retryable_training_error(&error)
+                    || matches!(error, QuantError::Research(ResearchError::Cancelled { .. })) =>
+            {
+                Err(error)
+            }
             Err(error) => {
                 self.finalize_run_error(&model_run_id, &error).await?;
                 Err(error)
@@ -442,25 +654,20 @@ impl ModelTrainerService {
         error: &QuantError,
     ) -> QuantResult<()> {
         let diagnostic = Self::run_diagnostic(error);
-        let finalization = if matches!(error, QuantError::Research(ResearchError::Cancelled { .. }))
-        {
-            self.deps
-                .model_run_repo
-                .cancel(model_run_id, diagnostic)
-                .await
-        } else {
-            self.deps
-                .model_run_repo
-                .fail(model_run_id, ModelRunErrorCode::TrainingFailed, diagnostic)
-                .await
-        };
-        finalization.map(|_| ()).map_err(|finalizer| {
-            ResearchError::ModelRunFinalization {
+        let finalization = self
+            .deps
+            .model_run_repo
+            .fail(model_run_id, ModelRunErrorCode::TrainingFailed, diagnostic)
+            .await;
+        match finalization {
+            Ok(_) => Ok(()),
+            Err(finalizer) if finalizer.is_transient() => Err(finalizer.into()),
+            Err(finalizer) => Err(ResearchError::ModelRunFinalization {
                 primary: error.to_string(),
                 finalizer: finalizer.to_string(),
             }
-            .into()
-        })
+            .into()),
+        }
     }
 
     fn run_diagnostic(error: &QuantError) -> String {
@@ -898,14 +1105,32 @@ impl ModelTrainerService {
     async fn decode_examples(
         &self,
         dataset: &TrainingDatasetInfo,
-    ) -> QuantResult<Vec<TrainingExample>> {
+        input: &TrainModelInput,
+        profile: &ResearchProfileArtifact,
+        cancel: &CancellationToken,
+        memory_lease: &OfflineMemoryLease,
+    ) -> QuantResult<Arc<[TrainingExample]>> {
         let materialization = require_dataset_materialization(dataset)?;
         let bytes = self
             .deps
             .artifact_store
             .get(materialization.parquet_uri)
             .await?;
-        verify_frozen_dataset_artifact(dataset, &bytes)
+        let dataset = dataset.clone();
+        let input = input.clone();
+        let profile = profile.clone();
+        let cancellation = cancel.clone();
+        self.deps
+            .compute
+            .run_leased_cancellable(memory_lease, cancel, move || {
+                ensure_not_cancelled(&cancellation, "dataset decode start")?;
+                let examples = verify_frozen_dataset_artifact(&dataset, &bytes)?;
+                Self::validate_example_contracts(&dataset, &input, &examples)?;
+                Self::validate_example_scope(&profile, &examples)?;
+                ensure_not_cancelled(&cancellation, "dataset decode completion")?;
+                Ok(Arc::from(examples))
+            })
+            .await
     }
 
     fn validate_example_contracts(
@@ -1065,7 +1290,8 @@ impl ModelTrainerService {
     /// Train + register, dispatching on family.
     async fn train_and_commit(
         &self,
-        commit: ModelTrainingCommit<'_>,
+        commit: ModelTrainingCommit,
+        memory_lease: &OfflineMemoryLease,
     ) -> QuantResult<ModelVersionInfo> {
         let ModelTrainingCommit {
             model_run_id,
@@ -1076,107 +1302,99 @@ impl ModelTrainerService {
             serving,
             cancel,
         } = commit;
-        let materialization = require_dataset_materialization(dataset)?;
-        let category_scope = serving.profile.spec.category;
         let prepared = if input.model_spec.model_family.is_exit_scorer() {
-            self.train_sell_scorer(input, examples, serving, cancel)
+            self.train_sell_scorer(&input, examples, &serving, &cancel, memory_lease)
                 .await?
         } else {
             match input.model_spec.model_family.classical_kind() {
                 None => {
-                    self.train_weighted(input, examples, serving, cancel)
+                    self.train_weighted(&input, examples, &serving, &cancel, memory_lease)
                         .await?
                 }
                 Some(kind) => {
-                    self.train_classical(input, examples, serving, kind, cancel)
+                    self.train_classical(&input, examples, &serving, kind, &cancel, memory_lease)
                         .await?
                 }
             }
         };
-        let required_domain_families = Self::required_domain_families(
-            &serving.feature_schema,
-            &serving.factor_plane,
-            &input.model_spec.input_contract,
-            serving.profile.spec.category,
-        )?;
-        let estimator = prepared
-            .payload
-            .serving_estimator_binding(&serving.factor_plane)?;
-        let prediction_horizon_secs = input.prediction_horizon()?;
-        let contract = ModelServingContract::try_seal(ModelServingBindings {
-            policy_snapshot: serving.policy_snapshot.clone(),
-            required_domain_families,
-            capability_registry_hashes: dataset.source_lineage.capability_registry_hashes.clone(),
-            factors: ModelServingFactorBinding {
-                plane: serving.factor_plane.clone(),
-                bias_table: serving.bias_table.clone(),
-            },
-            schemas: ModelServingSchemaBinding {
-                feature_schema_hash: *materialization.feature_schema_hash,
-                label_schema_hash: *materialization.label_schema_hash,
-            },
-            transform: prepared.transform,
-            model: ModelServingModelBinding {
-                model_version_id: *model_version_id,
-                model_spec_id: input.model_spec.model_spec_id,
-                model_spec_definition_hash: input.model_spec.definition_hash,
-                model_family: input.model_spec.model_family,
-                category_scope,
-                profile_ref: serving.profile.profile_ref.clone(),
-                prediction_horizon_secs,
-                estimator,
-                calibration: None,
-            },
-            trade_policy: serving.trade_policy.clone(),
-            dataset: ModelServingDatasetBinding {
-                manifest: materialization.manifest.clone(),
-                manifest_hash: *materialization.manifest_hash,
-                artifact_bytes_hash: *materialization.artifact_bytes_hash,
-            },
-        })
-        .map_err(|error| ResearchError::InvalidModelArtifact {
-            detail: format!("seal complete model-serving contract: {error}"),
-        })?;
-        let artifact = ModelArtifact::try_seal(contract, prepared.payload)?;
-        let metrics = prepared.metrics.finalize(&artifact)?;
-        let serving_contract = artifact.header().serving_contract().clone();
-        let bindings = serving_contract.bindings();
-        let trade_policy = bindings
-            .trade_policy
-            .as_ref()
-            .map(|binding| (binding.artifact_id, binding.content_hash));
-        let artifact_hash = artifact.content_hash()?;
-        let key = ModelArtifact::artifact_key(&artifact_hash)?;
-        self.deps
+        let has_commit_intent = prepared.has_commit_intent;
+        let finalization = ModelFinalizeInput {
+            model_version_id,
+            input,
+            dataset,
+            serving,
+            prepared,
+            cancel: cancel.clone(),
+        };
+        let finalize = move || finalization.finalize();
+        let finalized = if has_commit_intent {
+            self.deps
+                .compute
+                .run_offline_with_lease(memory_lease, finalize)
+                .await?
+        } else {
+            self.deps
+                .compute
+                .run_leased_cancellable(memory_lease, &cancel, finalize)
+                .await?
+        };
+        if !has_commit_intent {
+            ensure_not_cancelled(&cancel, "artifact put")?;
+        }
+        let artifact_uri = self
+            .deps
             .artifact_store
-            .put(key, &artifact.to_bytes()?)
+            .put(finalized.key.clone(), &finalized.bytes)
+            .await?;
+        let persisted = self.deps.artifact_store.get(&artifact_uri).await?;
+        let expected_bytes = finalized.bytes;
+        let expected_artifact = finalized.artifact;
+        let expected_hash = finalized.artifact_hash;
+        self.deps
+            .compute
+            .run_offline_with_lease(memory_lease, move || {
+                verify_model_readback(
+                    &persisted,
+                    &expected_bytes,
+                    &expected_artifact,
+                    expected_hash,
+                )
+            })
             .await?;
 
         let version = self
             .deps
             .model_registry_repo
-            .next_version_for_spec(&input.model_spec.model_spec_id)
+            .next_version_for_spec(&finalized.model_spec_id)
             .await?;
-        ensure_not_cancelled(cancel, "commit")?;
+        // Weighted/Sell models cross commit-intent at the verified outer artifact
+        // PUT. Classical models crossed it earlier when their estimator bytes
+        // passed URI + canonical-key readback. Once crossed, the atomic model/run
+        // registration wins any later cancellation observation.
+        let (trade_policy_artifact_id, trade_policy_hash) = finalized
+            .trade_policy
+            .map_or((None, None), |(artifact_id, hash)| {
+                (Some(artifact_id), Some(hash))
+            });
         let registered = self
             .deps
             .model_registry_repo
             .commit_training_model_version(
-                model_run_id,
+                &model_run_id,
                 NewModelVersion {
-                    model_version_id: *model_version_id,
-                    model_spec_id: input.model_spec.model_spec_id,
+                    model_version_id: finalized.model_version_id,
+                    model_spec_id: finalized.model_spec_id,
                     version,
-                    artifact_hash,
-                    serving_contract,
-                    category_scope,
-                    profile_ref: serving.profile.profile_ref.clone(),
-                    training_dataset_id: Some(input.training_dataset_id),
-                    trade_policy_artifact_id: trade_policy.map(|binding| binding.0),
-                    trade_policy_hash: trade_policy.map(|binding| binding.1),
+                    artifact_hash: finalized.artifact_hash,
+                    serving_contract: finalized.serving_contract,
+                    category_scope: finalized.category_scope,
+                    profile_ref: finalized.profile_ref,
+                    training_dataset_id: Some(finalized.training_dataset_id),
+                    trade_policy_artifact_id,
+                    trade_policy_hash,
                     derivation: ModelVersionDerivation::Training,
-                    metrics,
-                    training_objective: prepared.objective,
+                    metrics: finalized.metrics,
+                    training_objective: finalized.objective,
                 },
             )
             .await?;
@@ -1187,9 +1405,10 @@ impl ModelTrainerService {
     async fn train_weighted(
         &self,
         input: &TrainModelInput,
-        examples: &Arc<[TrainingExample]>,
+        examples: Arc<[TrainingExample]>,
         serving: &VerifiedServingInputs,
         cancel: &CancellationToken,
+        memory_lease: &OfflineMemoryLease,
     ) -> QuantResult<PreparedModelPayload> {
         let factors = &self
             .config
@@ -1212,7 +1431,7 @@ impl ModelTrainerService {
         let validation_purge = self.config.validation_purge();
         let request = TrainModelRequest {
             cancellation: cancellation_probe(cancel),
-            examples: Arc::clone(examples),
+            examples,
             label: input.label(),
             factor_plane: serving.factor_plane.clone(),
             seed_head,
@@ -1233,7 +1452,7 @@ impl ModelTrainerService {
         let trained = self
             .deps
             .compute
-            .run_offline_cancellable(OfflineMemory::try_gib(8)?, cancel, move || {
+            .run_leased_cancellable(memory_lease, cancel, move || {
                 ensure_not_cancelled(&cancellation, "weighted fit start")?;
                 let trained = runtime.block_on(WeightedFactorTrainer::new().train(request))?;
                 ensure_not_cancelled(&cancellation, "weighted fit completion")?;
@@ -1253,6 +1472,7 @@ impl ModelTrainerService {
                 validation: trained.validation_metrics,
             })),
             objective: ModelTrainingObjective::learning_to_rank(objective),
+            has_commit_intent: false,
         })
     }
 
@@ -1260,9 +1480,10 @@ impl ModelTrainerService {
     async fn train_sell_scorer(
         &self,
         input: &TrainModelInput,
-        examples: &Arc<[TrainingExample]>,
+        examples: Arc<[TrainingExample]>,
         serving: &VerifiedServingInputs,
         cancel: &CancellationToken,
+        memory_lease: &OfflineMemoryLease,
     ) -> QuantResult<PreparedModelPayload> {
         if !examples
             .iter()
@@ -1283,7 +1504,7 @@ impl ModelTrainerService {
         let factor_head = FactorHeadSpec::from_config(&serving.factor_plane, &factors.factor_head)?;
         let request = TrainSellScorerRequest {
             cancellation: cancellation_probe(cancel),
-            examples: Arc::clone(examples),
+            examples,
             label: input.label(),
             factor_plane: serving.factor_plane.clone(),
             factor_head,
@@ -1296,7 +1517,7 @@ impl ModelTrainerService {
         let trained = self
             .deps
             .compute
-            .run_offline_cancellable(OfflineMemory::try_gib(8)?, cancel, move || {
+            .run_leased_cancellable(memory_lease, cancel, move || {
                 ensure_not_cancelled(&cancellation, "sell-scorer fit start")?;
                 let trained = SellScorerTrainer::new().train_sell_scorer(&request)?;
                 ensure_not_cancelled(&cancellation, "sell-scorer fit completion")?;
@@ -1314,6 +1535,7 @@ impl ModelTrainerService {
             },
             metrics: PendingModelMetrics::SellGoverned(trained.metrics),
             objective: ModelTrainingObjective::governed_sell(fit_status),
+            has_commit_intent: false,
         })
     }
 
@@ -1520,10 +1742,11 @@ impl ModelTrainerService {
     async fn train_classical(
         &self,
         input: &TrainModelInput,
-        examples: &Arc<[TrainingExample]>,
+        examples: Arc<[TrainingExample]>,
         serving: &VerifiedServingInputs,
         kind: ClassicalKind,
         cancel: &CancellationToken,
+        memory_lease: &OfflineMemoryLease,
     ) -> QuantResult<PreparedModelPayload> {
         let label = input.label();
         let output_semantics =
@@ -1533,92 +1756,133 @@ impl ModelTrainerService {
             embargo_pct: self.config.validation_purge().embargo_pct,
             min_embargo_secs: self.config.validation_purge().min_embargo_secs,
         };
-        let examples = Arc::clone(examples);
         let schema = serving.feature_schema.clone();
         let input_contract = input.model_spec.input_contract.clone();
         let cancellation = cancel.clone();
-        let (output, validation) = self
+        let (output, validation, model_key) = self
             .deps
             .compute
-            .run_offline_cancellable(OfflineMemory::try_gib(8)?, cancel, move || {
+            .run_leased_cancellable(memory_lease, cancel, move || {
                 ensure_not_cancelled(&cancellation, "classical matrix")?;
                 let matrix =
                     build_classical_matrix(examples.iter(), &label, &schema, &input_contract)?;
+                drop(examples);
                 ensure_not_cancelled(&cancellation, "classical fit")?;
                 let adapter = ClassicalAdapterRegistry::adapter_for(kind);
                 let output = adapter.train(&matrix)?;
                 ensure_not_cancelled(&cancellation, "classical validation")?;
                 let validation =
                     adapter.validate(&matrix, validation, &cancellation_probe(&cancellation))?;
+                if output.input_contract != input_contract {
+                    return Err(ResearchError::Determinism {
+                        detail:
+                            "classical trainer input contract differs from its owning model spec"
+                                .to_owned(),
+                    }
+                    .into());
+                }
+                let actual_hash = CanonicalDigest::content_hash_bytes(&output.model_bytes);
+                if actual_hash != output.model_bytes_hash {
+                    return Err(ResearchError::ArtifactHashMismatch {
+                        expected: output.model_bytes_hash.to_string(),
+                        actual: actual_hash.to_string(),
+                    }
+                    .into());
+                }
+                let model_key = ArtifactKey::new(
+                    ArtifactNamespace::Model,
+                    output.model_bytes_hash.hex(),
+                    "bin",
+                )?;
                 ensure_not_cancelled(&cancellation, "classical completion")?;
-                Ok((output, validation))
+                Ok((output, validation, model_key))
             })
             .await?;
-        if output.input_contract != input.model_spec.input_contract {
-            return Err(ResearchError::Determinism {
-                detail: "classical trainer input contract differs from its owning model spec"
-                    .to_owned(),
-            }
-            .into());
-        }
-
-        let model_key = ArtifactKey::new(
-            ArtifactNamespace::Model,
-            CanonicalDigest::raw_hex(&output.model_bytes),
-            "bin",
-        )?;
+        ensure_not_cancelled(cancel, "classical artifact put")?;
         let serialized_model_uri = self
             .deps
             .artifact_store
-            .put(model_key, &output.model_bytes)
+            .put(model_key.clone(), &output.model_bytes)
             .await?;
-
-        let objective = ModelTrainingObjective::classical(kind);
-        let in_sample_metrics = ClassicalInSampleMetrics {
-            validation_objective: output.metrics.validation_objective,
-            train_samples: output.metrics.train_samples,
-            feature_count: output.metrics.feature_count,
-        };
-        let validation_metrics =
-            validation_metrics(&validation, HeldOutMetricKind::MeanRollingFoldTargetRankIc);
-        let feature_importances = output
-            .metrics
-            .feature_importances
-            .iter()
-            .map(|importance| ModelFeatureImportance {
-                feature: ModelMetricName::new(importance.feature.as_str()),
-                importance: importance.importance,
+        let uri_bytes = self.deps.artifact_store.get(&serialized_model_uri).await?;
+        let output = self
+            .deps
+            .compute
+            .run_offline_with_lease(memory_lease, move || {
+                verify_classical_readback(
+                    &uri_bytes,
+                    &output.model_bytes,
+                    output.model_bytes_hash,
+                )?;
+                Ok(output)
             })
-            .collect();
-        Ok(PreparedModelPayload {
-            payload: ModelPayload::Classical(Box::new(ClassicalModelPayload {
-                kind,
-                crate_name: output.crate_name,
-                crate_version: output.crate_version,
-                output_semantics,
-                multipliers: ScoreMultiplierSpec::conservative(),
-                substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-                input_contract: output.input_contract,
-                serialized_model_uri,
-                serialized_model_hash: output.model_bytes_hash,
-                serialization_format: ModelSerializationFormat::Bincode,
-                input_transform: output.input_transform,
-                metrics: output.metrics,
-            })),
-            transform: ModelServingTransformBinding {
-                input_contract_hash: output.input_contract_hash,
-                input_transform_hash: output.input_transform_hash,
-                training_input_hash: output.training_input_hash,
-                training_dataset_hash: serving.training_dataset_hash,
-            },
-            metrics: PendingModelMetrics::Classical(Box::new(PendingClassicalMetrics {
-                kind,
-                in_sample: in_sample_metrics,
-                validation: validation_metrics,
-                feature_importances,
-            })),
-            objective,
-        })
+            .await?;
+        let key_bytes = self.deps.artifact_store.get_by_key(&model_key).await?;
+        let output = self
+            .deps
+            .compute
+            .run_offline_with_lease(memory_lease, move || {
+                verify_classical_readback(
+                    &key_bytes,
+                    &output.model_bytes,
+                    output.model_bytes_hash,
+                )?;
+                Ok(output)
+            })
+            .await?;
+        let training_dataset_hash = serving.training_dataset_hash;
+        self.deps
+            .compute
+            .run_offline_with_lease(memory_lease, move || {
+                let objective = ModelTrainingObjective::classical(kind);
+                let in_sample_metrics = ClassicalInSampleMetrics {
+                    validation_objective: output.metrics.validation_objective,
+                    train_samples: output.metrics.train_samples,
+                    feature_count: output.metrics.feature_count,
+                };
+                let validation_metrics =
+                    validation_metrics(&validation, HeldOutMetricKind::MeanRollingFoldTargetRankIc);
+                let feature_importances = output
+                    .metrics
+                    .feature_importances
+                    .iter()
+                    .map(|importance| ModelFeatureImportance {
+                        feature: ModelMetricName::new(importance.feature.as_str()),
+                        importance: importance.importance,
+                    })
+                    .collect();
+                Ok(PreparedModelPayload {
+                    payload: ModelPayload::Classical(Box::new(ClassicalModelPayload {
+                        kind,
+                        crate_name: output.crate_name,
+                        crate_version: output.crate_version,
+                        output_semantics,
+                        multipliers: ScoreMultiplierSpec::conservative(),
+                        substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+                        input_contract: output.input_contract,
+                        serialized_model_uri,
+                        serialized_model_hash: output.model_bytes_hash,
+                        serialization_format: ModelSerializationFormat::Bincode,
+                        input_transform: output.input_transform,
+                        metrics: output.metrics,
+                    })),
+                    transform: ModelServingTransformBinding {
+                        input_contract_hash: output.input_contract_hash,
+                        input_transform_hash: output.input_transform_hash,
+                        training_input_hash: output.training_input_hash,
+                        training_dataset_hash,
+                    },
+                    metrics: PendingModelMetrics::Classical(Box::new(PendingClassicalMetrics {
+                        kind,
+                        in_sample: in_sample_metrics,
+                        validation: validation_metrics,
+                        feature_importances,
+                    })),
+                    objective,
+                    has_commit_intent: true,
+                })
+            })
+            .await
     }
 }
 
@@ -1694,10 +1958,11 @@ impl ModelTrainerService {
     async fn train_classical(
         &self,
         _input: &TrainModelInput,
-        _examples: &Arc<[TrainingExample]>,
+        _examples: Arc<[TrainingExample]>,
         _serving: &VerifiedServingInputs,
         kind: ClassicalKind,
         _cancel: &CancellationToken,
+        _memory_lease: &OfflineMemoryLease,
     ) -> QuantResult<PreparedModelPayload> {
         future::ready(Err(ResearchError::RuntimeUnavailable {
             family: kind.to_string(),
@@ -1710,12 +1975,23 @@ impl ModelTrainerService {
 
 #[cfg(test)]
 mod tests {
-    use quant_pivot_error::{QuantError, research::ResearchError};
+    use std::{
+        hint,
+        sync::Arc,
+        thread,
+        time::{Duration, Instant as StdInstant},
+    };
+
+    use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
+    use quant_pivot_error::{QuantError, research::ResearchError, storage::StorageError};
+    #[cfg(feature = "ml-classical")]
+    use quant_pivot_models::hashing::CanonicalDigest;
     use quant_pivot_models::{
         enums::{common::MarketCategory, domain::DomainFamily},
         runtime_config::FeaturesConfig,
         types::{
-            ModelInputContract, ModelInputSpec, ResearchFeatureContract, factor::FactorServingPlane,
+            ContentHash, ModelInputContract, ModelInputSpec, ResearchFeatureContract,
+            factor::FactorServingPlane,
         },
     };
     use quant_pivot_research::features::{
@@ -1724,8 +2000,91 @@ mod tests {
             book::MID, domain_crypto::DISTANCE_TO_STRIKE, domain_weather::CONTRACT_PROBABILITY,
         },
     };
+    use tokio::time::{Instant, sleep};
+    use tokio_util::sync::CancellationToken;
 
-    use super::{MODEL_RUN_DIAGNOSTIC_MAX_CHARS, ModelTrainerService};
+    #[cfg(feature = "ml-classical")]
+    use super::verify_classical_readback;
+    use super::{
+        MODEL_RUN_DIAGNOSTIC_MAX_CHARS, ModelTrainerService, is_retryable_training_error,
+        verify_model_bytes,
+    };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn training_kernel_preserves_heartbeat() {
+        let compute = Arc::new(ComputeExecutor::new().expect("compute executor"));
+        let cancel = CancellationToken::new();
+        let worker = Arc::clone(&compute);
+        let worker_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            worker
+                .run_offline_cancellable(
+                    OfflineMemory::try_gib(1).expect("offline memory"),
+                    &worker_cancel,
+                    || {
+                        let until = StdInstant::now() + Duration::from_millis(100);
+                        while StdInstant::now() < until {
+                            hint::spin_loop();
+                        }
+                        Ok(thread::current().name().unwrap_or_default().to_owned())
+                    },
+                )
+                .await
+        });
+        let heartbeat = Instant::now();
+        sleep(Duration::from_millis(10)).await;
+        assert!(heartbeat.elapsed() < Duration::from_millis(80));
+        let thread_name = task.await.expect("training task").expect("training kernel");
+        assert!(thread_name.starts_with("quant-offline-"));
+
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let error = compute
+            .run_offline_cancellable(
+                OfflineMemory::try_gib(1).expect("offline memory"),
+                &cancelled,
+                || Ok(()),
+            )
+            .await
+            .expect_err("cancelled kernel must fail closed");
+        assert!(matches!(
+            error,
+            QuantError::Research(ResearchError::Cancelled { .. })
+        ));
+    }
+
+    #[test]
+    fn corrupted_readback_fails_closed() {
+        let expected_hash = ContentHash::from_bytes([0x42; 32]);
+        assert!(verify_model_bytes(b"corrupt", b"canonical", expected_hash).is_err());
+    }
+
+    #[test]
+    fn retryable_errors_stay_running() {
+        let transport = QuantError::from(ResearchError::ArtifactTransport {
+            uri: "s3://artifacts/models/test".to_owned(),
+            detail: "connection reset".to_owned(),
+        });
+        let storage = QuantError::from(StorageError::Connection("connection reset".to_owned()));
+        let deterministic = QuantError::from(ResearchError::ArtifactHashMismatch {
+            expected: "expected".to_owned(),
+            actual: "actual".to_owned(),
+        });
+        assert!(is_retryable_training_error(&transport));
+        assert!(is_retryable_training_error(&storage));
+        assert!(!is_retryable_training_error(&deterministic));
+    }
+
+    #[cfg(feature = "ml-classical")]
+    #[test]
+    fn classical_readback_is_exact() {
+        let expected = b"canonical estimator";
+        let expected_hash = CanonicalDigest::content_hash_bytes(expected);
+        verify_classical_readback(expected, expected, expected_hash)
+            .expect("exact estimator readback");
+        assert!(verify_classical_readback(b"corrupt", expected, expected_hash).is_err());
+        assert!(verify_classical_readback(expected, b"corrupt", expected_hash).is_err());
+    }
 
     #[test]
     fn run_diagnostic_is_bounded() {

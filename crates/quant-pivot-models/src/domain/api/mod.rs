@@ -1,5 +1,6 @@
 //! HTTP API contract types — control plane subset.
 
+mod account_recovery;
 mod auth;
 mod backtest_path_set;
 mod backtest_report;
@@ -7,6 +8,7 @@ mod calibration_artifact;
 mod comparison_report;
 pub mod dashboard;
 mod decision_evidence;
+mod economic_feedback;
 mod execution_recovery;
 mod factor_catalog;
 mod feature_contract;
@@ -42,6 +44,10 @@ mod user;
 mod validation;
 mod window;
 
+pub use account_recovery::{
+    AccountPauseOperationView, AccountRecoveryIncidentView, AccountRecoveryManifestView,
+    FinalizeAccountRecoveryRequest, ReconcileAccountRecoveryRequest, SealAccountRecoveryRequest,
+};
 pub use auth::{LoginRequest, MeResponse, RoleView, TokenResponse, UserView};
 pub use backtest_path_set::{
     BacktestPathSetListQuery, BacktestPathSetView, RunCpcvBacktestRequest,
@@ -56,6 +62,11 @@ pub use comparison_report::{ComparisonReportListQuery, ModelComparisonReportView
 pub use decision_evidence::{
     DecisionBoundaryEvidenceView, FeatureCellEvidenceView, ModelInputEvidenceView,
     ModelRouteEvidenceView,
+};
+pub use economic_feedback::{
+    EconomicHealthQuery, EvaluatedExecutionComparisonView, ExecutionComparisonEvaluationView,
+    ExecutionComparisonNotEvaluableReasonView, RecommendationEconomicOutcomeView,
+    RecommendationExecutionComparisonView, RouteEconomicHealthView,
 };
 pub use execution_recovery::{
     ExecutionRecoveryStep, ExecutionRecoverySummary, ExecutionRecoveryView,

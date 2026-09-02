@@ -4,7 +4,7 @@
 > **Deployment contract**
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `pre_deployment_behavior`: 允许 clean-break 与唯一 fresh terminal bootstrap rewrite；任何真实数据销毁仍需操作者单独授权。
 > - `post_deployment_behavior`: 本次实现只交付唯一终态 clean-install contract；不设计升级、降级、旧版本共存或历史数据转换。
 > - `rollback_and_data_verification`: 仅在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置需要操作者另行授权。
 
@@ -21,7 +21,7 @@
 
 ## 0. 一句话目标
 
-`quant-pivot` 是一个 Polymarket-only 的量化决策系统。它持续采集 Polymarket 市场事实，构建可审计特征和因子，定时训练或刷新模型，周期性输出 TopN 量化建议报告，并在受治理运行模式下决定是否把建议转成待审批或自动执行的订单意图。
+`quant-pivot` 是一个 Polymarket-only 的量化决策系统。它持续采集 Polymarket 市场事实，构建可审计特征和因子，定时训练或刷新模型，周期性输出 TopN 量化建议报告，并由 recommendation 冻结的 `ExecutionAuthorityCeiling`/blockers、当前 `EntryAuthorizationPolicy`、intent 的不可变 `AuthorizationEvidence`、kill switch 与 admission 共同决定是否进入订单执行链。
 
 系统必须回答：
 
@@ -73,7 +73,7 @@
 | `Opportunity` | `SignalCandidate` |
 | `ScoredOpportunity` | `Recommendation` |
 | `OpportunityDetected` event | `RecommendationReportPublished` event |
-| `ExecutionMode::DryRun/Paper/Live` | `QuantRuntimeMode::ReportOnly/SemiAuto/AutoExecution` |
+| `ExecutionMode::DryRun/Paper/Live` | deleted; reports are always real-account sized and entry authority has its own policy |
 | `trade` row as central lifecycle | `recommendation_report` + `recommendation` as central lifecycle |
 | `risk pre-trade check` | `RiskEnvelope` + execution admission check |
 | settlement/redeem loop | explicit exit plan + optional settlement evidence |
@@ -93,7 +93,7 @@
 
 - 每个模型输出必须携带 `model_version`、`feature_schema_version`、`training_dataset_id`、`decision_policy_snapshot_id`。
 - 每个 recommendation 必须携带 factor breakdown，不能只给一个 opaque score。
-- 模型未通过质量门禁时只能进入 `report_only_shadow`，不能进入半自动或自动执行。
+- 模型未通过质量门禁时只能作为 shadow evidence，不能获得 serving 或自动授权资格。
 - 训练标签必须声明 `label_available_at`；未成熟标签不能用于监督评估。
 - 线上报告与离线回放必须共享同一套 feature definition，禁止两套逻辑漂移。
 
@@ -107,9 +107,9 @@
 
 ### 2.4 执行不变量
 
-- `report_only` 永不产生订单。
-- `semi_auto` 只能把 recommendation 转成 `PendingApproval` 的 `OrderIntent`，人工批准后才能发单。
-- `auto_execution` 也必须先生成 `OrderIntent`，再经过 risk envelope、venue guard、capital reservation、kill switch。
+- 报告生成与 entry authorization 完全独立；报告始终使用真实账户 sizing。
+- `OperatorApprovalRequired` 创建 `PendingAuthorization` intent，只有操作员证据可转为 `Authorized`。
+- `PolicyAutomatic` 也必须先生成 `OrderIntent`，冻结 active-policy evidence，再经过 risk envelope、economic health、venue guard、capital reservation、kill switch。
 - recommendation 过期后不能执行。
 - entry trigger 未满足时不能执行。
 - exit plan 是订单生命周期的一部分，不能靠 runbook 或人工记忆维护。
@@ -141,12 +141,11 @@ flowchart TD
     SignalCandidates --> PortfolioPlanner["Portfolio Planner"]
     PortfolioPlanner --> ReportBuilder["TopN Report Builder"]
     ReportBuilder --> ReportRegistry["Report Registry"]
-    ReportRegistry --> ModeGate["Runtime Mode Gate"]
-    ModeGate --> ReportOnly["Report Only"]
-    ModeGate --> Approval["Semi Auto Approval"]
-    ModeGate --> AutoExecution["Auto Execution"]
+    ReportRegistry --> AuthorityGate["Recommendation Authority Ceiling"]
+    AuthorityGate --> Approval["Operator Approval"]
+    AuthorityGate --> PolicyAutomatic["Active Policy Authorization"]
     Approval --> OrderIntent["Order Intent"]
-    AutoExecution --> OrderIntent
+    PolicyAutomatic --> OrderIntent
     OrderIntent --> ExecutionAdmission["Execution Admission"]
     ExecutionAdmission --> ClobOrders["CLOB Orders"]
 ```
@@ -238,7 +237,7 @@ Selection 不是交易白名单，而是报告输入集合。执行侧还会有�
 - 生成 `PortfolioPlan`。
 - 输出 TopN 排序和 rejected candidates 的原因。
 
-组合规划必须独立于执行模式。即使 `report_only`，报告中的 size 也必须是生产级 sizing，而不是展示用虚值。
+组合规划独立于 entry authorization policy。每份报告中的 size 都是基于真实账户的生产级 sizing，而不是展示用虚值。
 
 ### 3.6 Report Plane
 
@@ -256,74 +255,46 @@ Selection 不是交易白名单，而是报告输入集合。执行侧还会有�
 
 职责：
 
-- 根据 runtime mode 消费 recommendations。
+- 根据 recommendation authority ceiling 与当前 entry authorization policy 消费 recommendations。
 - 生成 `OrderIntent`。
-- 人工审批或自动审批。
+- 冻结 operator 或 active-policy `AuthorizationEvidence`。
 - 执行 admission gate。
 - 发送 Polymarket order。
 - 管理 entry、exit、cancel、fill、position、reconcile。
 
+执行价格与数量只有一个 Polymarket canonical owner：PIT CLOB market-info 冻结 tick、minimum
+order size 与 NegRisk，并与提交前 live `/book` 的 market/token/rules 交叉验证。Aggressive BUY
+hard cap 按 tick 向下对齐且不突破治理 slippage；shares 与 aggressive BUY principal 向下到 2 位，
+counter amount 使用该 tick 对应的确定性精度。低于 venue minimum 的 tier 在 global portfolio
+solver 前被拒绝。
+
+最终 admission 在 claim 前读取 exact funder 的 balance/allowance；缺失或不足保持 intent 可重试并
+`Defer`。CLOB adapter 在签名前再次读取 live rules/funding，并逐字段核对 unsigned V2 payload 的
+maker/taker amount 与 identity。系统从不自动 approve；任何真实 approval/order 仍属于独立、精确授权的
+Operational Activation，当前 `operational_activation_claimed=false`。
+
 旧 execution pipeline 不能原样保留。它必须从 “ScoredOpportunity -> FOK buy -> settlement” 重建为 “Recommendation -> OrderIntent -> EntryOrder/ExitOrder -> PositionLifecycle”。
 
-## 4. Runtime Modes
+## 4. 执行授权与独立控制面
 
-### 4.1 `report_only`
+### 4.1 报告
 
-默认模式。行为：
+报告始终是可见主产物，并始终读取真实 CLOB collateral、Data API positions 与账户 reservation 做 sizing。不存在模拟、paper 或仅报告运行模式；缺少真实账户凭证时报告 fail closed。
 
-- 生成报告（报告是终产物，由人工据此手动下单）。
-- 推送报告。
-- 不创建 `OrderIntent`。
-- 不通过执行占用/锁定资本。
-- 不调用 CLOB **下单**/撤单 API，不签名订单。
-- **仍读取真实账户**（CLOB 抵押余额 read-only + Data API 持仓）作为 sizing 资本基数——
-  `report_only` **不是 dry-run**（§3「即使 report_only，size 也必须是生产级 sizing」）。
-  因此需要 private key（用于读 / 派生 L2 读凭证）+ `funder`；缺失则报告 fail closed。
-- 可以写 shadow execution simulation。
+### 4.2 `OperatorApprovalRequired`
 
-适用：
+这是 entry authorization 的安全默认值。Recommendation 只有在 ceiling 至少为 `OperatorApproval`、无硬阻断且仍处于有效窗口时才能创建 `PendingAuthorization` intent。操作员必须提供 acting role、reason，并冻结 `AuthorizationEvidence::OperatorApproval`；授权过期、配置变化或 recommendation/report 生命周期变化均使 intent 失效。
 
-- 新模型上线前。
-- 数据源切换后。
-- 生产灰度前。
-- 风控异常时降级。
+### 4.3 `PolicyAutomatic`
 
-### 4.2 `semi_auto`
+这是 capability upgrade，不是独立运行模式。全局 preflight 与逐 intent admission 都必须确认当前 Route 的精确 model/profile/trade-policy identity、fresh `Healthy` economic evidence、recommendation ceiling=`PolicyAutomatic`、无 blocker，并继续执行 capital、book、venue、credential、exit monitor 与 kill-switch 检查。任何缺失或陈旧证据均 fail closed。降级回 `OperatorApprovalRequired` 无 readiness 前置条件，但仍需 CAS、RBAC、reason 与不可变审计。
 
-半自动模式。行为：
+### 4.4 正交控制
 
-- 报告生成后，对满足 auto-draft 条件的 recommendation 生成 `OrderIntent(PendingApproval)`。
-- 人工审批必须提供 acting role 和 reason。
-- 审批后系统自动执行 entry order。
-- exit plan 进入系统托管。
-
-硬规则：
-
-- 未审批不能发单。
-- 审批过期不能发单。
-- recommendation 过期不能发单。
-- runtime config 或 model version 变化后，旧 approval 必须重新验证。
-
-### 4.3 `auto_execution`
-
-自动执行模式。行为：
-
-- 报告生成后，满足 runtime policy 的 recommendation 自动生成 `OrderIntent(ApprovedByPolicy)`。
-- 每个 intent 仍要经过 admission gate。
-- entry order 和 exit plan 都由系统管理。
-- 自动执行必须可一键降级到 `report_only`。
-
-硬规则：
-
-- 只有当前精确 route generation 的 `Champion` model 可进入 auto execution；该角色从
-  `ModelRouting` 派生，不是 `quant_model_version` 上的可变发布状态。admission 必须重验
-  intent 冻结的 model/version 与当前 active route 仍一致。
-- quality gate stale 时禁止自动执行。
-- kill switch open 时禁止自动执行。
-- risk envelope 失效时禁止自动执行。
-- data quality 不达标时禁止自动执行。
-- route activation 只改变 serving pointer；不得扩大 runtime mode、execution policy、
-  capital、funder 或 signing authority。
+- kill switch 独立控制是否允许新入场、仅退出或完全停机。
+- `SettlementWritePolicy` 独立控制新的结算链写入。
+- 报告生成不受上述授权轴关闭；账户/数据真相缺失仍会让报告自身 fail closed。
+- route activation 只改变 serving pointer，不得扩大 entry authority、capital、funder 或 signing authority。
 
 ## 5. 业务闭环
 
@@ -361,9 +332,10 @@ Fact windows + prior reports + executed outcomes
 
 ```text
 Recommendation
- -> runtime mode gate
+ -> frozen ExecutionAuthorityCeiling + blockers
+ -> current EntryAuthorizationPolicy
  -> OrderIntent
- -> approval or policy approval
+ -> immutable operator or active-policy AuthorizationEvidence
  -> admission gate
  -> entry order
  -> position lifecycle
@@ -421,7 +393,7 @@ Phase 0 完成后必须满足：
 - 所有活跃设计文档都使用 quant-pivot 词汇。
 - 所有旧 Endgame phase docs 都被标记为 superseded 或进入删除清单。
 - `RecommendationReport`、`Recommendation`、`OrderIntent`、`RiskEnvelope` 成为设计主对象。
-- 运行模式只有 `report_only`、`semi_auto`、`auto_execution`。
+- 不存在全局 runtime-mode 轴；报告、entry authorization、kill switch 与 settlement write policy 各有唯一 owner。
 - 文档明确列出每个旧 crate、模块、配置、schema 的命运。
 - 没有任何 compatibility re-export 设计。
 
@@ -514,9 +486,11 @@ pub trait RecommendationReportService {
     ) -> QuantResult<RecommendationReport>;
 }
 
-/// Converts recommendations into governed order intents when mode allows it.
+/// Converts recommendations into governed order intents when authorization allows it.
 pub trait OrderIntentService {
-    /// Create an intent only when runtime mode and recommendation eligibility allow it.
+    /// Create an intent only when the current entry policy and the recommendation's
+    /// frozen ceiling and blockers allow it. Authorization evidence is frozen before
+    /// admission; account recovery and kill-switch gates remain fail closed.
     async fn create_intent(
         &self,
         request: CreateOrderIntentRequest,
@@ -567,7 +541,7 @@ bin <- core + web + storage
 - `risk` 依赖 `core`。
 - `models` 依赖任何业务 crate。
 - `api` 暴露 raw SDK types 到 `core` / `research`。
-- `web` 绕过 service 直接修改运行时模式或 intent 状态。
+- `web` 绕过 service 直接修改 runtime controls 或 intent 状态。
 
 ## 12. 错误与降级语义
 
@@ -577,9 +551,9 @@ bin <- core + web + storage
 | CLOB WS stale | 相关 market 排除或报告为空 |
 | ClickHouse 写失败 | ingest 继续，fact writer 计数并告警 |
 | Feature 缺关键字段 | market reject，记录原因 |
-| Model quality gate stale | report_only 可继续 shadow，禁止 auto execution |
+| Model quality gate stale | 报告可继续展示已验证模型；禁止 policy-automatic authorization |
 | Report generation failed | 不影响 ingest，写 failed run |
 | Intent admission failed | 不修改 report，只拒绝 intent |
-| Execution ambiguous | block auto execution，等待 reconciliation |
+| Execution ambiguous | latch ExitOnly，创建/复用 recovery incident，等待精确对账与 seal |
 
 降级必须显式进入报告 summary 或 operation log，禁止静默吞错。

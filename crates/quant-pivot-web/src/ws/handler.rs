@@ -17,6 +17,7 @@ use quant_pivot_models::{
     types::UserId,
 };
 use serde::Serialize;
+use tokio::runtime::Handle;
 use uuid::Uuid;
 
 use crate::{
@@ -25,6 +26,7 @@ use crate::{
     jwt::WsTicketClaims,
     request_security::ensure_allowed_origin,
     response::WebResponse,
+    runtime_scope::RuntimeScope,
     state::AppState,
     ws::session::{self, SessionContext},
 };
@@ -97,19 +99,24 @@ pub async fn ws_upgrade(
         HeaderValue::from_str(&protocol)
             .map_err(|_| WebError::Unauthorized("invalid websocket protocol".to_owned()))?,
     );
-    rt::spawn(session::run(
-        ws_session,
-        msg_stream,
-        SessionContext {
-            state: state.clone(),
-            registry: state.ws_sessions.clone(),
-            subject_id,
-            user_id: ticket_claims.subject,
-            family_id: ticket_claims.family_id,
-            access_jti: ticket_claims.access_jti,
-            authorization_revision: ticket_claims.authorization_revision,
-            can_read_system,
-        },
+    // The session is a detached LocalSet task; it cannot inherit a temporary
+    // runtime enter guard from the completed HTTP upgrade request.
+    rt::spawn(RuntimeScope::new(
+        session::run(
+            ws_session,
+            msg_stream,
+            SessionContext {
+                state: state.clone(),
+                registry: state.ws_sessions.clone(),
+                subject_id,
+                user_id: ticket_claims.subject,
+                family_id: ticket_claims.family_id,
+                access_jti: ticket_claims.access_jti,
+                authorization_revision: ticket_claims.authorization_revision,
+                can_read_system,
+            },
+        ),
+        Handle::current(),
     ));
     Ok(response)
 }

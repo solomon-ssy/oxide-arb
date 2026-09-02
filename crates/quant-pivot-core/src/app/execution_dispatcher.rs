@@ -125,7 +125,7 @@ impl AppContext {
 
                 let mut capability_rx = capabilities.subscribe_capabilities();
                 loop {
-                    // Low-latency wake on a fresh `ApprovedByPolicy` approval, or the
+                    // Low-latency wake on a freshly `Authorized` intent, or the
                     // poll backstop. Capability revisions revoke submission immediately.
                     tokio::select! {
                         biased;
@@ -154,7 +154,7 @@ impl AppContext {
                         break;
                     }
                     if let Err(error) = worker.armed_dispatch_pass().await {
-                        tracing::warn!(%error, "auto-execution dispatch pass failed");
+                        tracing::warn!(%error, "authorized-intent dispatch pass failed");
                     }
                 }
             }
@@ -296,7 +296,7 @@ async fn armed_dispatch_enabled_pass(
             tracing::warn!(
                 %error,
                 intent_id = %intent.order_intent_id,
-                "auto-execution dispatch failed for intent",
+                "authorized-intent dispatch failed",
             );
         }
     }

@@ -750,7 +750,7 @@ impl PgOrderIntentRepository {
 impl PgOrderIntentRepository {
     /// Invalidate an intent and release capital. When `validate_transition` is true
     /// the FSM guard runs (background / cascade paths); approval-time invalidation
-    /// skips it because the row was already locked as `PendingApproval`.
+    /// skips it because the row was already locked as `PendingAuthorization`.
     async fn transition_invalidated(
         db: &impl ConnectionTrait,
         intent_id: &OrderIntentId,

@@ -35,6 +35,16 @@ pub(super) async fn statement_timestamp(
         })
 }
 
+/// Bound an application-clock reconciliation cutoff by the database clock
+/// before persisting queue readiness. This preserves `ready_at <= created_at`
+/// under host/container clock skew without moving a historical cutoff forward.
+pub(super) fn queue_ready_at(
+    available_through: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+) -> DateTime<Utc> {
+    Ord::min(available_through, created_at)
+}
+
 /// Acquire a transaction-scoped `PostgreSQL` advisory lock.
 pub(super) async fn advisory_xact_lock(
     db: &impl ConnectionTrait,
@@ -137,4 +147,22 @@ pub(super) fn excluded_enum_array<E: ActiveEnum>(column: impl IntoIden) -> Simpl
 fn excluded_cast(column: impl IntoIden, postgres_type: impl AsRef<str>) -> SimpleExpr {
     Expr::col((Alias::new("excluded"), column.into_iden()))
         .cast_as(Alias::new(postgres_type.as_ref()))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, Utc};
+
+    use super::queue_ready_at;
+
+    #[test]
+    fn queue_time_bounds_cutoff() {
+        let database_now = Utc::now();
+        assert_eq!(
+            queue_ready_at(database_now + Duration::seconds(30), database_now),
+            database_now
+        );
+        let historical = database_now - Duration::days(1);
+        assert_eq!(queue_ready_at(historical, database_now), historical);
+    }
 }

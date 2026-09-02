@@ -33,8 +33,8 @@ pub trait VenueReconciliationReader: Send + Sync {
         before: DateTime<Utc>,
     ) -> QuantResult<Vec<ClobTrade>>;
 
-    /// Current conditional-token (outcome share) balance for `token_id`
-    /// (evidence #3 — absolute corroboration that shares were received).
+    /// Current account-wide conditional-token balance for `token_id` (evidence
+    /// #3, diagnostic only; exact trades prove directional receipt/debit).
     async fn token_balance(&self, token_id: &TokenId) -> QuantResult<Shares>;
 
     /// Current pUSD collateral balance (evidence #4 — absolute corroboration

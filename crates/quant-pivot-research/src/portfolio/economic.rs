@@ -6,16 +6,19 @@ use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
-    domain::market::{book::BookLevel, fee::ImmediateExecutionCost},
-    domain::quant::{
-        AggressiveEntryEconomics, CapitalOccupancyBucket, EntryExecutionEconomics,
-        ExecutableEconomicTier, ExistingPortfolioState, HardReservationBucket,
-        PassiveEntryEconomics, PortfolioScenarioArtifact, RecommendationEconomics,
-        ScenarioCapitalOccupancySlice, ScenarioCashflow, ScenarioEntryExecution,
-        ScenarioExecutionCashflow, ScenarioMarketOutcome,
+    domain::{
+        market::{book::BookLevel, fee::ImmediateExecutionCost},
+        order::{PolymarketOrderRules, VenueOrderRuleError},
+        quant::{
+            AggressiveEntryEconomics, CapitalOccupancyBucket, EntryExecutionEconomics,
+            ExecutableEconomicTier, ExistingPortfolioState, HardReservationBucket,
+            PassiveEntryEconomics, PortfolioScenarioArtifact, RecommendationEconomics,
+            ScenarioCapitalOccupancySlice, ScenarioCashflow, ScenarioEntryExecution,
+            ScenarioExecutionCashflow, ScenarioMarketOutcome,
+        },
     },
     enums::{
-        common::MarketCategory,
+        common::{MarketCategory, Side},
         quant::{FillRequirement, OutcomeSide},
     },
     hashing::CanonicalDigest,
@@ -24,7 +27,7 @@ use quant_pivot_models::{
         Bps, ContentHash, EconomicTierId, EntryMakerRebateTerms, EventId,
         MakerRebateObjectiveStatus, MakerRebateObjectiveZeroReason,
         MakerRebateScenarioCreditStatus, MakerRebateValuationEvidence, MarketId, Price,
-        ReportRouteRunId, Shares, SignalCandidateId, TokenId, Usd, UsdHours,
+        ReportRouteRunId, Shares, SignalCandidateId, TokenId, Usd, UsdHours, VenueOrderAmount,
         trade_policy::{PassiveFillDistribution, PassiveFillState, PassiveFillStateKind},
     },
 };
@@ -73,6 +76,17 @@ pub struct ExecutableTierSeed {
     pub entry_execution: EntryExecutionEconomics,
     /// Hash of the model/calibration/trade-policy/L2 input preimage for this tier.
     pub source_lineage_hash: ContentHash,
+}
+
+/// Result of canonicalizing and building one venue-executable tier seed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TierSeedBuild {
+    /// Canonical order rules and all economic invariants passed.
+    Ready(Box<ExecutableTierSeed>),
+    /// The frozen book cannot execute this tier under its fill requirement.
+    Unfilled,
+    /// Canonical share flooring leaves the order below the venue minimum.
+    BelowMinimum { requested: Shares, minimum: Shares },
 }
 
 /// Complete frozen input for constructing every executable tier exposed by one candidate.
@@ -242,6 +256,7 @@ pub struct ExecutableCashTierSeedInput<'a> {
     pub limit_price: Price,
     pub cash_budget: Usd,
     pub fill_requirement: FillRequirement,
+    pub order_rules: PolymarketOrderRules,
     pub source_lineage_hash: ContentHash,
 }
 
@@ -249,13 +264,11 @@ pub struct ExecutableCashTierSeedInput<'a> {
 pub struct ExecutableCashTierSeedFactory;
 
 impl ExecutableCashTierSeedFactory {
-    /// Walk the full ask ladder once. An unfilled policy tier is a normal candidate-level
-    /// rejection; malformed books, fees, or economics remain report-fatal errors.
-    pub fn build(
-        input: ExecutableCashTierSeedInput<'_>,
-    ) -> QuantResult<Option<ExecutableTierSeed>> {
+    /// Resolve the cash ceiling, floor the resulting shares to venue precision,
+    /// then exact-rewalk so every published economic value matches that order.
+    pub fn build(input: ExecutableCashTierSeedInput<'_>) -> QuantResult<TierSeedBuild> {
         validate_cash_tier_input(&input)?;
-        let fill = walk_buy_cash_budget(
+        let initial = walk_buy_cash_budget(
             input.asks,
             input.cash_budget,
             input.limit_price,
@@ -268,8 +281,53 @@ impl ExecutableCashTierSeedFactory {
             stage: "economic_cash_tier",
             detail: format!("policy cash-budget L2 walk failed: {error:?}"),
         })?;
-        if fill.outcome == BookWalkOutcome::Unfilled || !fill.filled_shares.is_positive() {
-            return Ok(None);
+        if initial.outcome == BookWalkOutcome::Unfilled || !initial.filled_shares.is_positive() {
+            return Ok(TierSeedBuild::Unfilled);
+        }
+        let canonical = match input.order_rules.canonical_order(
+            Side::Buy,
+            VenueOrderAmount::Shares(initial.filled_shares),
+            input.limit_price,
+        ) {
+            Ok(canonical) => canonical,
+            Err(VenueOrderRuleError::OrderBelowMinimum { requested, minimum }) => {
+                return Ok(TierSeedBuild::BelowMinimum { requested, minimum });
+            }
+            Err(VenueOrderRuleError::CanonicalAmountZero { .. }) => {
+                return Ok(TierSeedBuild::BelowMinimum {
+                    requested: Shares::ZERO,
+                    minimum: input.order_rules.minimum_order_size,
+                });
+            }
+            Err(error) => {
+                return Err(ReportError::InvariantViolation {
+                    stage: "economic_cash_tier",
+                    detail: format!("venue order canonicalization failed: {error}"),
+                }
+                .into());
+            }
+        };
+        let fill = walk_buy_exact_shares(
+            input.asks,
+            canonical.requested_shares,
+            input.limit_price,
+            FillRequirement::AllOrNothing,
+            input.fee_schedule,
+            LiquidityRole::Taker,
+            input.fill_at,
+        )
+        .map_err(|error| ReportError::InvariantViolation {
+            stage: "economic_cash_tier",
+            detail: format!("canonical exact-share L2 walk failed: {error:?}"),
+        })?;
+        if fill.outcome != BookWalkOutcome::Filled
+            || fill.filled_shares != canonical.requested_shares
+        {
+            return Err(ReportError::InvariantViolation {
+                stage: "economic_cash_tier",
+                detail: "canonical cash tier was not exactly executable".to_owned(),
+            }
+            .into());
         }
         let vwap = fill.vwap.ok_or_else(|| ReportError::InvariantViolation {
             stage: "economic_cash_tier",
@@ -307,7 +365,7 @@ impl ExecutableCashTierSeedFactory {
                 field: "economic_cash_tier.slippage_usd",
                 detail: "walked principal minus best-ask principal overflowed Decimal".to_owned(),
             })?;
-        Ok(Some(ExecutableTierSeed {
+        Ok(TierSeedBuild::Ready(Box::new(ExecutableTierSeed {
             report_route_run_id: input.report_route_run_id,
             candidate_id: input.candidate_id,
             tier_ordinal: input.tier_ordinal,
@@ -328,7 +386,7 @@ impl ExecutableCashTierSeedFactory {
                 visible_liquidity_usd: visible_liquidity(input.asks, input.limit_price)?,
             }),
             source_lineage_hash: input.source_lineage_hash,
-        }))
+        })))
     }
 }
 
@@ -353,6 +411,7 @@ pub struct ExecutablePassiveTierSeedInput<'a> {
     pub good_til_secs: u64,
     pub fill_distribution: PassiveFillDistribution,
     pub maker_rebate_valuation: MakerRebateValuationEvidence,
+    pub order_rules: PolymarketOrderRules,
     pub source_lineage_hash: ContentHash,
 }
 
@@ -367,7 +426,7 @@ struct PassiveRebateProjection {
 }
 
 impl ExecutablePassiveTierSeedFactory {
-    pub fn build(input: ExecutablePassiveTierSeedInput<'_>) -> QuantResult<ExecutableTierSeed> {
+    pub fn build(input: ExecutablePassiveTierSeedInput<'_>) -> QuantResult<TierSeedBuild> {
         if input.tier_ordinal == 0
             || input.bids.is_empty()
             || !input.limit_price.is_positive()
@@ -396,6 +455,29 @@ impl ExecutablePassiveTierSeedFactory {
                 stage: "economic_passive_tier",
                 detail,
             })?;
+        let requested_shares = match input.order_rules.canonical_order(
+            Side::Buy,
+            VenueOrderAmount::Shares(input.requested_shares),
+            input.limit_price,
+        ) {
+            Ok(canonical) => canonical.requested_shares,
+            Err(VenueOrderRuleError::OrderBelowMinimum { requested, minimum }) => {
+                return Ok(TierSeedBuild::BelowMinimum { requested, minimum });
+            }
+            Err(VenueOrderRuleError::CanonicalAmountZero { .. }) => {
+                return Ok(TierSeedBuild::BelowMinimum {
+                    requested: Shares::ZERO,
+                    minimum: input.order_rules.minimum_order_size,
+                });
+            }
+            Err(error) => {
+                return Err(ReportError::InvariantViolation {
+                    stage: "economic_passive_tier",
+                    detail: format!("venue order canonicalization failed: {error}"),
+                }
+                .into());
+            }
+        };
         if !input.execution_economics.fee_schedule.taker_only {
             return Err(ReportError::InvariantViolation {
                 stage: "economic_passive_tier",
@@ -405,7 +487,7 @@ impl ExecutablePassiveTierSeedFactory {
             .into());
         }
         let principal = Usd::new(quantize_venue_amount(
-            input.limit_price.inner() * input.requested_shares.inner(),
+            input.limit_price.inner() * requested_shares.inner(),
         ));
         let venue_fee = input
             .execution_economics
@@ -413,7 +495,7 @@ impl ExecutablePassiveTierSeedFactory {
             .fee(
                 LiquidityRole::Maker,
                 input.limit_price,
-                input.requested_shares,
+                requested_shares,
                 input.decision_at,
             )
             .map_err(|error| ReportError::InvariantViolation {
@@ -435,8 +517,8 @@ impl ExecutablePassiveTierSeedFactory {
             .into());
         }
         let expected_filled_shares =
-            expected_passive_shares(input.requested_shares, &input.fill_distribution)?;
-        let rebate = passive_rebate_projection(&input, expected_filled_shares)?;
+            expected_passive_shares(requested_shares, &input.fill_distribution)?;
+        let rebate = passive_rebate_projection(&input, requested_shares, expected_filled_shares)?;
         let source_lineage_hash = CanonicalDigest::content_hash_typed(
             "quant-pivot/passive-economic-tier-seed",
             1,
@@ -446,7 +528,7 @@ impl ExecutablePassiveTierSeedFactory {
                 input.fill_distribution.source_evidence_hash,
             ),
         )?;
-        Ok(ExecutableTierSeed {
+        Ok(TierSeedBuild::Ready(Box::new(ExecutableTierSeed {
             report_route_run_id: input.report_route_run_id,
             candidate_id: input.candidate_id,
             tier_ordinal: input.tier_ordinal,
@@ -458,7 +540,7 @@ impl ExecutablePassiveTierSeedFactory {
             outcome_side: input.outcome_side,
             observed_exit_capacity_shares: visible_shares(input.bids)?,
             entry_execution: EntryExecutionEconomics::Passive(Box::new(PassiveEntryEconomics {
-                requested_shares: input.requested_shares,
+                requested_shares,
                 limit_price: input.limit_price,
                 decision_at: input.decision_at,
                 good_til_secs: input.good_til_secs,
@@ -477,12 +559,13 @@ impl ExecutablePassiveTierSeedFactory {
                 )),
             })),
             source_lineage_hash,
-        })
+        })))
     }
 }
 
 fn passive_rebate_projection(
     input: &ExecutablePassiveTierSeedInput<'_>,
+    requested_shares: Shares,
     expected_filled_shares: Shares,
 ) -> QuantResult<PassiveRebateProjection> {
     let terms = match &input.execution_economics.maker_rebate_evidence {
@@ -515,7 +598,7 @@ fn passive_rebate_projection(
                 &input.execution_economics.fee_schedule,
                 LiquidityRole::Maker,
                 input.limit_price,
-                input.requested_shares,
+                requested_shares,
                 input.decision_at,
             )
         })
@@ -527,8 +610,7 @@ fn passive_rebate_projection(
         .flatten()
         .map_or(Usd::ZERO, |incentive| incentive.expected_rebate_usd);
     let expected_accrual_usd = Usd::new(quantize_venue_amount(
-        full_fill_accrual_usd.inner() * expected_filled_shares.inner()
-            / input.requested_shares.inner(),
+        full_fill_accrual_usd.inner() * expected_filled_shares.inner() / requested_shares.inner(),
     ));
     let objective_status = match terms {
         EntryMakerRebateTerms::PassiveNoProgram { .. } => MakerRebateObjectiveStatus::NoProgram,
@@ -1883,4 +1965,78 @@ fn nominal_capital_hours(
     Ok(UsdHours::new(quantize_venue_amount(
         weighted_hours / Decimal::from(DISTRIBUTION_MASS_BPS),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use quant_pivot_models::{
+        domain::{
+            market::{book::BookLevel, fee::BuilderFeeAttribution},
+            order::PolymarketOrderRules,
+        },
+        enums::{
+            common::{MarketCategory, TickSize},
+            quant::{FillRequirement, OutcomeSide},
+        },
+        runtime_config::BuyModelRoute,
+        types::{
+            Bps, ContentHash, EventId, MarketId, Price, ReportRouteRunId, Shares,
+            SignalCandidateId, TokenId, Usd,
+        },
+    };
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
+    use super::{ExecutableCashTierSeedFactory, ExecutableCashTierSeedInput, TierSeedBuild};
+    use crate::execution_semantics::PitFeeSchedule;
+
+    #[test]
+    fn cash_tier_enforces_minimum() {
+        let now = Utc::now();
+        let level =
+            BookLevel::from_decimal(Price::new(dec!(0.5)), Shares::new(dec!(100))).expect("level");
+        let levels = [level];
+        let fees = PitFeeSchedule {
+            schedule_hash: ContentHash::from_bytes([1; 32]),
+            effective_at: now,
+            available_at: now,
+            platform_rate: Decimal::ZERO,
+            exponent: Decimal::ONE,
+            taker_only: true,
+            builder_maker_fee_bps: Bps::ZERO,
+            builder_taker_fee_bps: Bps::ZERO,
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+        };
+        let result = ExecutableCashTierSeedFactory::build(ExecutableCashTierSeedInput {
+            report_route_run_id: ReportRouteRunId::from_v7(),
+            candidate_id: SignalCandidateId::from_v7(),
+            tier_ordinal: 1,
+            route: BuyModelRoute::Pooled,
+            market_id: MarketId::new("market"),
+            event_id: EventId::new("event"),
+            category: MarketCategory::Crypto,
+            token_id: TokenId::new("token"),
+            outcome_side: OutcomeSide::Yes,
+            bids: &levels,
+            asks: &levels,
+            fee_schedule: &fees,
+            fill_at: now,
+            limit_price: Price::new(dec!(0.5)),
+            cash_budget: Usd::new(dec!(2)),
+            fill_requirement: FillRequirement::AllowPartial,
+            order_rules: PolymarketOrderRules::new(TickSize::Hundredth, Shares::new(dec!(5)))
+                .expect("rules"),
+            source_lineage_hash: ContentHash::from_bytes([2; 32]),
+        })
+        .expect("tier result");
+
+        assert_eq!(
+            result,
+            TierSeedBuild::BelowMinimum {
+                requested: Shares::new(dec!(4)),
+                minimum: Shares::new(dec!(5)),
+            }
+        );
+    }
 }

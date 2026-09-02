@@ -236,10 +236,10 @@ impl MenuTree {
             &dashboard,
             &[
                 ActionSpec {
-                    name: "system:switch_mode",
-                    title: "page.menu.action.switchRuntimeMode",
+                    name: "system:update_runtime_control",
+                    title: "page.menu.action.updateRuntimeControl",
                     resource: ResourceType::System,
-                    operation: Operation::SwitchMode,
+                    operation: Operation::UpdateRuntimeControl,
                 },
                 ActionSpec {
                     name: "system:halt",
@@ -793,7 +793,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
         for expected in [
-            "system:switch_mode",
+            "system:update_runtime_control",
             "system:halt",
             "system:resume",
             "system:emergency",

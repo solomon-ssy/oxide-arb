@@ -684,11 +684,47 @@ pub async fn persist_recipe_plan_fixture(
     family: &FeedbackCandidateFamily,
     event_sequence: i64,
 ) {
+    assert!(
+        cycles
+            .find_cycles(&[])
+            .await
+            .expect("empty feedback-cycle batch")
+            .is_empty()
+    );
+    assert!(
+        cycles
+            .find_stage_events(&[])
+            .await
+            .expect("empty feedback-stage batch")
+            .is_empty()
+    );
+    assert!(
+        jobs.find_by_ids(&[])
+            .await
+            .expect("empty research-job batch")
+            .is_empty()
+    );
     let fixture = RecipePlanFixture::prepare(cycles, cycle, family).await;
     let artifact_ref = fixture.persist(store).await;
     fixture
         .record(cycles, jobs, lease, cycle, event_sequence, artifact_ref)
         .await;
+    assert_eq!(
+        cycles
+            .find_cycles(&[cycle.feedback_cycle_id])
+            .await
+            .expect("batch-read RecipePlan source cycle")
+            .len(),
+        1
+    );
+    assert!(
+        cycles
+            .find_stage_events(&[cycle.feedback_cycle_id])
+            .await
+            .expect("batch-read RecipePlan stage evidence")
+            .iter()
+            .any(|event| event.stage == FeedbackStage::RecipePlan)
+    );
 }
 
 pub fn content_hash(seed: char) -> ContentHash {

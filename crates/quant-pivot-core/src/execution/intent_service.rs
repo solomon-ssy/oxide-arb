@@ -199,7 +199,7 @@ impl CoreOrderIntentService {
             })?;
         if profile.spec.serving_authority != ServingAuthority::ExecutionEligible {
             return Err(ExecutionError::IntentDenied {
-                reason: "recommendation model authority is report-only and cannot create an order intent"
+                reason: "recommendation model authority is analysis-only and cannot create an order intent"
                     .to_owned(),
             }
             .into());
@@ -207,7 +207,7 @@ impl CoreOrderIntentService {
         require_frozen_trade_policy(self.trade_policies.as_ref(), &version, recommendation).await
     }
 
-    /// Create an intent from a recommendation at `now` (mode-gated, atomic with
+    /// Create an intent from a recommendation at `now` (authorization-gated, atomic with
     /// the capital reservation).
     pub async fn create_at(
         &self,
@@ -371,7 +371,7 @@ impl CoreOrderIntentService {
     }
 
     /// Approve a pending intent at `now`: in-transaction invalidation re-check
-    /// (fail closed), apply any operator downscale, transition to `Approved`.
+    /// (fail closed), apply any operator downscale, transition to `Authorized`.
     pub async fn approve_at(
         &self,
         command: ApproveIntentCommand,
@@ -634,7 +634,7 @@ async fn recheck_return_model_calibrated(
     Ok(())
 }
 
-/// Resolved per-mode intent fields produced by the mode gate decision.
+/// Intent fields resolved from the current authorization policy and frozen ceiling.
 struct ResolvedPolicy {
     status: OrderIntentStatus,
     authorization_kind: Option<AuthorizationKind>,
@@ -653,7 +653,7 @@ struct ComposeCreateRowsInput<'a> {
     execution_account_id: ExecutionAccountId,
 }
 
-fn authorization_label(intent: &OrderIntentInfo) -> &'static str {
+const fn authorization_label(intent: &OrderIntentInfo) -> &'static str {
     match intent.authorization_kind {
         Some(AuthorizationKind::ActivePolicy) => "active_policy",
         Some(AuthorizationKind::OperatorApproval) | None => "operator_approval",
@@ -1606,14 +1606,16 @@ mod tests {
             types::{
                 CalibrationArtifactId, FactorDefinitionId, ModelRunId, ModelSpecId, ModelVersionId,
                 PayoutRatio, Probability,
-                calibration::{MonotoneMapping, ReliabilityReport, SplitPayoutRateEvidence},
+                calibration::{
+                    IsotonicKnot, MonotoneMapping, ReliabilityReport, SplitPayoutRateEvidence,
+                },
             },
         };
         use quant_pivot_repository::traits::ModelRegistryRepository;
         use quant_pivot_research::{
             artifact::{ArtifactStore, LocalArtifactStore},
             model::{
-                CalibratedReturnModel, CalibrationArtifactLoader, ModelArtifact,
+                CalibratedReturnModel, CalibrationArtifactLoader, CancellationProbe, ModelArtifact,
                 ResolvedCalibration, ReturnModelSpec,
             },
         };
@@ -1713,17 +1715,22 @@ mod tests {
                 artifact_id: &CalibrationArtifactId,
             ) -> QuantResult<ResolvedCalibration> {
                 if self.succeeds {
-                    Ok(ResolvedCalibration {
-                        artifact_id: *artifact_id,
-                        mapping: MonotoneMapping::Isotonic { knots: Vec::new() },
-                        reliability: ReliabilityReport {
+                    ResolvedCalibration::try_new(
+                        *artifact_id,
+                        MonotoneMapping::Isotonic {
+                            knots: vec![IsotonicKnot {
+                                score: Decimal::ZERO,
+                                probability: Decimal::new(5, 1),
+                            }],
+                        },
+                        ReliabilityReport {
                             bins: Vec::new(),
                             brier_score: Decimal::ZERO,
                             log_loss: Decimal::ZERO,
                             ece: Decimal::ZERO,
                             n_samples: 0,
                         },
-                        split_payout_rate: SplitPayoutRateEvidence {
+                        SplitPayoutRateEvidence {
                             total_sample_count: 1,
                             split_sample_count: 0,
                             empirical_probability: Probability::ZERO,
@@ -1731,7 +1738,8 @@ mod tests {
                             split_payout_ratio: PayoutRatio::try_new(Decimal::new(5, 1))
                                 .expect("canonical split payout"),
                         },
-                    })
+                        &CancellationProbe::default(),
+                    )
                 } else {
                     Err(QuantError::from(ResearchError::DatasetBuild {
                         detail: "calibrator deactivated after report build (test)".to_owned(),

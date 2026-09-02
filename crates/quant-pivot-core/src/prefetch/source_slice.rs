@@ -8,6 +8,9 @@ use std::{
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use quant_pivot_compute::{
+    ComputeExecutor, OFFLINE_MEMORY_BYTES, OfflineMemory, OfflineMemoryLease,
+};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
@@ -59,6 +62,7 @@ use super::historical_window::{HistoricalWindowLoader, Prefetched, ReplaySample,
 
 /// Dependencies used by the single server-owned source materializer.
 pub struct SourceSliceMaterializerDeps {
+    pub compute: Arc<ComputeExecutor>,
     pub facts: Arc<dyn QuantFactReadRepository>,
     pub catalog: Arc<dyn CatalogLedgerRepository>,
     pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
@@ -72,8 +76,37 @@ pub struct SourceSliceMaterializerDeps {
 /// Materializes raw, immutable facts before Dataset/Fit/Validate may run.
 pub struct SourceSliceMaterializer {
     deps: SourceSliceMaterializerDeps,
+    codec: SourceSliceCodecExecutor,
     domain: DomainConfig,
     max_book_staleness: Duration,
+}
+
+struct SourceSliceCodecExecutor {
+    compute: Arc<ComputeExecutor>,
+}
+
+struct EncodedSourceSliceObject {
+    proof: SourceSliceObjectProof,
+    records: Vec<SourceSliceRecord>,
+    bytes: Vec<u8>,
+}
+
+struct VerifiedSourceSliceObject {
+    proof: SourceSliceObjectProof,
+    records: Vec<SourceSliceRecord>,
+}
+
+#[derive(Clone)]
+struct SourceSliceObjectProof {
+    kind: SourceSliceObjectKind,
+    byte_hash: ContentHash,
+    schema_hash: ContentHash,
+    row_count: u64,
+    min_event_at: Option<DateTime<Utc>>,
+    max_event_at: Option<DateTime<Utc>>,
+    min_available_at: Option<DateTime<Utc>>,
+    max_available_at: Option<DateTime<Utc>>,
+    pit_cutoff: DateTime<Utc>,
 }
 
 /// Fully verified immutable inputs. Consumers receive owned in-memory facts and
@@ -144,18 +177,26 @@ impl SourceSliceInputs {
 /// Strict reader for the current Parquet envelope and immutable object bindings.
 pub struct SourceSliceReader {
     artifacts: Arc<dyn ArtifactStore>,
+    codec: SourceSliceCodecExecutor,
 }
 
 impl SourceSliceReader {
     #[must_use]
-    pub const fn new(artifacts: Arc<dyn ArtifactStore>) -> Self {
-        Self { artifacts }
+    pub const fn new(artifacts: Arc<dyn ArtifactStore>, compute: Arc<ComputeExecutor>) -> Self {
+        Self {
+            artifacts,
+            codec: SourceSliceCodecExecutor { compute },
+        }
     }
 
-    pub async fn read(&self, source_slice: &SourceSliceInfo) -> QuantResult<FrozenSourceSlice> {
+    pub async fn read(
+        &self,
+        source_slice: &SourceSliceInfo,
+        cancel: &CancellationToken,
+    ) -> QuantResult<FrozenSourceSlice> {
         let manifest = self.read_manifest(source_slice).await?;
-        let records = self.read_objects(&manifest).await?;
-        decode_frozen_source_slice(&manifest, records)
+        let records = self.read_objects(&manifest, cancel, None).await?;
+        self.codec.freeze(manifest, records, cancel, None).await
     }
 
     /// Independently verify and read a Dataset-bound Source Slice reference.
@@ -167,10 +208,27 @@ impl SourceSliceReader {
     pub async fn read_ref(
         &self,
         source_slice: &SourceSliceManifestRef,
+        cancel: &CancellationToken,
     ) -> QuantResult<FrozenSourceSlice> {
         let manifest = self.read_manifest_artifact(source_slice).await?;
-        let records = self.read_objects(&manifest).await?;
-        decode_frozen_source_slice(&manifest, records)
+        let records = self.read_objects(&manifest, cancel, None).await?;
+        self.codec.freeze(manifest, records, cancel, None).await
+    }
+
+    /// Read a Dataset-bound Source Slice under an existing offline-memory lease.
+    pub async fn read_ref_leased(
+        &self,
+        source_slice: &SourceSliceManifestRef,
+        cancel: &CancellationToken,
+        memory_lease: &OfflineMemoryLease,
+    ) -> QuantResult<FrozenSourceSlice> {
+        let manifest = self.read_manifest_artifact(source_slice).await?;
+        let records = self
+            .read_objects(&manifest, cancel, Some(memory_lease))
+            .await?;
+        self.codec
+            .freeze(manifest, records, cancel, Some(memory_lease))
+            .await
     }
 
     /// Verify the immutable manifest binding without materializing its fact
@@ -283,19 +341,12 @@ impl SourceSliceReader {
     async fn read_objects(
         &self,
         manifest: &SourceSliceManifest,
+        cancel: &CancellationToken,
+        memory_lease: Option<&OfflineMemoryLease>,
     ) -> QuantResult<SourceRecordsByKind> {
         let mut by_kind = SourceRecordsByKind::new();
         for object in &manifest.objects {
-            let expected_schema = CanonicalDigest::content_hash_json(&(
-                "source_slice_parquet_envelope_v2",
-                object.kind,
-            ))?;
-            if object.schema_hash != expected_schema {
-                return Err(ResearchError::DatasetBuild {
-                    detail: format!("Source Slice object {:?} schema hash mismatch", object.kind),
-                }
-                .into());
-            }
+            ensure_not_cancelled(cancel, "before Source Slice object read")?;
             let metadata = self.artifacts.metadata(&object.uri).await?;
             if metadata.durability.remote && !metadata.durability.permits_production_publish() {
                 return Err(ResearchError::DatasetBuild {
@@ -316,40 +367,207 @@ impl SourceSliceReader {
                 .into());
             }
             let bytes = self.artifacts.get(&object.uri).await?;
+            let verified = self
+                .codec
+                .verify(
+                    SourceSliceObjectProof::from_ref(object, manifest.pit_cutoff),
+                    bytes,
+                    None,
+                    cancel,
+                    memory_lease,
+                )
+                .await?;
+            by_kind
+                .entry(verified.proof.kind)
+                .or_default()
+                .extend(verified.records);
+        }
+        Ok(by_kind)
+    }
+}
+
+impl SourceSliceCodecExecutor {
+    async fn encode(
+        &self,
+        kind: SourceSliceObjectKind,
+        pit_cutoff: DateTime<Utc>,
+        records: Vec<SourceSliceRecord>,
+        cancel: &CancellationToken,
+    ) -> QuantResult<EncodedSourceSliceObject> {
+        let kernel_cancel = cancel.clone();
+        self.compute
+            .run_offline_cancellable(
+                OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES)?,
+                cancel,
+                move || {
+                    ensure_not_cancelled(&kernel_cancel, "before Source Slice object encode")?;
+                    let bytes = SourceSliceParquetCodec::encode(&records)?;
+                    let proof = SourceSliceObjectProof::from_rows(
+                        kind,
+                        pit_cutoff,
+                        CanonicalDigest::content_hash_bytes(&bytes),
+                        &records,
+                    )?;
+                    ensure_not_cancelled(&kernel_cancel, "after Source Slice object encode")?;
+                    Ok(EncodedSourceSliceObject {
+                        proof,
+                        records,
+                        bytes,
+                    })
+                },
+            )
+            .await
+    }
+
+    async fn verify(
+        &self,
+        proof: SourceSliceObjectProof,
+        bytes: Vec<u8>,
+        expected: Option<Vec<SourceSliceRecord>>,
+        cancel: &CancellationToken,
+        memory_lease: Option<&OfflineMemoryLease>,
+    ) -> QuantResult<VerifiedSourceSliceObject> {
+        let kernel_cancel = cancel.clone();
+        let work = move || {
+            ensure_not_cancelled(&kernel_cancel, "before Source Slice object verification")?;
             let actual_hash = CanonicalDigest::content_hash_bytes(&bytes);
-            if actual_hash != object.byte_hash {
+            if actual_hash != proof.byte_hash {
                 return Err(ResearchError::ArtifactHashMismatch {
-                    expected: object.byte_hash.to_string(),
+                    expected: proof.byte_hash.to_string(),
                     actual: actual_hash.to_string(),
                 }
                 .into());
             }
-            let rows = SourceSliceParquetCodec::decode(&bytes)?;
-            let actual_count =
-                u64::try_from(rows.len()).map_err(|error| ResearchError::DatasetBuild {
-                    detail: error.to_string(),
-                })?;
-            if actual_count != object.row_count
-                || rows.iter().filter_map(|row| row.event_at).min() != object.min_event_at
-                || rows.iter().filter_map(|row| row.event_at).max() != object.max_event_at
-                || rows.iter().filter_map(|row| row.available_at).min() != object.min_available_at
-                || rows.iter().filter_map(|row| row.available_at).max() != object.max_available_at
-                || rows.iter().any(|row| {
-                    row.available_at
-                        .is_some_and(|available| available > manifest.pit_cutoff)
-                })
+            let records = SourceSliceParquetCodec::decode(&bytes)?;
+            proof.verify_rows(&records)?;
+            if expected
+                .as_ref()
+                .is_some_and(|expected| expected != &records)
             {
                 return Err(ResearchError::DatasetBuild {
                     detail: format!(
-                        "Source Slice object {:?} row/time evidence does not verify",
-                        object.kind
+                        "Source Slice object {:?} changed during persistence",
+                        proof.kind
                     ),
                 }
                 .into());
             }
-            by_kind.entry(object.kind).or_default().extend(rows);
+            ensure_not_cancelled(&kernel_cancel, "after Source Slice object verification")?;
+            Ok(VerifiedSourceSliceObject { proof, records })
+        };
+        if let Some(memory_lease) = memory_lease {
+            self.compute
+                .run_leased_cancellable(memory_lease, cancel, work)
+                .await
+        } else {
+            self.compute
+                .run_offline_cancellable(
+                    OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES)?,
+                    cancel,
+                    work,
+                )
+                .await
         }
-        Ok(by_kind)
+    }
+
+    async fn freeze(
+        &self,
+        manifest: SourceSliceManifest,
+        records: SourceRecordsByKind,
+        cancel: &CancellationToken,
+        memory_lease: Option<&OfflineMemoryLease>,
+    ) -> QuantResult<FrozenSourceSlice> {
+        let kernel_cancel = cancel.clone();
+        let work = move || {
+            ensure_not_cancelled(&kernel_cancel, "before Source Slice freeze decode")?;
+            let frozen = decode_frozen_source_slice(&manifest, records)?;
+            ensure_not_cancelled(&kernel_cancel, "after Source Slice freeze decode")?;
+            Ok(frozen)
+        };
+        if let Some(memory_lease) = memory_lease {
+            self.compute
+                .run_leased_cancellable(memory_lease, cancel, work)
+                .await
+        } else {
+            self.compute
+                .run_offline_cancellable(
+                    OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES)?,
+                    cancel,
+                    work,
+                )
+                .await
+        }
+    }
+}
+
+impl SourceSliceObjectProof {
+    fn from_rows(
+        kind: SourceSliceObjectKind,
+        pit_cutoff: DateTime<Utc>,
+        byte_hash: ContentHash,
+        records: &[SourceSliceRecord],
+    ) -> QuantResult<Self> {
+        if records.iter().any(|row| {
+            row.available_at
+                .is_some_and(|available| available > pit_cutoff)
+        }) {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!("Source Slice object {kind:?} contains facts after its PIT cutoff"),
+            }
+            .into());
+        }
+        Ok(Self {
+            kind,
+            byte_hash,
+            schema_hash: CanonicalDigest::content_hash_json(&(
+                "source_slice_parquet_envelope_v2",
+                kind,
+            ))?,
+            row_count: u64::try_from(records.len()).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: error.to_string(),
+                }
+            })?,
+            min_event_at: records.iter().filter_map(|row| row.event_at).min(),
+            max_event_at: records.iter().filter_map(|row| row.event_at).max(),
+            min_available_at: records.iter().filter_map(|row| row.available_at).min(),
+            max_available_at: records.iter().filter_map(|row| row.available_at).max(),
+            pit_cutoff,
+        })
+    }
+
+    const fn from_ref(object: &SourceSliceObjectRef, pit_cutoff: DateTime<Utc>) -> Self {
+        Self {
+            kind: object.kind,
+            byte_hash: object.byte_hash,
+            schema_hash: object.schema_hash,
+            row_count: object.row_count,
+            min_event_at: object.min_event_at,
+            max_event_at: object.max_event_at,
+            min_available_at: object.min_available_at,
+            max_available_at: object.max_available_at,
+            pit_cutoff,
+        }
+    }
+
+    fn verify_rows(&self, rows: &[SourceSliceRecord]) -> QuantResult<()> {
+        let actual = Self::from_rows(self.kind, self.pit_cutoff, self.byte_hash, rows)?;
+        if actual.row_count != self.row_count
+            || actual.schema_hash != self.schema_hash
+            || actual.min_event_at != self.min_event_at
+            || actual.max_event_at != self.max_event_at
+            || actual.min_available_at != self.min_available_at
+            || actual.max_available_at != self.max_available_at
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "Source Slice object {:?} row/time evidence does not verify",
+                    self.kind
+                ),
+            }
+            .into());
+        }
+        Ok(())
     }
 }
 
@@ -476,13 +694,17 @@ fn decode_frozen_source_slice(
 
 impl SourceSliceMaterializer {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         deps: SourceSliceMaterializerDeps,
         domain: DomainConfig,
         max_book_staleness: Duration,
     ) -> Self {
+        let codec = SourceSliceCodecExecutor {
+            compute: Arc::clone(&deps.compute),
+        };
         Self {
             deps,
+            codec,
             domain,
             max_book_staleness,
         }
@@ -558,8 +780,13 @@ impl SourceSliceMaterializer {
             .into());
         }
         let inputs = self.load_inputs(identity, profile, cancel).await?;
-        let mut objects = self.write_platform_objects(&inputs, profile).await?;
-        objects.extend(self.write_domain_objects(&inputs, profile).await?);
+        let mut objects = self
+            .write_platform_objects(&inputs, profile, identity.pit_cutoff, cancel)
+            .await?;
+        objects.extend(
+            self.write_domain_objects(&inputs, profile, identity.pit_cutoff, cancel)
+                .await?,
+        );
         objects.sort_by(|left, right| {
             (left.kind, left.uri.as_str()).cmp(&(right.kind, right.uri.as_str()))
         });
@@ -779,12 +1006,38 @@ impl SourceSliceMaterializer {
         &self,
         inputs: &SourceSliceInputs,
         profile: &ResearchProfileArtifact,
+        pit_cutoff: DateTime<Utc>,
+        cancel: &CancellationToken,
+    ) -> QuantResult<Vec<SourceSliceObjectRef>> {
+        let required = SourceSliceManifest::required_object_kinds(profile);
+        let mut objects = self
+            .write_catalog_objects(inputs, &required, pit_cutoff, cancel)
+            .await?;
+        objects.extend(
+            self.write_book_objects(inputs, &required, pit_cutoff, cancel)
+                .await?,
+        );
+        objects.extend(
+            self.write_execution_objects(inputs, &required, pit_cutoff, cancel)
+                .await?,
+        );
+        Ok(objects)
+    }
+
+    async fn write_catalog_objects(
+        &self,
+        inputs: &SourceSliceInputs,
+        required: &BTreeSet<SourceSliceObjectKind>,
+        pit_cutoff: DateTime<Utc>,
+        cancel: &CancellationToken,
     ) -> QuantResult<Vec<SourceSliceObjectRef>> {
         let prefetched = &inputs.prefetched;
-        let required = SourceSliceManifest::required_object_kinds(profile);
-        let mut objects = Vec::new();
+        let mut objects = Vec::with_capacity(4);
         if required.contains(&SourceSliceObjectKind::GammaMarketIdentity) {
-            objects.push(self.write_gamma_identity(inputs).await?);
+            objects.push(
+                self.write_gamma_identity(inputs, pit_cutoff, cancel)
+                    .await?,
+            );
         }
         if required.contains(&SourceSliceObjectKind::CatalogMarket) {
             objects.push(
@@ -795,6 +1048,8 @@ impl SourceSliceMaterializer {
                         |row| Some(row.source_effective_at),
                         |row| Some(row.available_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
@@ -808,6 +1063,8 @@ impl SourceSliceMaterializer {
                         |row| Some(row.source_effective_at),
                         |row| Some(row.available_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
@@ -821,10 +1078,24 @@ impl SourceSliceMaterializer {
                         |row| Some(row.effective_at),
                         |row| Some(row.available_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
         }
+        Ok(objects)
+    }
+
+    async fn write_book_objects(
+        &self,
+        inputs: &SourceSliceInputs,
+        required: &BTreeSet<SourceSliceObjectKind>,
+        pit_cutoff: DateTime<Utc>,
+        cancel: &CancellationToken,
+    ) -> QuantResult<Vec<SourceSliceObjectRef>> {
+        let prefetched = &inputs.prefetched;
+        let mut objects = Vec::with_capacity(4);
         if required.contains(&SourceSliceObjectKind::L2Ledger) {
             objects.push(
                 self.write_object(
@@ -834,6 +1105,8 @@ impl SourceSliceMaterializer {
                         |row| DateTime::from_timestamp_millis(row.venue_event_time),
                         |row| DateTime::from_timestamp_millis(row.persisted_time),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
@@ -847,14 +1120,21 @@ impl SourceSliceMaterializer {
                         |row| DateTime::from_timestamp_millis(row.opened_at),
                         |row| DateTime::from_timestamp_millis(row.recorded_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
         }
         if required.contains(&SourceSliceObjectKind::L2Gap) {
             objects.push(
-                self.write_object(SourceSliceObjectKind::L2Gap, inputs.gap_records.clone())
-                    .await?,
+                self.write_object(
+                    SourceSliceObjectKind::L2Gap,
+                    inputs.gap_records.clone(),
+                    pit_cutoff,
+                    cancel,
+                )
+                .await?,
             );
         }
         if required.contains(&SourceSliceObjectKind::BookMicrostructure) {
@@ -867,10 +1147,24 @@ impl SourceSliceMaterializer {
                         |row| DateTime::from_timestamp_millis(row.bucket_time),
                         |row| DateTime::from_timestamp_millis(row.available_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
         }
+        Ok(objects)
+    }
+
+    async fn write_execution_objects(
+        &self,
+        inputs: &SourceSliceInputs,
+        required: &BTreeSet<SourceSliceObjectKind>,
+        pit_cutoff: DateTime<Utc>,
+        cancel: &CancellationToken,
+    ) -> QuantResult<Vec<SourceSliceObjectRef>> {
+        let prefetched = &inputs.prefetched;
+        let mut objects = Vec::with_capacity(3);
         if required.contains(&SourceSliceObjectKind::MarketExecution) {
             objects.push(
                 self.write_object(
@@ -880,6 +1174,8 @@ impl SourceSliceMaterializer {
                         |row| DateTime::from_timestamp_millis(row.effective_at),
                         |row| DateTime::from_timestamp_millis(row.model_available_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
@@ -893,6 +1189,8 @@ impl SourceSliceMaterializer {
                         |row| DateTime::from_timestamp_millis(row.effective_at),
                         |row| DateTime::from_timestamp_millis(row.model_available_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
@@ -907,6 +1205,8 @@ impl SourceSliceMaterializer {
                         |row| DateTime::from_timestamp_millis(row.resolved_at),
                         |row| DateTime::from_timestamp_millis(row.observed_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
@@ -917,6 +1217,8 @@ impl SourceSliceMaterializer {
     async fn write_gamma_identity(
         &self,
         inputs: &SourceSliceInputs,
+        pit_cutoff: DateTime<Utc>,
+        cancel: &CancellationToken,
     ) -> QuantResult<SourceSliceObjectRef> {
         let identities = inputs
             .prefetched
@@ -942,6 +1244,8 @@ impl SourceSliceMaterializer {
                 |row| Some(row.event_at()),
                 |row| Some(row.available_at()),
             )?,
+            pit_cutoff,
+            cancel,
         )
         .await
     }
@@ -950,6 +1254,8 @@ impl SourceSliceMaterializer {
         &self,
         inputs: &SourceSliceInputs,
         profile: &ResearchProfileArtifact,
+        pit_cutoff: DateTime<Utc>,
+        cancel: &CancellationToken,
     ) -> QuantResult<Vec<SourceSliceObjectRef>> {
         let prefetched = &inputs.prefetched;
         let required = SourceSliceManifest::required_object_kinds(profile);
@@ -964,6 +1270,8 @@ impl SourceSliceMaterializer {
                         |row| Some(row.effective_at),
                         |row| Some(row.available_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
@@ -974,6 +1282,8 @@ impl SourceSliceMaterializer {
                 self.write_object(
                     SourceSliceObjectKind::DomainObservation,
                     records(&domain, |row| Some(row.observed_at), |row| row.available_at)?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
@@ -988,6 +1298,8 @@ impl SourceSliceMaterializer {
                         |row| Some(row.event_time),
                         |row| Some(row.available_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
@@ -1002,6 +1314,8 @@ impl SourceSliceMaterializer {
                         |row| Some(row.observed_at),
                         |row| Some(row.available_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
@@ -1016,6 +1330,8 @@ impl SourceSliceMaterializer {
                         |row| Some(row.valid_time),
                         |row| Some(row.available_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
@@ -1029,6 +1345,8 @@ impl SourceSliceMaterializer {
                         |row| Some(row.fit_window_end),
                         |row| Some(row.published_at),
                     )?,
+                    pit_cutoff,
+                    cancel,
                 )
                 .await?,
             );
@@ -1120,34 +1438,40 @@ impl SourceSliceMaterializer {
         &self,
         kind: SourceSliceObjectKind,
         records: Vec<SourceSliceRecord>,
+        pit_cutoff: DateTime<Utc>,
+        cancel: &CancellationToken,
     ) -> QuantResult<SourceSliceObjectRef> {
-        let bytes = SourceSliceParquetCodec::encode(&records)?;
-        let byte_hash = CanonicalDigest::content_hash_bytes(&bytes);
-        let (uri, object_version) = self.put_verified(&byte_hash, "parquet", &bytes).await?;
-        let decoded = SourceSliceParquetCodec::decode(&self.deps.artifacts.get(&uri).await?)?;
-        if decoded != records {
-            return Err(ResearchError::DatasetBuild {
-                detail: format!("Source Slice object {kind:?} changed during persistence"),
-            }
-            .into());
-        }
-        let schema_hash =
-            CanonicalDigest::content_hash_json(&("source_slice_parquet_envelope_v2", kind))?;
+        let encoded = self.codec.encode(kind, pit_cutoff, records, cancel).await?;
+        let proof = encoded.proof;
+        let records = encoded.records;
+        let bytes = encoded.bytes;
+        ensure_not_cancelled(cancel, "before Source Slice object persistence")?;
+        let (uri, object_version) = self
+            .put_verified(&proof.byte_hash, "parquet", &bytes)
+            .await?;
+        ensure_not_cancelled(cancel, "before Source Slice object read-back")?;
+        let verified = self
+            .codec
+            .verify(
+                proof,
+                self.deps.artifacts.get(&uri).await?,
+                Some(records),
+                cancel,
+                None,
+            )
+            .await?;
+        let proof = verified.proof;
         Ok(SourceSliceObjectRef {
-            kind,
+            kind: proof.kind,
             uri,
             object_version,
-            byte_hash,
-            schema_hash,
-            row_count: u64::try_from(records.len()).map_err(|error| {
-                ResearchError::DatasetBuild {
-                    detail: error.to_string(),
-                }
-            })?,
-            min_event_at: records.iter().filter_map(|row| row.event_at).min(),
-            max_event_at: records.iter().filter_map(|row| row.event_at).max(),
-            min_available_at: records.iter().filter_map(|row| row.available_at).min(),
-            max_available_at: records.iter().filter_map(|row| row.available_at).max(),
+            byte_hash: proof.byte_hash,
+            schema_hash: proof.schema_hash,
+            row_count: proof.row_count,
+            min_event_at: proof.min_event_at,
+            max_event_at: proof.max_event_at,
+            min_available_at: proof.min_available_at,
+            max_available_at: proof.max_available_at,
         })
     }
 
@@ -1653,7 +1977,8 @@ fn ensure_not_cancelled(cancel: &CancellationToken, stage: &'static str) -> Quan
 mod tests {
     use std::{collections::BTreeMap, env, path::Path, sync::Arc};
 
-    use chrono::{TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use quant_pivot_compute::ComputeExecutor;
     use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
     use quant_pivot_models::{
         clickhouse::{BookL2LedgerRow, ChDigest},
@@ -1675,9 +2000,12 @@ mod tests {
     use rust_decimal::Decimal;
     use serde::Deserialize;
     use serde_json::{json, to_value};
+    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
-    use super::{SourceSliceReader, decode_records, require_catalog_coverage};
+    use super::{
+        SourceSliceCodecExecutor, SourceSliceReader, decode_records, require_catalog_coverage,
+    };
 
     #[derive(Debug, PartialEq, Eq, Deserialize)]
     struct TypedSourceRecord {
@@ -1687,6 +2015,82 @@ mod tests {
 
     fn hash(byte: char) -> ContentHash {
         ContentHash::parse(&format!("blake3:{}", byte.to_string().repeat(64))).expect("hash")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn codec_respects_cancel() -> QuantResult<()> {
+        let codec = SourceSliceCodecExecutor {
+            compute: Arc::new(ComputeExecutor::new()?),
+        };
+        let records = vec![SourceSliceRecord {
+            record_key: "codec-roundtrip".to_owned(),
+            event_at: None,
+            available_at: None,
+            payload: json!({ "value": 7 }),
+        }];
+        let active = CancellationToken::new();
+        let pit_cutoff = Utc::now();
+        let encoded = codec
+            .encode(
+                SourceSliceObjectKind::CatalogMarket,
+                pit_cutoff,
+                records.clone(),
+                &active,
+            )
+            .await?;
+        assert_eq!(encoded.records, records);
+        let persisted_bytes = encoded.bytes.clone();
+        let verified = codec
+            .verify(
+                encoded.proof,
+                encoded.bytes,
+                Some(records.clone()),
+                &active,
+                None,
+            )
+            .await?;
+        assert_eq!(verified.records, records);
+        assert_eq!(verified.proof.kind, SourceSliceObjectKind::CatalogMarket);
+        let mut wrong_count = verified.proof.clone();
+        wrong_count.row_count = wrong_count.row_count.saturating_add(1);
+        assert!(
+            codec
+                .verify(wrong_count, persisted_bytes, None, &active, None)
+                .await
+                .is_err()
+        );
+        let future_record = SourceSliceRecord {
+            record_key: "future-record".to_owned(),
+            event_at: None,
+            available_at: pit_cutoff.checked_add_signed(ChronoDuration::seconds(1)),
+            payload: json!({ "value": 8 }),
+        };
+        assert!(
+            codec
+                .encode(
+                    SourceSliceObjectKind::CatalogMarket,
+                    pit_cutoff,
+                    vec![future_record],
+                    &active,
+                )
+                .await
+                .is_err()
+        );
+
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(
+            codec
+                .encode(
+                    SourceSliceObjectKind::CatalogMarket,
+                    pit_cutoff,
+                    records,
+                    &cancelled,
+                )
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 
     fn manifest(root: &Path) -> SourceSliceManifest {
@@ -1854,12 +2258,15 @@ mod tests {
             manifest_uri: uri,
             manifest_hash,
         };
-        let reader = SourceSliceReader::new(Arc::new(store));
+        let reader = SourceSliceReader::new(
+            Arc::new(store),
+            Arc::new(ComputeExecutor::new().expect("compute executor")),
+        );
         let verified = reader
             .verify_manifest_ref(&reference)
             .await
             .expect("verify manifest without source objects");
-        let full = reader.read_ref(&reference).await;
+        let full = reader.read_ref(&reference, &CancellationToken::new()).await;
         tokio::fs::remove_dir_all(&root)
             .await
             .expect("remove manifest fixture");

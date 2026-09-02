@@ -58,7 +58,7 @@ use crate::{
     prefetch::feature_window::FeatureWindowProvider,
     projection::inference_batch::build_runtime_input,
     service::{
-        model_serving_preimage::ModelServingPreimageService,
+        model_serving_preimage::{ModelPreimageReadContext, ModelServingPreimageService},
         signal_reinference::{ExitSignalReinferer, FreshSignal},
     },
 };
@@ -122,7 +122,10 @@ impl ModelBackedExitSignalReinferer {
         &self,
         version: &ModelVersionInfo,
     ) -> QuantResult<Option<Arc<dyn QuantModelRuntime>>> {
-        match self.deps.serving_preimages.load(version).await {
+        let context = ModelPreimageReadContext::default();
+        let source = self.deps.serving_preimages.load(version, &context).await;
+        drop(context);
+        match source {
             Ok(source) => match source.buy_runtime() {
                 Ok(runtime) => Ok(Some(runtime)),
                 Err(error) => {
@@ -276,22 +279,28 @@ impl LiveFeatureBuildRequest<'_> {
     async fn load_execution_history(
         &self,
         builder: &ConfiguredFeatureBuilder,
-    ) -> QuantResult<FinalizedExecutionWindowSnapshot> {
+    ) -> QuantResult<(DecisionBoundary, FinalizedExecutionWindowSnapshot)> {
         if !builder.needs_execution_history() {
-            return Ok(FinalizedExecutionWindowSnapshot::empty(
-                self.market.market_id.clone(),
-                self.boundary.decision_at(),
-                self.boundary.cutoff_for(DecisionSource::FinalizedExecution),
+            return Ok((
+                self.boundary.clone(),
+                FinalizedExecutionWindowSnapshot::empty(
+                    self.market.market_id.clone(),
+                    self.boundary.decision_at(),
+                    self.boundary.cutoff_for(DecisionSource::FinalizedExecution),
+                ),
             ));
         }
         if !self.finalized_exchange_history.enabled {
             let evidence = FinalizedExecutionEvidence::runtime(false, None, None);
-            return Ok(FinalizedExecutionWindowSnapshot::empty(
-                self.market.market_id.clone(),
-                self.boundary.decision_at(),
-                self.boundary.cutoff_for(DecisionSource::FinalizedExecution),
-            )
-            .with_source_evidence(evidence, false));
+            return Ok((
+                self.boundary.clone(),
+                FinalizedExecutionWindowSnapshot::empty(
+                    self.market.market_id.clone(),
+                    self.boundary.decision_at(),
+                    self.boundary.cutoff_for(DecisionSource::FinalizedExecution),
+                )
+                .with_source_evidence(evidence, false),
+            ));
         }
         let serving_head = self
             .exchange_history_repo
@@ -311,8 +320,12 @@ impl LiveFeatureBuildRequest<'_> {
             .await?;
         let accepted_block = u64::try_from(serving_head.seal.accepted_through_block).ok();
         let accepted_through_at = Some(serving_head.seal.effective_through_at);
+        let boundary = self.boundary.clone().with_source_watermark(
+            DecisionSource::FinalizedExecution,
+            serving_head.seal.effective_through_at,
+        )?;
         let source_available = accepted_through_at.is_some_and(|through| {
-            through >= self.boundary.cutoff_for(DecisionSource::FinalizedExecution)
+            through >= boundary.cutoff_for(DecisionSource::FinalizedExecution)
         });
         let evidence =
             FinalizedExecutionEvidence::runtime(true, accepted_block, accepted_through_at);
@@ -321,14 +334,19 @@ impl LiveFeatureBuildRequest<'_> {
             .window_provider
             .load_execution_windows(
                 slice::from_ref(self.market),
-                self.boundary,
+                &boundary,
                 lookback,
                 &serving_head.chunks,
             )
             .await?;
         windows
             .remove(&self.market.market_id)
-            .map(|window| window.with_source_evidence(evidence, source_available))
+            .map(|window| {
+                (
+                    boundary,
+                    window.with_source_evidence(evidence, source_available),
+                )
+            })
             .ok_or_else(|| {
                 QuantError::config(format!(
                     "missing prefetched finalized-execution window for market {}",
@@ -634,12 +652,12 @@ pub(crate) async fn build_live_feature_vector(
         request.features,
     )
     .await?;
-    let execution_history = request.load_execution_history(&builder).await?;
+    let (boundary, execution_history) = request.load_execution_history(&builder).await?;
 
     let bundle = builder
         .resolve_inputs(
             request.market,
-            boundary,
+            &boundary,
             request.pit,
             FeatureSourceWindows {
                 microstructure: &window,
@@ -781,6 +799,7 @@ mod tests {
                 fee::MarketMakerRebateEvidence,
                 registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
             },
+            order::PolymarketOrderRules,
             quant::StrategyPositionLot,
         },
         enums::{
@@ -928,6 +947,9 @@ mod tests {
                 end_date: None,
                 created_at: Some(now - ChronoDuration::days(1)),
                 fee_schedule: None,
+                order_rules: Some(
+                    PolymarketOrderRules::new(TickSize::Hundredth, Shares::ONE).expect("rules"),
+                ),
                 maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
             },
             neg_risk_leg_set: NegRiskLegSet::empty(),

@@ -63,6 +63,12 @@ pub trait ResearchJobRepository: Send + Sync {
         job_id: &ResearchJobId,
     ) -> Result<Option<ResearchJobInfo>, StorageError>;
 
+    /// Load the requested immutable jobs in canonical identity order.
+    async fn find_by_ids(
+        &self,
+        job_ids: &[ResearchJobId],
+    ) -> Result<Vec<ResearchJobInfo>, StorageError>;
+
     /// Page the ledger for the operator catalog, newest (`created_at`) first.
     async fn page(
         &self,

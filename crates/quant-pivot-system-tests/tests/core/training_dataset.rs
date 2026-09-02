@@ -68,8 +68,9 @@ use quant_pivot_models::{
     },
     types::{
         ArtifactUri, BinanceSymbol, CatalogEventChangeId, CatalogEventObjectId,
-        CatalogMarketChangeId, CatalogMarketObjectId, CatalogSyncBatchId, ContentHash, CryptoAsset,
-        CryptoQuote, DatasetCoverage, DecisionPolicySnapshotId, DomainInstrumentKey,
+        CatalogMarketChangeId, CatalogMarketObjectId, CatalogSyncBatchId, ClobFeeDetails,
+        ClobMarketInfoVersion, ClobMarketInfoVersionId, ClobTokenDescriptor, ContentHash,
+        CryptoAsset, CryptoQuote, DatasetCoverage, DecisionPolicySnapshotId, DomainInstrumentKey,
         DomainSourceId, EventId, EvmBlockHash, EvmTransactionHash, MarketId, ModelInputContract,
         ModelSpecId, ModelTrainingContract, PayoutRatio, Price, Probability, ResearchProfileRef,
         ResolverVersion, SchemaVersion, Shares, TokenId, TrainingDatasetId, TrainingSampleSource,
@@ -84,8 +85,8 @@ use quant_pivot_repository::{
         PgTrainingDatasetRepository,
     },
     traits::{
-        CatalogLedgerRepository, MarketLinkageRepository, ModelRegistryRepository,
-        QuantFactReadRepository, TrainingDatasetRepository,
+        CatalogLedgerRepository, ClobMarketInfoRepository, MarketLinkageRepository,
+        ModelRegistryRepository, QuantFactReadRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -961,6 +962,53 @@ impl CatalogSeedContext {
             market_id: MarketId::new(MARKET_ID),
         }
     }
+
+    fn clob_market_info(&self) -> ClobMarketInfoVersion {
+        let tokens = vec![
+            ClobTokenDescriptor {
+                token_id: TokenId::new(YES_TOKEN),
+                outcome: "Yes".to_owned(),
+            },
+            ClobTokenDescriptor {
+                token_id: TokenId::new(NO_TOKEN),
+                outcome: "No".to_owned(),
+            },
+        ];
+        let raw_payload = serde_json::json!({
+            "c": self.market_id,
+            "t": [
+                { "t": YES_TOKEN, "o": "Yes" },
+                { "t": NO_TOKEN, "o": "No" }
+            ],
+            "mts": "0.01",
+            "mos": "1",
+            "nr": false,
+            "fd": { "r": "0", "e": 1, "to": true }
+        });
+        ClobMarketInfoVersion {
+            version_id: ClobMarketInfoVersionId::from_v7(),
+            market_id: self.market_id.clone(),
+            tokens,
+            tick_size: TickSize::Hundredth,
+            minimum_order_size: Shares::ONE,
+            neg_risk: false,
+            taker_order_delay_enabled: false,
+            minimum_order_age_secs: None,
+            blockaid_check_enabled: false,
+            fee_details: ClobFeeDetails {
+                rate: Decimal::ZERO,
+                exponent: 1,
+                taker_only: true,
+            },
+            builder_maker_fee_rate_bps: 0,
+            builder_taker_fee_rate_bps: 0,
+            effective_at: self.source_effective_at,
+            available_at: self.source_effective_at,
+            payload_hash: CanonicalDigest::content_hash_json(&raw_payload)
+                .expect("CLOB market-info payload hash"),
+            raw_payload,
+        }
+    }
 }
 
 fn catalog_fixture_hash(seed: char) -> ContentHash {
@@ -1140,6 +1188,10 @@ async fn seed_catalog_with_category(
         .commit(durable_catalog_commit(&context, category))
         .await
         .expect("seed durable catalog");
+    PgClobMarketInfoRepository::new(db.clone())
+        .insert_observation(context.clob_market_info())
+        .await
+        .expect("seed point-in-time CLOB order rules");
 
     MarketEntity::update_many()
         .col_expr(

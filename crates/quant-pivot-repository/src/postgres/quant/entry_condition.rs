@@ -4,14 +4,19 @@ use chrono::{DateTime, NaiveDate, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{ChSchemaVersion, EntryConditionEvaluationEventRow},
-    domain::quant::{
-        ApplyEntryConditionEvaluation, ApplyEntryConditionEvaluationOutcome,
-        CryptoPriceProjectionInfo, EntryConditionArtifactInfo, EntryConditionAuditInfo,
-        EntryConditionClaim, EntryConditionInstanceInfo, NewEntryConditionArtifact,
-        NewEntryConditionAudit, NewEntryConditionInstance, WeatherDailyTemperatureProjectionInfo,
+    domain::{
+        data_plane::DomainSourceCursorInfo,
+        quant::{
+            ApplyEntryConditionEvaluation, ApplyEntryConditionEvaluationOutcome,
+            CryptoPriceProjectionInfo, EntryConditionArtifactInfo, EntryConditionAuditInfo,
+            EntryConditionClaim, EntryConditionInstanceInfo, NewEntryConditionArtifact,
+            NewEntryConditionAudit, NewEntryConditionInstance,
+            WeatherDailyTemperatureProjectionInfo,
+        },
     },
     entities::{
         quant_crypto_price_projection::Entity as QuantCryptoPriceProjectionEntity,
+        quant_domain_source_cursor::Entity as QuantDomainSourceCursorEntity,
         quant_entry_condition_artifact::{Column, Entity},
         quant_entry_condition_audit::{
             Column as QuantEntryConditionAuditColumn, Entity as QuantEntryConditionAuditEntity,
@@ -185,33 +190,73 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         source_id: &DomainSourceId,
         instrument_key: &DomainInstrumentKey,
     ) -> Result<Option<CryptoPriceProjectionInfo>, StorageError> {
-        QuantCryptoPriceProjectionEntity::find_by_id((source_id.clone(), instrument_key.clone()))
-            .one(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .and_then(|row| {
-                row.map(|row| {
-                    let source_sequence = u64::try_from(row.source_sequence).map_err(|error| {
-                        invariant(
-                            "quant_crypto_price_projection",
-                            format!("source_sequence: {error}"),
-                        )
-                    })?;
-                    Ok(CryptoPriceProjectionInfo {
-                        source_id: row.source_id,
-                        instrument_key: row.instrument_key,
-                        previous_price: row.previous_price,
-                        current_price: row.current_price,
-                        source_sequence,
-                        event_time: row.event_time,
-                        available_at: row.available_at,
-                        report_hash: row.report_hash,
-                        gap_generation: row.gap_generation,
-                        source_healthy: row.source_healthy,
-                    })
-                })
-                .transpose()
-            })
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let row = QuantCryptoPriceProjectionEntity::find_by_id((
+            source_id.clone(),
+            instrument_key.clone(),
+        ))
+        .lock_shared()
+        .one(&txn)
+        .await
+        .map_err(StorageError::from)?;
+        let Some(row) = row else {
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(None);
+        };
+        let cursor =
+            QuantDomainSourceCursorEntity::find_by_id((source_id.clone(), instrument_key.clone()))
+                .lock_shared()
+                .one(&txn)
+                .await
+                .map_err(StorageError::from)?
+                .ok_or_else(|| {
+                    invariant(
+                        "quant_crypto_price_projection",
+                        "Crypto projection has no committed cursor",
+                    )
+                })?;
+        let cursor_info: DomainSourceCursorInfo = cursor.into();
+        cursor_info.validate().map_err(|detail| {
+            invariant(
+                "quant_domain_source_cursor",
+                format!("committed Crypto cursor failed validation: {detail}"),
+            )
+        })?;
+        let source_sequence = u64::try_from(row.source_sequence).map_err(|error| {
+            invariant(
+                "quant_crypto_price_projection",
+                format!("source_sequence: {error}"),
+            )
+        })?;
+        cursor_info
+            .checkpoint_json
+            .validate_crypto_head(
+                &row.source_id,
+                source_sequence,
+                row.event_time,
+                row.report_hash,
+            )
+            .map_err(|error| {
+                invariant(
+                    "quant_crypto_price_projection",
+                    format!("committed Crypto frontier diverged: {error}"),
+                )
+            })?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(Some(CryptoPriceProjectionInfo {
+            source_id: row.source_id,
+            instrument_key: row.instrument_key,
+            previous_price: row.previous_price,
+            current_price: row.current_price,
+            source_sequence,
+            event_time: row.event_time,
+            available_at: row.available_at,
+            report_hash: row.report_hash,
+            gap_generation: row.gap_generation,
+            source_healthy: row.source_healthy,
+            committed_checkpoint: cursor_info.checkpoint_json,
+            committed_checkpoint_hash: cursor_info.checkpoint_hash,
+        }))
     }
 
     async fn find_weather_projection(

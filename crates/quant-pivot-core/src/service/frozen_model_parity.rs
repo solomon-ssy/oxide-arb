@@ -147,7 +147,7 @@ impl FrozenModelParityService {
                     matched_count: 0,
                     mismatched_count: 0,
                     pending_materialization_count: 0,
-                    feature_contract_hash: Some(*materialization.feature_schema_hash),
+                    feature_contract_hash: *materialization.feature_schema_hash,
                     transform_hash: None,
                     failure_code: None,
                     failure_detail: None,
@@ -203,7 +203,7 @@ impl FrozenModelParityService {
                     matched_count: total_count,
                     mismatched_count: 0,
                     pending_materialization_count: 0,
-                    feature_contract_hash: Some(proof.feature_contract_hash),
+                    feature_contract_hash: proof.feature_contract_hash,
                     transform_hash: Some(proof.transform_hash),
                     failure_code: None,
                     failure_detail: None,
@@ -473,7 +473,7 @@ impl FrozenModelParityService {
                     matched_count: 0,
                     mismatched_count: 1,
                     pending_materialization_count: 0,
-                    feature_contract_hash: Some(*feature_contract_hash),
+                    feature_contract_hash: *feature_contract_hash,
                     transform_hash: None,
                     failure_code: Some(DiagnosticCode::new("frozen_model_integrity")),
                     failure_detail: Some(error.to_string()),
@@ -813,7 +813,7 @@ pub(crate) fn validate_passed_parity(
         && run.matched_count == run.total_count
         && run.mismatched_count == 0
         && run.pending_materialization_count == 0
-        && run.feature_contract_hash == Some(dataset.feature_schema_hash)
+        && run.feature_contract_hash == dataset.feature_schema_hash
         && run.transform_hash.is_some()
         && run
             .finished_at
@@ -1130,7 +1130,7 @@ mod tests {
                 matched_count: 4,
                 mismatched_count: 0,
                 pending_materialization_count: 0,
-                feature_contract_hash: Some(self.feature_hash),
+                feature_contract_hash: self.feature_hash,
                 transform_hash: Some(hash('c')),
                 failure_code: None,
                 failure_detail: None,

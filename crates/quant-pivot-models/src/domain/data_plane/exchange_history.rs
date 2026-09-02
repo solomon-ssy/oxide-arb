@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::hashing::CanonicalDigestError;
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -389,9 +390,11 @@ pub struct NewExchangeHistoryChunk {
 }
 
 /// Exact accepted `ClickHouse` revision bound into either history seal family.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HistorySealChunkRef {
+    #[schemars(with = "String")]
     pub chunk_id: Uuid,
+    #[schemars(with = "String")]
     pub frontier: ExchangeHistoryFrontier,
     pub state_revision: i64,
     pub from_block: i64,
@@ -520,18 +523,7 @@ pub struct CreateHistoryServingHeadSeal {
 
 impl CreateHistoryServingHeadSeal {
     pub fn derive_hash(&self) -> Result<ContentHash, CanonicalDigestError> {
-        CanonicalDigest::content_hash_json(&(
-            "history_serving_head_seal_v1",
-            self.seal.serving_head_seal_id,
-            self.seal.plan_id,
-            self.seal.frontier,
-            self.seal.previous_seal_id,
-            self.seal.window_from_block,
-            self.seal.accepted_through_block,
-            self.seal.effective_through_at,
-            self.seal.policy_hash,
-            &self.chunks,
-        ))
+        ServingHeadHashPreimage::from(self).derive_hash()
     }
 }
 
@@ -539,6 +531,74 @@ impl CreateHistoryServingHeadSeal {
 pub struct HistoryServingHeadSeal {
     pub seal: HistoryServingHeadSealInfo,
     pub chunks: Vec<HistorySealChunkRef>,
+}
+
+impl HistoryServingHeadSeal {
+    /// Recompute the immutable content commitment from the loaded seal and chunk refs.
+    pub fn derive_hash(&self) -> Result<ContentHash, CanonicalDigestError> {
+        ServingHeadHashPreimage::from(self).derive_hash()
+    }
+}
+
+struct ServingHeadHashPreimage<'a> {
+    serving_head_seal_id: HistoryServingHeadSealId,
+    plan_id: Uuid,
+    frontier: ExchangeHistoryFrontier,
+    previous_seal_id: Option<HistoryServingHeadSealId>,
+    window_from_block: i64,
+    accepted_through_block: i64,
+    effective_through_at: DateTime<Utc>,
+    policy_hash: ContentHash,
+    chunks: &'a [HistorySealChunkRef],
+}
+
+impl<'a> From<&'a CreateHistoryServingHeadSeal> for ServingHeadHashPreimage<'a> {
+    fn from(value: &'a CreateHistoryServingHeadSeal) -> Self {
+        Self {
+            serving_head_seal_id: value.seal.serving_head_seal_id,
+            plan_id: value.seal.plan_id,
+            frontier: value.seal.frontier,
+            previous_seal_id: value.seal.previous_seal_id,
+            window_from_block: value.seal.window_from_block,
+            accepted_through_block: value.seal.accepted_through_block,
+            effective_through_at: value.seal.effective_through_at,
+            policy_hash: value.seal.policy_hash,
+            chunks: &value.chunks,
+        }
+    }
+}
+
+impl<'a> From<&'a HistoryServingHeadSeal> for ServingHeadHashPreimage<'a> {
+    fn from(value: &'a HistoryServingHeadSeal) -> Self {
+        Self {
+            serving_head_seal_id: value.seal.serving_head_seal_id,
+            plan_id: value.seal.plan_id,
+            frontier: value.seal.frontier,
+            previous_seal_id: value.seal.previous_seal_id,
+            window_from_block: value.seal.window_from_block,
+            accepted_through_block: value.seal.accepted_through_block,
+            effective_through_at: value.seal.effective_through_at,
+            policy_hash: value.seal.policy_hash,
+            chunks: &value.chunks,
+        }
+    }
+}
+
+impl ServingHeadHashPreimage<'_> {
+    fn derive_hash(&self) -> Result<ContentHash, CanonicalDigestError> {
+        CanonicalDigest::content_hash_json(&(
+            "history_serving_head_seal_v1",
+            self.serving_head_seal_id,
+            self.plan_id,
+            self.frontier,
+            self.previous_seal_id,
+            self.window_from_block,
+            self.accepted_through_block,
+            self.effective_through_at,
+            self.policy_hash,
+            self.chunks,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel)]
@@ -654,4 +714,108 @@ pub struct ExchangeHistoryQuarantineRecord {
     pub quarantine: ExchangeHistoryQuarantineInfo,
     pub chunk: ExchangeHistoryChunkInfo,
     pub resolution: Option<ExchangeHistoryQuarantineResolutionInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Duration};
+    use quant_pivot_error::hashing::CanonicalDigestError;
+    use uuid::Uuid;
+
+    use super::{
+        CreateHistoryServingHeadSeal, ExchangeHistoryFrontier, HistorySealChunkRef,
+        HistoryServingHeadSeal, HistoryServingHeadSealInfo, NewHistoryServingHeadSeal,
+    };
+    use crate::{hashing::CanonicalDigest, types::ContentHash};
+
+    struct ServingSealFixture {
+        command: CreateHistoryServingHeadSeal,
+        loaded: HistoryServingHeadSeal,
+    }
+
+    impl Default for ServingSealFixture {
+        fn default() -> Self {
+            let created_at = DateTime::from_timestamp_micros(1_700_000_000_123_456)
+                .expect("microsecond seal timestamp");
+            let command = CreateHistoryServingHeadSeal {
+                seal: NewHistoryServingHeadSeal {
+                    serving_head_seal_id: Uuid::from_u128(8).into(),
+                    seal_hash: ContentHash::from_bytes([0; 32]),
+                    plan_id: Uuid::from_u128(9),
+                    frontier: ExchangeHistoryFrontier::Activation,
+                    previous_seal_id: Some(Uuid::from_u128(7).into()),
+                    window_from_block: 100,
+                    accepted_through_block: 199,
+                    effective_through_at: created_at - Duration::seconds(10),
+                    policy_hash: ContentHash::from_bytes([3; 32]),
+                    created_at,
+                },
+                chunks: vec![HistorySealChunkRef {
+                    chunk_id: Uuid::from_u128(5),
+                    frontier: ExchangeHistoryFrontier::Activation,
+                    state_revision: 42,
+                    from_block: 100,
+                    to_block: 199,
+                }],
+            };
+            let seal = &command.seal;
+            let loaded = HistoryServingHeadSeal {
+                seal: HistoryServingHeadSealInfo {
+                    serving_head_seal_id: seal.serving_head_seal_id,
+                    seal_hash: seal.seal_hash,
+                    plan_id: seal.plan_id,
+                    frontier: seal.frontier,
+                    previous_seal_id: seal.previous_seal_id,
+                    window_from_block: seal.window_from_block,
+                    accepted_through_block: seal.accepted_through_block,
+                    effective_through_at: seal.effective_through_at,
+                    policy_hash: seal.policy_hash,
+                    created_at: seal.created_at,
+                },
+                chunks: command.chunks.clone(),
+            };
+            Self { command, loaded }
+        }
+    }
+
+    #[test]
+    fn creation_read_hash_agree() -> Result<(), CanonicalDigestError> {
+        let fixture = ServingSealFixture::default();
+        let seal = &fixture.command.seal;
+        // This tuple is the existing wire preimage, independent of the shared adapter.
+        let wire_hash = CanonicalDigest::content_hash_json(&(
+            "history_serving_head_seal_v1",
+            seal.serving_head_seal_id,
+            seal.plan_id,
+            seal.frontier,
+            seal.previous_seal_id,
+            seal.window_from_block,
+            seal.accepted_through_block,
+            seal.effective_through_at,
+            seal.policy_hash,
+            &fixture.command.chunks,
+        ))?;
+        assert_eq!(fixture.command.derive_hash()?, wire_hash);
+        assert_eq!(fixture.loaded.derive_hash()?, wire_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn loaded_metadata_binds_hash() -> Result<(), CanonicalDigestError> {
+        let mut fixture = ServingSealFixture::default();
+        let committed = fixture.command.derive_hash()?;
+        fixture.loaded.seal.seal_hash = committed;
+        let mut changed_time = fixture.loaded.clone();
+        changed_time.seal.effective_through_at += Duration::microseconds(1);
+        let mut changed_policy = fixture.loaded.clone();
+        changed_policy.seal.policy_hash = ContentHash::from_bytes([4; 32]);
+        let mut changed_chunk = fixture.loaded.clone();
+        changed_chunk.chunks[0].state_revision += 1;
+        for changed in [changed_time, changed_policy, changed_chunk] {
+            assert_eq!(changed.seal.seal_hash, committed);
+            assert_ne!(changed.derive_hash()?, committed);
+        }
+        assert_eq!(fixture.loaded.derive_hash()?, committed);
+        Ok(())
+    }
 }

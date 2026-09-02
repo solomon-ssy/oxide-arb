@@ -25,7 +25,7 @@ pub const SYSTEM_RUNTIME_CONTROL_SEED: SeedSpec = SeedSpec {
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::InsertIfAbsent,
-    checksum: "system_runtime_control.bootstrap.v1.report-only-disabled-closed",
+    checksum: "system_runtime_control.bootstrap.v1.operator-approval-required-disabled-closed",
     apply: load_boxed,
     hydrate: hydrate_boxed,
 };

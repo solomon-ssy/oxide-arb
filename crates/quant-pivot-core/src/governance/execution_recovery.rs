@@ -107,11 +107,11 @@ pub async fn build_execution_recovery_summary(
 ) -> QuantResult<ExecutionRecoverySummary> {
     let unresolvable_count = reconciliation.count_blocking_unresolvable().await?;
     let kill_switch_view = kill_switch.view();
-    let mode = runtime_controls.entry_authorization_policy();
+    let policy = runtime_controls.entry_authorization_policy();
     Ok(summary_from_parts(
         unresolvable_count,
         &kill_switch_view,
-        mode,
+        policy,
     ))
 }
 
@@ -122,9 +122,9 @@ pub async fn build_execution_recovery_view(
     runtime_controls: &RuntimeControlsHandle,
 ) -> QuantResult<ExecutionRecoveryView> {
     let kill_switch_view = kill_switch.view();
-    let mode = runtime_controls.entry_authorization_policy();
+    let policy = runtime_controls.entry_authorization_policy();
     let unresolvable_count = reconciliation.count_blocking_unresolvable().await?;
-    let summary = summary_from_parts(unresolvable_count, &kill_switch_view, mode);
+    let summary = summary_from_parts(unresolvable_count, &kill_switch_view, policy);
 
     let blocking_page = if unresolvable_count > 0 {
         reconciliation
@@ -153,11 +153,11 @@ pub async fn build_execution_recovery_view(
 fn summary_from_parts(
     unresolvable_count: u64,
     kill_switch: &KillSwitchView,
-    mode: EntryAuthorizationPolicy,
+    policy: EntryAuthorizationPolicy,
 ) -> ExecutionRecoverySummary {
     let has_unresolvable = unresolvable_count > 0;
     let kill_switch_requires_ack = kill_switch.requires_operator_ack;
-    let policy_automatic_blocked = mode == EntryAuthorizationPolicy::PolicyAutomatic
+    let policy_automatic_blocked = policy == EntryAuthorizationPolicy::PolicyAutomatic
         && (!kill_switch.state.allows_new_entry() || has_unresolvable || kill_switch_requires_ack);
 
     let mut next_steps = Vec::new();
@@ -167,7 +167,7 @@ fn summary_from_parts(
     if kill_switch_requires_ack {
         next_steps.push(ExecutionRecoveryStep::AcknowledgeKillSwitch);
     }
-    if mode == EntryAuthorizationPolicy::PolicyAutomatic
+    if policy == EntryAuthorizationPolicy::PolicyAutomatic
         && next_steps.is_empty()
         && policy_automatic_blocked
     {
@@ -179,7 +179,7 @@ fn summary_from_parts(
         unresolvable_count,
         kill_switch_requires_ack,
         kill_switch_state: kill_switch.state,
-        entry_authorization_policy: mode,
+        entry_authorization_policy: policy,
         policy_automatic_blocked,
         next_steps,
     }

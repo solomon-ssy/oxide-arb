@@ -2,35 +2,38 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::quant::{
-        AccountPauseConfirmation, AccountPauseDispatch, AccountPauseSubmissionInfo,
-        NewAccountPauseSubmission,
+        AccountPauseConfirmation, AccountPauseDispatch, AccountPauseOperationInfo,
+        NewAccountPauseOperation,
     },
-    types::{AccountPauseSubmissionId, AccountRecoveryIncidentId},
+    enums::execution::AccountPauseOperationKind,
+    types::{AccountPauseOperationId, AccountRecoveryIncidentId},
 };
 
 #[async_trait::async_trait]
-pub trait AccountPauseRepository: Send + Sync {
+pub trait AccountPauseOperationRepository: Send + Sync {
     async fn insert_prepared(
         &self,
-        submission: NewAccountPauseSubmission,
-    ) -> Result<AccountPauseSubmissionInfo, StorageError>;
+        submission: NewAccountPauseOperation,
+    ) -> Result<AccountPauseOperationInfo, StorageError>;
     async fn recoverable(
         &self,
         incident_id: &AccountRecoveryIncidentId,
-    ) -> Result<Vec<AccountPauseSubmissionInfo>, StorageError>;
+        operation_kind: AccountPauseOperationKind,
+    ) -> Result<Vec<AccountPauseOperationInfo>, StorageError>;
     async fn for_incident(
         &self,
         incident_id: &AccountRecoveryIncidentId,
-    ) -> Result<Vec<AccountPauseSubmissionInfo>, StorageError>;
+        operation_kind: AccountPauseOperationKind,
+    ) -> Result<Vec<AccountPauseOperationInfo>, StorageError>;
     async fn record_dispatch(
         &self,
-        submission_id: &AccountPauseSubmissionId,
+        submission_id: &AccountPauseOperationId,
         dispatch: AccountPauseDispatch,
         dispatched_at: DateTime<Utc>,
-    ) -> Result<AccountPauseSubmissionInfo, StorageError>;
+    ) -> Result<AccountPauseOperationInfo, StorageError>;
     async fn confirm(
         &self,
-        submission_id: &AccountPauseSubmissionId,
+        submission_id: &AccountPauseOperationId,
         confirmation: AccountPauseConfirmation,
-    ) -> Result<AccountPauseSubmissionInfo, StorageError>;
+    ) -> Result<AccountPauseOperationInfo, StorageError>;
 }

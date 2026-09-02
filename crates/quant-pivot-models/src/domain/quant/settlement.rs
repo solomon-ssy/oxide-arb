@@ -94,6 +94,16 @@ pub struct SettlementRedeemInfo {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Minimal deterministic settlement fact that blocks account-recovery sealing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementRecoveryBlocker {
+    pub settlement_redeem_id: SettlementRedeemId,
+    pub state: SettlementCaseState,
+    pub reconciliation_state: SettlementReconciliationState,
+    pub inventory_digest: ContentHash,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Insert payload for a newly discovered settlement case.
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_settlement_redeem::ActiveModel")]

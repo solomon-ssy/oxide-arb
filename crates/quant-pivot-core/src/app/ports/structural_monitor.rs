@@ -191,7 +191,7 @@ impl CoreStructuralMonitor {
             ),
         };
         let trigger_time = Utc::now();
-        let (boundary, lookback) = self.pit_boundary(trigger_time)?;
+        let (mut boundary, lookback) = self.pit_boundary(trigger_time)?;
         let selected = markets
             .iter()
             .map(|market| SelectedMarket {
@@ -217,6 +217,10 @@ impl CoreStructuralMonitor {
                         serving_head.seal.seal_hash,
                     )
                     .await?;
+                boundary = boundary.with_source_watermark(
+                    DecisionSource::FinalizedExecution,
+                    serving_head.seal.effective_through_at,
+                )?;
                 let windows = self
                     .feature_windows
                     .load_execution_windows(&selected, &boundary, lookback, &serving_head.chunks)

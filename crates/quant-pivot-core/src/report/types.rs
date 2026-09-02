@@ -11,9 +11,10 @@ use quant_pivot_models::{
     runtime_config::ReportDeliveryPolicy,
     types::{
         Bps, ContentHash, CorrelationId, EconomicTierId, MarketId, ModelRunId, ModelVersionId,
-        Price, RecommendationPolicyProvenance, RecommendationReportId, ReportRouteRunId,
-        ReportRunId, ReportScheduleId, ReportTriggerKey, ResearchFeatureContract,
-        ResearchProfileRef, SemanticTextError, TradePolicyCohort, TradePolicyCohortProvenance, Usd,
+        Price, RecommendationPolicyProvenance, RecommendationReportId, ReportFunnelDiagnostics,
+        ReportFunnelReason, ReportRouteRunId, ReportRunId, ReportScheduleId, ReportTriggerKey,
+        ResearchFeatureContract, ResearchProfileRef, SemanticTextError, Shares, TradePolicyCohort,
+        TradePolicyCohortProvenance, Usd,
     },
 };
 use quant_pivot_research::{
@@ -141,6 +142,34 @@ pub struct ReportTierRejection {
     pub economic_tier_id: EconomicTierId,
     pub market_id: MarketId,
     pub code: TierAdmissionRejectionCode,
+    pub diagnostics: Option<ReportFunnelDiagnostics>,
+}
+
+impl ReportTierRejection {
+    /// Enforce the one canonical diagnostics shape owned by the rejection code.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match (self.code, &self.diagnostics) {
+            (
+                TierAdmissionRejectionCode::ProfitProbabilityFloor,
+                Some(
+                    diagnostics @ ReportFunnelDiagnostics::ProfitProbabilityFloor {
+                        economic_tier_id,
+                        ..
+                    },
+                ),
+            ) if *economic_tier_id == self.economic_tier_id => {
+                diagnostics.validate_for(ReportFunnelReason::ProfitProbabilityBelowFloor)
+            }
+            (TierAdmissionRejectionCode::ProfitProbabilityFloor, Some(_)) => {
+                Err("probability rejection has mismatched diagnostics")
+            }
+            (TierAdmissionRejectionCode::ProfitProbabilityFloor, None) => {
+                Err("probability rejection has no diagnostics")
+            }
+            (_, None) => Ok(()),
+            (_, Some(_)) => Err("non-probability rejection has probability diagnostics"),
+        }
+    }
 }
 
 /// Typed reason why no executable economic tier could be built for a market.
@@ -152,6 +181,11 @@ pub enum EconomicTierBuildRejection {
     PassiveMakerRebateUnavailable {
         market_id: MarketId,
         reason: PitMakerRebateUnavailableReason,
+    },
+    BelowMinimumOrderSize {
+        market_id: MarketId,
+        requested: Shares,
+        minimum: Shares,
     },
     InsufficientLiveDepth {
         market_id: MarketId,
@@ -167,6 +201,7 @@ impl EconomicTierBuildRejection {
         match self {
             Self::ExecutionEconomicsUnavailable { market_id }
             | Self::PassiveMakerRebateUnavailable { market_id, .. }
+            | Self::BelowMinimumOrderSize { market_id, .. }
             | Self::InsufficientLiveDepth { market_id, .. } => market_id,
         }
     }

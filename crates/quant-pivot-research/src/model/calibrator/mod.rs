@@ -33,7 +33,10 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 
 use crate::{
-    model::{ReliabilitySample, artifact::ReturnEstimate, compute_reliability},
+    model::{
+        ReliabilitySample, artifact::ReturnEstimate, reliability::compute_reliability,
+        trainer::CancellationProbe,
+    },
     precision::RESEARCH_DECIMAL_SCALE,
     stats::{count_f64, wilson_interval, wilson_z},
 };
@@ -66,6 +69,7 @@ pub struct NestedCalibrationFitInput<'a> {
     pub policy: NestedCalibrationPolicy,
     pub fit_evidence_hash: ContentHash,
     pub validation_evidence_hash: ContentHash,
+    pub cancellation: CancellationProbe,
 }
 
 /// Content-addressed result of a purge/embargo-isolated calibration fit and
@@ -92,7 +96,9 @@ impl<'a> CalibrationPopulation<'a> {
     fn try_new(
         role: &'static str,
         observations: &'a [NestedCalibrationObservation],
+        cancellation: &CancellationProbe,
     ) -> QuantResult<Self> {
+        cancellation.check("nested calibration population start")?;
         if observations.is_empty() {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!("nested calibration {role} population is empty"),
@@ -104,23 +110,27 @@ impl<'a> CalibrationPopulation<'a> {
                 detail: format!("canonical split payout is invalid: {error}"),
             }
         })?;
-        if let Some(observation) = observations.iter().find(|observation| {
-            observation.token_payout_ratio != PayoutRatio::ZERO
+        let mut binary = Vec::with_capacity(observations.len());
+        for (index, observation) in observations.iter().enumerate() {
+            if index % 1_024 == 0 {
+                cancellation.check("nested calibration population scan")?;
+            }
+            if observation.token_payout_ratio != PayoutRatio::ZERO
                 && observation.token_payout_ratio != split
                 && observation.token_payout_ratio != PayoutRatio::ONE
-        }) {
-            return Err(ResearchError::ValidationMethodology {
-                detail: format!(
-                    "nested calibration {role} accepts only payout ratios 0, 0.5, or 1; got {}",
-                    observation.token_payout_ratio
-                ),
+            {
+                return Err(ResearchError::ValidationMethodology {
+                    detail: format!(
+                        "nested calibration {role} accepts only payout ratios 0, 0.5, or 1; got {}",
+                        observation.token_payout_ratio
+                    ),
+                }
+                .into());
             }
-            .into());
+            if observation.token_payout_ratio != split {
+                binary.push(observation);
+            }
         }
-        let binary = observations
-            .iter()
-            .filter(|observation| observation.token_payout_ratio != split)
-            .collect::<Vec<_>>();
         let binary_count =
             u64::try_from(binary.len()).map_err(|error| ResearchError::ValidationMethodology {
                 detail: format!("nested calibration {role} binary count does not fit u64: {error}"),
@@ -138,17 +148,19 @@ impl<'a> CalibrationPopulation<'a> {
             }
             .into());
         }
-        if let Some(observation) = binary
-            .iter()
-            .find(|observation| observation.max_adverse_excursion_bps.is_none())
-        {
-            return Err(ResearchError::ValidationMethodology {
-                detail: format!(
-                    "nested calibration {role} score {} has no frozen adverse-excursion evidence",
-                    observation.composite_score
-                ),
+        for (index, observation) in binary.iter().enumerate() {
+            if index % 1_024 == 0 {
+                cancellation.check("nested calibration downside scan")?;
             }
-            .into());
+            if observation.max_adverse_excursion_bps.is_none() {
+                return Err(ResearchError::ValidationMethodology {
+                    detail: format!(
+                        "nested calibration {role} score {} has no frozen adverse-excursion evidence",
+                        observation.composite_score
+                    ),
+                }
+                .into());
+            }
         }
         Ok(Self {
             split,
@@ -158,37 +170,47 @@ impl<'a> CalibrationPopulation<'a> {
         })
     }
 
-    fn scores(&self) -> Vec<Decimal> {
-        self.binary
-            .iter()
-            .map(|observation| observation.composite_score.inner())
-            .collect()
+    fn scores(&self, cancellation: &CancellationProbe) -> QuantResult<Vec<Decimal>> {
+        let mut scores = Vec::with_capacity(self.binary.len());
+        for (index, observation) in self.binary.iter().enumerate() {
+            if index % 1_024 == 0 {
+                cancellation.check("nested calibration score projection")?;
+            }
+            scores.push(observation.composite_score.inner());
+        }
+        Ok(scores)
     }
 
-    fn outcomes(&self) -> Vec<bool> {
-        self.binary
-            .iter()
-            .map(|observation| observation.token_payout_ratio == PayoutRatio::ONE)
-            .collect()
+    fn outcomes(&self, cancellation: &CancellationProbe) -> QuantResult<Vec<bool>> {
+        let mut outcomes = Vec::with_capacity(self.binary.len());
+        for (index, observation) in self.binary.iter().enumerate() {
+            if index % 1_024 == 0 {
+                cancellation.check("nested calibration outcome projection")?;
+            }
+            outcomes.push(observation.token_payout_ratio == PayoutRatio::ONE);
+        }
+        Ok(outcomes)
     }
 
     fn reliability(
         &self,
         mapping: &MonotoneMapping,
         confidence: Decimal,
+        cancellation: &CancellationProbe,
     ) -> QuantResult<ReliabilityReport> {
-        let outcomes = self.outcomes();
-        let samples = self
-            .binary
-            .iter()
-            .zip(&outcomes)
-            .map(|(observation, &won)| ReliabilitySample {
+        let outcomes = self.outcomes(cancellation)?;
+        let mut samples = Vec::with_capacity(self.binary.len());
+        for (index, (observation, &won)) in self.binary.iter().zip(&outcomes).enumerate() {
+            if index % 1_024 == 0 {
+                cancellation.check("nested calibration reliability projection")?;
+            }
+            samples.push(ReliabilitySample {
                 score: observation.composite_score.inner(),
                 won,
                 max_adverse_excursion_bps: observation.max_adverse_excursion_bps,
-            })
-            .collect::<Vec<_>>();
-        compute_reliability(mapping, &samples, confidence)
+            });
+        }
+        compute_reliability(mapping, &samples, confidence, cancellation)
     }
 
     fn split_rate(&self, confidence: Decimal) -> QuantResult<SplitPayoutRateEvidence> {
@@ -237,6 +259,7 @@ impl NestedCalibrationFitter {
     /// missing downside evidence, fewer than ten binary rows in either
     /// population, invalid confidence policy, or a degenerate fit.
     pub fn fit(input: &NestedCalibrationFitInput<'_>) -> QuantResult<NestedCalibration> {
+        input.cancellation.check("nested calibration start")?;
         if input.policy.min_samples_isotonic == 0
             || input.policy.ci_confidence <= Decimal::ZERO
             || input.policy.ci_confidence >= Decimal::ONE
@@ -248,11 +271,15 @@ impl NestedCalibrationFitter {
             }
             .into());
         }
-        let fit = CalibrationPopulation::try_new("fit", input.fit_observations)?;
-        let validation =
-            CalibrationPopulation::try_new("validation", input.validation_observations)?;
-        let scores = fit.scores();
-        let outcomes = fit.outcomes();
+        let fit =
+            CalibrationPopulation::try_new("fit", input.fit_observations, &input.cancellation)?;
+        let validation = CalibrationPopulation::try_new(
+            "validation",
+            input.validation_observations,
+            &input.cancellation,
+        )?;
+        let scores = fit.scores(&input.cancellation)?;
+        let outcomes = fit.outcomes(&input.cancellation)?;
         let method = if input.policy.preferred_method == CalibrationMethod::Isotonic
             && fit.binary_count >= input.policy.min_samples_isotonic
         {
@@ -268,11 +295,17 @@ impl NestedCalibrationFitter {
                     }
                 })?,
             )
-            .fit(&scores, &outcomes)?,
-            CalibrationMethod::Platt => PlattCalibrator.fit(&scores, &outcomes)?,
+            .fit(&scores, &outcomes, &input.cancellation)?,
+            CalibrationMethod::Platt => {
+                PlattCalibrator.fit(&scores, &outcomes, &input.cancellation)?
+            }
         };
-        let reliability = validation.reliability(&mapping, input.policy.ci_confidence)?;
+        let reliability =
+            validation.reliability(&mapping, input.policy.ci_confidence, &input.cancellation)?;
         let split_payout_rate = fit.split_rate(input.policy.ci_confidence)?;
+        input
+            .cancellation
+            .check("nested calibration content hash")?;
         let content_hash = CanonicalDigest::content_hash_typed(
             "quant-pivot/cpcv-nested-calibration",
             1,
@@ -290,12 +323,16 @@ impl NestedCalibrationFitter {
                 split_payout_rate,
             ),
         )?;
-        let resolved = ResolvedCalibration {
-            artifact_id: CalibrationArtifactId::from_content_hash(&content_hash),
+        input
+            .cancellation
+            .check("nested calibration content hash completion")?;
+        let resolved = ResolvedCalibration::try_new(
+            CalibrationArtifactId::from_content_hash(&content_hash),
             mapping,
             reliability,
             split_payout_rate,
-        };
+            &input.cancellation,
+        )?;
         Ok(NestedCalibration {
             resolved,
             method,
@@ -321,9 +358,15 @@ pub trait ProbabilityCalibrator: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sample count is insufficient for the method
-    /// (fail-closed — never silently falls back to a different method).
-    fn fit(&self, scores: &[Decimal], outcomes: &[bool]) -> QuantResult<MonotoneMapping>;
+    /// Returns an error when the sample count is insufficient for the method or
+    /// the cooperative cancellation probe fires (fail-closed — never silently
+    /// falls back to a different method).
+    fn fit(
+        &self,
+        scores: &[Decimal],
+        outcomes: &[bool],
+        cancellation: &CancellationProbe,
+    ) -> QuantResult<MonotoneMapping>;
 
     /// Map one raw score to a calibrated win probability, clamped to `[0, 1]`.
     ///
@@ -339,6 +382,13 @@ pub trait ProbabilityCalibrator: Send + Sync {
 /// is applied" has exactly one implementation).
 pub fn apply_mapping(mapping: &MonotoneMapping, score: Decimal) -> QuantResult<Probability> {
     validate_mapping(mapping)?;
+    apply_validated_mapping(mapping, score)
+}
+
+pub(crate) fn apply_validated_mapping(
+    mapping: &MonotoneMapping,
+    score: Decimal,
+) -> QuantResult<Probability> {
     let raw = match mapping {
         MonotoneMapping::Isotonic { knots } => isotonic::interpolate(knots, score)?,
         MonotoneMapping::Platt { a, b } => platt::sigmoid(*a, *b, score)?,
@@ -359,6 +409,64 @@ pub fn validate_mapping(mapping: &MonotoneMapping) -> QuantResult<()> {
         .map_err(|detail| ResearchError::Inference { detail }.into())
 }
 
+pub(crate) fn validate_mapping_cancellable(
+    mapping: &MonotoneMapping,
+    cancellation: &CancellationProbe,
+) -> QuantResult<()> {
+    let MonotoneMapping::Isotonic { knots } = mapping else {
+        cancellation.check("Platt mapping validation")?;
+        return Ok(());
+    };
+    if knots.is_empty() {
+        return Err(ResearchError::Inference {
+            detail: "isotonic calibration mapping has no fitted knots".to_owned(),
+        }
+        .into());
+    }
+    for (index, knot) in knots.iter().enumerate() {
+        if index % 1_024 == 0 {
+            cancellation.check("isotonic mapping range validation")?;
+        }
+        if knot.probability < Decimal::ZERO || knot.probability > Decimal::ONE {
+            return Err(ResearchError::Inference {
+                detail: format!(
+                    "isotonic probability {} at score {} is outside [0, 1]",
+                    knot.probability, knot.score
+                ),
+            }
+            .into());
+        }
+    }
+    for (index, pair) in knots.windows(2).enumerate() {
+        if index % 1_024 == 0 {
+            cancellation.check("isotonic mapping order validation")?;
+        }
+        let [left, right] = pair else {
+            continue;
+        };
+        if left.score >= right.score {
+            return Err(ResearchError::Inference {
+                detail: format!(
+                    "isotonic scores must be strictly increasing, got {} then {}",
+                    left.score, right.score
+                ),
+            }
+            .into());
+        }
+        if left.probability > right.probability {
+            return Err(ResearchError::Inference {
+                detail: format!(
+                    "isotonic probabilities must be non-decreasing, got {} then {}",
+                    left.probability, right.probability
+                ),
+            }
+            .into());
+        }
+    }
+    cancellation.check("isotonic mapping validation completion")?;
+    Ok(())
+}
+
 /// A `model_score` calibration artifact resolved for runtime scoring.
 ///
 /// Carries the fitted [`MonotoneMapping`] plus its [`ReliabilityReport`] (the
@@ -367,12 +475,31 @@ pub fn validate_mapping(mapping: &MonotoneMapping) -> QuantResult<()> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCalibration {
     pub artifact_id: CalibrationArtifactId,
-    pub mapping: MonotoneMapping,
+    mapping: MonotoneMapping,
     pub reliability: ReliabilityReport,
     pub split_payout_rate: SplitPayoutRateEvidence,
 }
 
 impl ResolvedCalibration {
+    /// Construct one immutable runtime calibration after validating its mapping
+    /// exactly once. Keeping the mapping private prevents later mutation from
+    /// invalidating that proof, so per-score lookup remains logarithmic.
+    pub fn try_new(
+        artifact_id: CalibrationArtifactId,
+        mapping: MonotoneMapping,
+        reliability: ReliabilityReport,
+        split_payout_rate: SplitPayoutRateEvidence,
+        cancellation: &CancellationProbe,
+    ) -> QuantResult<Self> {
+        validate_mapping_cancellable(&mapping, cancellation)?;
+        Ok(Self {
+            artifact_id,
+            mapping,
+            reliability,
+            split_payout_rate,
+        })
+    }
+
     /// Hash the complete inference function while excluding audit-only artifact identity.
     ///
     /// Outer-CPCV subject and governed base-trial estimators deliberately have
@@ -395,7 +522,10 @@ impl ResolvedCalibration {
         composite_score: Decimal,
     ) -> QuantResult<CalibratedPayoutDistribution> {
         let distribution = CalibratedPayoutDistribution {
-            winner_take_all_win_probability: apply_mapping(&self.mapping, composite_score)?,
+            winner_take_all_win_probability: apply_validated_mapping(
+                &self.mapping,
+                composite_score,
+            )?,
             split_probability: self.split_payout_rate.empirical_probability,
             split_probability_interval: self.split_payout_rate.wilson_ci,
             split_payout_ratio: self.split_payout_rate.split_payout_ratio,
@@ -496,6 +626,7 @@ mod tests {
         NestedCalibrationFitInput, NestedCalibrationFitter, NestedCalibrationObservation,
         NestedCalibrationPolicy, ResolvedCalibration,
     };
+    use crate::model::CancellationProbe;
 
     fn content_hash(seed: char) -> ContentHash {
         ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64)))
@@ -543,6 +674,7 @@ mod tests {
             policy: NestedCalibrationPolicy::fixture(),
             fit_evidence_hash: content_hash('1'),
             validation_evidence_hash: content_hash('2'),
+            cancellation: CancellationProbe::default(),
         })
         .expect("disjoint nested calibration");
 
@@ -568,6 +700,7 @@ mod tests {
                 policy: NestedCalibrationPolicy::fixture(),
                 fit_evidence_hash: evidence_hash,
                 validation_evidence_hash: evidence_hash,
+                cancellation: CancellationProbe::default(),
             })
             .is_err()
         );

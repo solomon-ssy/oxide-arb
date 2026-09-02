@@ -4,7 +4,8 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::quant::{AttributionArtifactInfo, NewAttributionArtifact},
-    types::{AttributionArtifactId, FeedbackCycleId},
+    enums::quant::AttributionArtifactKind,
+    types::{AttributionArtifactId, FeedbackCycleId, RecommendationId},
 };
 
 #[derive(Debug, Clone)]
@@ -23,6 +24,12 @@ pub trait AttributionArtifactRepository: Send + Sync {
     async fn find_by_id(
         &self,
         artifact_id: &AttributionArtifactId,
+    ) -> Result<Option<AttributionArtifactInfo>, StorageError>;
+
+    async fn latest_for_recommendation(
+        &self,
+        recommendation_id: &RecommendationId,
+        kind: AttributionArtifactKind,
     ) -> Result<Option<AttributionArtifactInfo>, StorageError>;
 
     /// Complete content-hash-ordered materialization manifest for one source

@@ -216,10 +216,135 @@ fn default_application_name() -> String {
     "quant-pivot".into()
 }
 
+/// Ownership boundary for `ClickHouse` server-level resource governance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClickHouseResourceGovernance {
+    /// quant-pivot owns the server and requires the exact repository-managed
+    /// background-pool and system-log contract at startup.
+    #[default]
+    SelfManaged,
+    /// A managed provider owns server settings/system tables. Application-side
+    /// admission and query thread limits still apply; external capacity and
+    /// retention evidence is a separate promotion gate.
+    ProviderManaged,
+}
+
+pub const CLICKHOUSE_INSERT_MAX_ATTEMPTS: u32 = 3;
+pub const CLICKHOUSE_INSERT_RETRY_BACKOFF_BASE_MS: u64 = 100;
+pub const CLICKHOUSE_INSERT_RETRY_BACKOFF_TOTAL_MS: u64 = 300;
+pub const CLICKHOUSE_CANONICAL_PUBLICATION_TIMEOUT_MS: u64 = 2_000;
+pub const CLICKHOUSE_CRITICAL_ATTEMPT_MAX_MS: u64 = 1_900;
+pub const CLICKHOUSE_DURABLE_ACK_TIMEOUT_MS: u64 = 12_000;
+pub const CLICKHOUSE_DURABLE_ADMISSION_TIMEOUT_MS: u64 = 250;
+pub const CLICKHOUSE_DURABLE_SCHEDULING_MARGIN_MS: u64 = 500;
+pub const CLICKHOUSE_DURABLE_SHUTDOWN_STAGE_SECS: u64 = 20;
+pub const CLICKHOUSE_DERIVED_FACT_FLUSH_MS: u64 = 1_000;
+pub const CLICKHOUSE_FLUSH_INTERVAL_MAX_SECS: u64 = 5;
+const CLICKHOUSE_BULK_RETRY_MAX_MS: u64 = CLICKHOUSE_DURABLE_ACK_TIMEOUT_MS
+    - CLICKHOUSE_DERIVED_FACT_FLUSH_MS
+    - CLICKHOUSE_DURABLE_SCHEDULING_MARGIN_MS;
+pub const CLICKHOUSE_BULK_ACK_MAX_MS: u64 = CLICKHOUSE_FLUSH_INTERVAL_MAX_SECS * 1_000
+    + CLICKHOUSE_BULK_RETRY_MAX_MS
+    + CLICKHOUSE_DURABLE_SCHEDULING_MARGIN_MS;
+
+const _: () = assert!(
+    CLICKHOUSE_INSERT_RETRY_BACKOFF_TOTAL_MS
+        == CLICKHOUSE_INSERT_RETRY_BACKOFF_BASE_MS
+            * ((1_u64 << (CLICKHOUSE_INSERT_MAX_ATTEMPTS - 1)) - 1)
+);
+const _: () =
+    assert!(CLICKHOUSE_CRITICAL_ATTEMPT_MAX_MS < CLICKHOUSE_CANONICAL_PUBLICATION_TIMEOUT_MS);
+const _: () = assert!(
+    CLICKHOUSE_DERIVED_FACT_FLUSH_MS + CLICKHOUSE_DURABLE_SCHEDULING_MARGIN_MS
+        < CLICKHOUSE_DURABLE_ACK_TIMEOUT_MS
+);
+const _: () = assert!(
+    CLICKHOUSE_DERIVED_FACT_FLUSH_MS
+        + CLICKHOUSE_BULK_RETRY_MAX_MS
+        + CLICKHOUSE_DURABLE_SCHEDULING_MARGIN_MS
+        == CLICKHOUSE_DURABLE_ACK_TIMEOUT_MS
+);
+const _: () = assert!(CLICKHOUSE_DURABLE_SHUTDOWN_STAGE_SECS * 1_000 > CLICKHOUSE_BULK_ACK_MAX_MS);
+
+/// Send, response, and whole-attempt budgets for one insert lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClickHouseInsertIoConfig {
+    /// Maximum time to flush one encoded chunk to the socket.
+    #[schemars(range(min = 1, max = 3_899))]
+    pub send_timeout_ms: u64,
+    /// Maximum time to receive the server's durable insert response.
+    #[schemars(range(min = 1, max = 3_899))]
+    pub end_timeout_ms: u64,
+    /// Total metadata + all chunks + response deadline for one attempt.
+    #[schemars(range(min = 1, max = 3_899))]
+    pub attempt_timeout_ms: u64,
+}
+
+impl ClickHouseInsertIoConfig {
+    pub(super) const fn budgets_fit(self) -> bool {
+        self.send_timeout_ms > 0
+            && self.end_timeout_ms > 0
+            && self.attempt_timeout_ms > 0
+            && match self.send_timeout_ms.checked_add(self.end_timeout_ms) {
+                Some(io_budget) => io_budget <= self.attempt_timeout_ms,
+                None => false,
+            }
+    }
+
+    #[must_use]
+    pub fn retry_window_ms(self) -> Option<u64> {
+        self.attempt_timeout_ms
+            .checked_mul(u64::from(CLICKHOUSE_INSERT_MAX_ATTEMPTS))
+            .and_then(|attempts| attempts.checked_add(CLICKHOUSE_INSERT_RETRY_BACKOFF_TOTAL_MS))
+    }
+}
+
+/// Complete `ClickHouse` network deadline contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClickHouseIoConfig {
+    /// Total admission + response deadline for one runtime analytical query.
+    #[schemars(range(min = 1, max = 300_000))]
+    pub query_timeout_ms: u64,
+    /// Total deadline for each bootstrap, verify, or maintenance query.
+    #[schemars(range(min = 1, max = 600_000))]
+    pub maintenance_timeout_ms: u64,
+    /// Canonical ledger insert budgets.
+    pub critical_insert: ClickHouseInsertIoConfig,
+    /// Bulk/telemetry insert budgets.
+    pub bulk_insert: ClickHouseInsertIoConfig,
+}
+
+impl Default for ClickHouseIoConfig {
+    fn default() -> Self {
+        Self {
+            query_timeout_ms: 30_000,
+            maintenance_timeout_ms: 120_000,
+            critical_insert: ClickHouseInsertIoConfig {
+                send_timeout_ms: 300,
+                end_timeout_ms: 1_200,
+                attempt_timeout_ms: 1_800,
+            },
+            bulk_insert: ClickHouseInsertIoConfig {
+                send_timeout_ms: 750,
+                end_timeout_ms: 1_750,
+                attempt_timeout_ms: 3_000,
+            },
+        }
+    }
+}
+
 /// `ClickHouse` connection + batched-write tuning.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ClickHouseConfig {
+    /// Ownership boundary for server-level resource governance. Default:
+    /// `self_managed`.
+    pub resource_governance: ClickHouseResourceGovernance,
+    /// Typed total-query, maintenance, and per-insert-lane I/O budgets.
+    pub io: ClickHouseIoConfig,
     /// Stable deployment identity included in signed research evidence.
     pub deployment_id: String,
     /// `ClickHouse` Cloud cluster/service identity, or an explicit local identity.
@@ -235,19 +360,40 @@ pub struct ClickHouseConfig {
     pub password: SecretText,
     /// Max age (seconds) of a partial batch before it is flushed. Lower =
     /// fresher analytics, more insert requests. Default: `5`.
+    #[schemars(range(min = 1, max = 5))]
     pub flush_interval_secs: u64,
     /// Rows per insert batch; a full batch flushes immediately. `ClickHouse`
     /// favors large batches — sized for the L2 tick feed (~3K rows/s peaks).
     /// Default: `5000`.
+    #[schemars(range(min = 1, max = 5_000))]
     pub batch_size: usize,
-    /// Maximum concurrent insert operations (semaphore). Prevents overwhelming
-    /// the server under high tick ingestion rates. Default: `8`.
+    /// Maximum concurrent insert operations. One permit is reserved for the
+    /// canonical L2 ledger; the remainder serve bulk/telemetry writes. Must be
+    /// at least two. Default: `8`.
+    #[schemars(range(min = 2))]
     pub max_concurrent_inserts: usize,
+    /// Process-wide byte budget retained by variable-size bulk write queues.
+    /// Default: 64 MiB.
+    #[schemars(range(min = 1_048_576, max = 1_073_741_824))]
+    pub max_inflight_write_bytes: usize,
+    /// Maximum analytical reads admitted concurrently by the process-wide
+    /// `ClickHousePool`. Every admitted read is also capped by
+    /// `max_threads_per_query`; together these bounds reserve server capacity
+    /// for the canonical ledger writer. Default: `4`.
+    #[schemars(range(min = 1, max = 32))]
+    pub max_concurrent_reads: usize,
+    /// Maximum `ClickHouse` worker threads available to any single query or
+    /// insert. This prevents concurrent research reads from exhausting the
+    /// server thread pool needed by canonical ledger writes. Default: `2`.
+    #[schemars(range(min = 1, max = 64))]
+    pub max_threads_per_query: usize,
 }
 
 impl Default for ClickHouseConfig {
     fn default() -> Self {
         Self {
+            resource_governance: ClickHouseResourceGovernance::default(),
+            io: ClickHouseIoConfig::default(),
             deployment_id: "local-development".to_owned(),
             cluster_id: "local-clickhouse".to_owned(),
             url: default_ch_url(),
@@ -257,7 +403,31 @@ impl Default for ClickHouseConfig {
             flush_interval_secs: default_ch_flush_interval(),
             batch_size: default_ch_batch_size(),
             max_concurrent_inserts: default_ch_insert_limit(),
+            max_inflight_write_bytes: default_ch_write_bytes(),
+            max_concurrent_reads: default_ch_read_limit(),
+            max_threads_per_query: default_ch_query_threads(),
         }
+    }
+}
+
+impl ClickHouseConfig {
+    /// Maximum wait from application batch admission through the complete
+    /// bounded bulk-insert retry window.
+    #[must_use]
+    pub fn bulk_ack_window_ms(&self) -> Option<u64> {
+        let flush_window = self.flush_interval_secs.checked_mul(1_000)?;
+        flush_window
+            .checked_add(self.io.bulk_insert.retry_window_ms()?)?
+            .checked_add(CLICKHOUSE_DURABLE_SCHEDULING_MARGIN_MS)
+    }
+
+    /// Maximum wait for a one-second derived-fact batch to receive its
+    /// durable bulk-insert acknowledgement.
+    #[must_use]
+    pub fn derived_ack_window_ms(&self) -> Option<u64> {
+        CLICKHOUSE_DERIVED_FACT_FLUSH_MS
+            .checked_add(self.io.bulk_insert.retry_window_ms()?)?
+            .checked_add(CLICKHOUSE_DURABLE_SCHEDULING_MARGIN_MS)
     }
 }
 
@@ -278,6 +448,15 @@ const fn default_ch_batch_size() -> usize {
 }
 const fn default_ch_insert_limit() -> usize {
     8
+}
+const fn default_ch_write_bytes() -> usize {
+    64 * 1_024 * 1_024
+}
+const fn default_ch_read_limit() -> usize {
+    4
+}
+const fn default_ch_query_threads() -> usize {
+    2
 }
 
 #[cfg(test)]

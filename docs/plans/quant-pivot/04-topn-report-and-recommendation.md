@@ -4,7 +4,7 @@
 > **Deployment contract**
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `pre_deployment_behavior`: 允许 clean-break 与唯一 fresh terminal bootstrap rewrite；任何真实数据销毁仍需操作者单独授权。
 > - `post_deployment_behavior`: 本次实现只交付唯一终态 clean-install contract；不设计升级、降级、旧版本共存或历史数据转换。
 > - `rollback_and_data_verification`: 仅在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置需要操作者另行授权。
 
@@ -79,7 +79,6 @@ flowchart TD
 | `route_set_digest` | represented Route 有序集合的 canonical digest |
 | `portfolio_scenario_model_artifact_id` | 本报告使用的长期、已晋升场景生成模型 |
 | `portfolio_scenario_artifact_id` | 从冻结市场/L2/candidate 输入生成的本报告 concrete 联合场景 |
-| `runtime_mode` | `report_only`, `semi_auto`, `auto_execution` |
 | `decision_policy_snapshot_id` | 配置版本 |
 | `market_selection_id` | 输入 market selection |
 | `portfolio_plan_id` | 组合规划 |
@@ -87,7 +86,7 @@ flowchart TD
 | `actual_count` | 实际 recommendation 数量 |
 | `status` | 报告状态 |
 | `summary` | 聚合摘要 |
-| `account_source` | 资本基数来源：恒 `polymarket`（真实 venue 账户；所有 mode 一致，credential-gated），见 [09](09-account-capital-position-reconciliation.md) |
+| `account_source` | 资本基数来源：恒 `polymarket`（真实 venue 账户、credential-gated，无模拟 fallback），见 [09](09-account-capital-position-reconciliation.md) |
 | `capital_base_usd` | 本次 sizing 的策略资本基数 = `AccountSnapshot.capital_base_usd`（由真实 venue NLV 受 `portfolio.budget` 护栏约束） |
 | `account_snapshot_ref` | 指向 `quant_account_snapshot` 的决策时刻资金/持仓快照（可回放 sizing） |
 | `equity_snapshot_ref` | 指向 `quant_equity_snapshot` 的权益历史快照（可回放 high-water mark / drawdown） |
@@ -127,8 +126,6 @@ model/calibration/Trade Policy/Research Profile lineage 位于 `ReportRouteRun`�
 - `model_quality_gate_failed`
 - `portfolio_budget_exhausted`
 - `no_positive_signal`
-- `runtime_mode_disabled`
-- `system_degraded`
 
 ## 4. Recommendation 主体
 
@@ -234,7 +231,7 @@ Trigger 类型：
 
 | 类型 | 语义 |
 |---|---|
-| `immediate` | 报告生成后即可入场，但仍受 mode gate |
+| `immediate` | 报告生成后即进入可触发窗口，但仍受 frozen ceiling/blockers、当前 entry policy 与 admission |
 | `limit_price` | ask/bid 到达指定价格 |
 | `pullback` | 价格回撤到目标区间 |
 | `breakout` | 突破关键价格或动量阈值 |
@@ -288,9 +285,9 @@ Binding constraints：
 - `manual_cap`
 - `none`
 
-Sizing 不是展示值。执行模式启用时，`OrderIntent` 只能在 sizing plan 边界内创建。
+Sizing 不是展示值。任何 `OrderIntent` 都只能在 sizing plan、recommendation ceiling/blockers、当前 entry authorization policy 和 admission 边界内创建。
 
-`*_exposure_after_usd` 与 `binding_constraint` 由 portfolio planner 结合 `AccountSnapshot`（资本基数 + 当前持仓/敞口净额）计算，统一抽象见 [09 — 账户、资本、持仓与对账设计](09-account-capital-position-reconciliation.md)。**所有 mode 的资本基数均取真实 venue equity**（净清算价值 `min` `portfolio.budget` 护栏，credential-gated）；`report_only` ≠ dry-run，同样需要真实余额/持仓，凭证缺失则报告不生成（fail closed）。
+`*_exposure_after_usd` 与 `binding_constraint` 由 portfolio planner 结合 `AccountSnapshot`（资本基数 + 当前持仓/敞口净额）计算，统一抽象见 [09 — 账户、资本、持仓与对账设计](09-account-capital-position-reconciliation.md)。资本基数恒取真实 venue equity（净清算价值 `min` `portfolio.budget` 护栏，credential-gated）；不存在 dry-run 或配置预算 fallback，凭证缺失则报告不生成。
 
 ### 9.1 Route-specific execution economics
 
@@ -391,8 +388,6 @@ Report/API 对执行经济学必须显式输出：`requested_shares`、`expected
 - `max_market_exposure_usd`
 - `max_event_exposure_usd`
 - `max_category_exposure_usd`
-- `requires_approval`
-- `auto_execution_allowed`
 - `risk_notes`
 - `envelope_hash`
 
@@ -436,18 +431,11 @@ Report/API 对执行经济学必须显式输出：`requested_shares`、`expected
 
 字段：
 
-- `eligible_in_report_only`
-- `eligible_in_semi_auto`
-- `eligible_in_auto_execution`
-- `ineligibility_reasons`
-- `approval_required`
-- `auto_policy_id`
+- `ceiling`: `analysis_only | operator_approval | policy_automatic`
+- `blockers`: 不允许达到 ceiling 的不可变 typed 原因
+- `policy_binding`: ceiling 为 policy automatic 时冻结的 exact policy identity
 
-示例：
-
-- report_only: always reportable。
-- semi_auto: true if risk envelope valid。
-- auto_execution: true only if model published, data fresh, recommendation high confidence, not manually blocked。
+报告可见性不由 eligibility 决定。`AnalysisOnly` 禁止创建 intent；`OperatorApproval` 只允许操作员授权；`PolicyAutomatic` 仍要求 blockers 为空、当前 entry policy 允许，并在 admission 时重验 exact model/profile/trade-policy identity 与 fresh Healthy Route economic evidence。
 
 ## 15. Lifecycle
 
@@ -518,14 +506,14 @@ WS 不承担状态真相；刷新与重连必须回读 REST/PG。
 - `info`: report published（包括 empty report）。
 - `warning`: report delayed, data quality degraded。
 - `critical`: model quality gate failed, fact writer lag。
-- `emergency`: auto execution halted, kill switch open。
+- `emergency`: policy-automatic entry halted, kill switch open。
 
 TopN 报告通知必须包含：
 
 - report id。
 - top 3 recommendations。
 - total suggested capital。
-- runtime mode。
+- execution eligibility summary（`analysis_only` / `operator_approval` / `policy_automatic`）与 blocker summary。
 - link to full report。
 - warnings。
 
@@ -538,7 +526,7 @@ TopN 报告通知必须包含：
 - recommendation with immediate entry。
 - recommendation with limit entry。
 - recommendation with partial exits。
-- recommendation not eligible for auto execution。
+- recommendation requiring operator authorization。
 - revoked report。
 
 ## 20. 验收标准
@@ -547,7 +535,7 @@ TopN 报告通知必须包含：
 - 报告不可变，撤销通过事件表达。
 - 空报告有明确原因。
 - 每条 recommendation 可追溯到 feature/model/factor/evidence。
-- execution eligibility 与 runtime mode 分离。
+- `ExecutionEligibility` 只保存 ceiling/blockers/policy binding；当前 `EntryAuthorizationPolicy` 不进入 report/recommendation payload。
 - API 不暴露旧 opportunity/trade 语义。
 
 ## 21. Report Builder Trait 与伪代码
@@ -635,7 +623,7 @@ pub async fn build_report(
 
 - 发送 WebSocket。
 - 发送 Telegram/webhook。
-- 创建 semi-auto/auto intent。
+- 创建受治理的 operator- 或 active-policy-authorized intent。
 - 写非权威 ClickHouse recommendation event。
 
 ### 21.4 空报告生成

@@ -8,6 +8,7 @@ use quant_pivot_models::{
     domain::quant::{
         CalibrationArtifactPayload, ModelScoreCalibrationCommit,
         ModelScoreCalibrationCommitOutcome, NewCalibrationArtifact, NewModelRun,
+        VerifiedModelScoreCalibrationCommit,
     },
     enums::{
         model::ModelFamily,
@@ -78,11 +79,12 @@ impl CalibrationFixture {
         model_run_id
     }
 
-    fn commit(&self) -> ModelScoreCalibrationCommit {
-        ModelScoreCalibrationCommit {
+    fn commit(&self) -> VerifiedModelScoreCalibrationCommit {
+        VerifiedModelScoreCalibrationCommit::try_from(ModelScoreCalibrationCommit {
             model_run_id: self.model_run_id,
             artifact: self.artifact.clone(),
-        }
+        })
+        .expect("verified model-score fixture commit")
     }
 }
 
@@ -377,13 +379,16 @@ pub async fn model_score_commit_atomic() {
 
     let replay_run_id = fixture.create_run(&db).await;
     let replay = repo
-        .commit_model_score(ModelScoreCalibrationCommit {
-            model_run_id: replay_run_id,
-            artifact: NewCalibrationArtifact {
-                artifact_id: CalibrationArtifactId::from_v7(),
-                ..fixture.artifact.clone()
-            },
-        })
+        .commit_model_score(
+            VerifiedModelScoreCalibrationCommit::try_from(ModelScoreCalibrationCommit {
+                model_run_id: replay_run_id,
+                artifact: NewCalibrationArtifact {
+                    artifact_id: CalibrationArtifactId::from_v7(),
+                    ..fixture.artifact.clone()
+                },
+            })
+            .expect("verified exact-content replay"),
+        )
         .await
         .expect("new-run exact-content replay");
     assert!(matches!(
@@ -447,6 +452,17 @@ pub async fn model_score_rejects_tampering() {
     let fixture = prepare_fixture(&db, "calibration-tamper").await;
     let repo = PgCalibrationArtifactRepository::new(db.clone());
 
+    let mut invalid_preimage = fixture.artifact.clone();
+    invalid_preimage.content_hash = content_hash(98);
+    assert!(
+        VerifiedModelScoreCalibrationCommit::try_from(ModelScoreCalibrationCommit {
+            model_run_id: fixture.model_run_id,
+            artifact: invalid_preimage,
+        })
+        .is_err(),
+        "an invalid self-hash must be rejected before entering the repository transaction"
+    );
+
     let direct = repo.create(fixture.artifact.clone()).await;
     assert!(
         matches!(
@@ -473,10 +489,13 @@ pub async fn model_score_rejects_tampering() {
         .expect("reseal tampered payload");
     let tampered_hash = tampered.content_hash;
     let rejected = repo
-        .commit_model_score(ModelScoreCalibrationCommit {
-            model_run_id: fixture.model_run_id,
-            artifact: tampered,
-        })
+        .commit_model_score(
+            VerifiedModelScoreCalibrationCommit::try_from(ModelScoreCalibrationCommit {
+                model_run_id: fixture.model_run_id,
+                artifact: tampered,
+            })
+            .expect("self-consistent tampered-lineage commit"),
+        )
         .await;
     assert!(
         matches!(
@@ -508,13 +527,16 @@ pub async fn model_score_rollback() {
         .await
         .expect("primary-key collision fixture");
     let rejected = repo
-        .commit_model_score(ModelScoreCalibrationCommit {
-            model_run_id: fixture.model_run_id,
-            artifact: NewCalibrationArtifact {
-                artifact_id: collision_id,
-                ..fixture.artifact.clone()
-            },
-        })
+        .commit_model_score(
+            VerifiedModelScoreCalibrationCommit::try_from(ModelScoreCalibrationCommit {
+                model_run_id: fixture.model_run_id,
+                artifact: NewCalibrationArtifact {
+                    artifact_id: collision_id,
+                    ..fixture.artifact.clone()
+                },
+            })
+            .expect("verified primary-key collision commit"),
+        )
         .await;
     assert!(
         matches!(&rejected, Err(StorageError::StateConflict { .. })),

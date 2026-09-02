@@ -1,5 +1,6 @@
 //! Polymarket CTF/NegRisk exchange `OrderFilled` log ingestion helpers.
 
+pub mod account_recovery;
 pub mod constants;
 pub mod execution_projector;
 pub mod fee_charged_v2;

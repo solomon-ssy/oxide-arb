@@ -10,7 +10,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         ClobFeeDetails, ClobMarketInfoVersion, ClobMarketInfoVersionId, ClobTokenDescriptor,
-        MarketId, TokenId,
+        MarketId, Shares, TokenId,
     },
 };
 use quant_pivot_repository::{
@@ -51,7 +51,7 @@ fn observation(
             },
         ],
         tick_size: TickSize::Hundredth,
-        minimum_order_size: dec!(1),
+        minimum_order_size: Shares::new(dec!(1)),
         neg_risk: false,
         taker_order_delay_enabled: false,
         minimum_order_age_secs: None,

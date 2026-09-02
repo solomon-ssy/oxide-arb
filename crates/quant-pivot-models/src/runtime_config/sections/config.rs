@@ -961,7 +961,7 @@ pub struct QualityGateConfig {
     pub min_materialization_coverage: DecimalValue,
     /// Maximum tolerated backtest drawdown in `[0, 1]`.
     pub max_drawdown: DecimalValue,
-    /// Minimum liquidity-exit feasibility in `[0, 1]` (auto-execution gate).
+    /// Minimum liquidity-exit feasibility in `[0, 1]` (`PolicyAutomatic` gate).
     pub min_liquidity_exit_feasibility: DecimalValue,
     /// Minimum signed `TopN` decision overlap in `[0, 1]` (route-promotion gate).
     pub min_shadow_decision_overlap: DecimalValue,

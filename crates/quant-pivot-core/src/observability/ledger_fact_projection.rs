@@ -103,7 +103,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::*;
-    use crate::test_fixtures::execution_pg_seed::prepared_order;
+    use crate::test_fixtures::execution_pg_seed::PreparedOrderFixture;
 
     #[test]
     fn execution_projection_maps_fields() {
@@ -119,14 +119,17 @@ mod tests {
             price: Price::new(dec!(0.55)),
             shares: Shares::new(dec!(10)),
             cost_usd: Usd::new(dec!(5.5)),
-            prepared_order_json: prepared_order(
-                Side::Buy,
-                OrderType::Fok,
-                VenueOrderAmount::GrossUsd(Usd::new(dec!(5.4))),
-                Usd::new(dec!(0.1)),
-                Shares::new(dec!(10)),
-                Price::new(dec!(0.55)),
-            ),
+            prepared_order_json: PreparedOrderFixture {
+                market_id: MarketId::from("m1"),
+                token_id: TokenId::from("t1"),
+                side: Side::Buy,
+                order_type: OrderType::Fok,
+                venue_amount: VenueOrderAmount::PrincipalUsd(Usd::new(dec!(5.4))),
+                expected_fee: Usd::new(dec!(0.1)),
+                expected_filled_shares: Shares::new(dec!(10)),
+                limit_price: Price::new(dec!(0.55)),
+            }
+            .build(),
             venue_order_id: None,
             venue_status: None,
             state: ExecutionOrderState::Submitted,

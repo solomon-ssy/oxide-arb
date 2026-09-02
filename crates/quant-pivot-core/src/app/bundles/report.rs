@@ -12,6 +12,7 @@ use crate::{
         ReportPublisherDeps,
     },
     service::{
+        economic_feedback::{EconomicFeedbackService, EconomicFeedbackServiceDeps},
         equity::EquitySnapshotService,
         feature_integrity::{FeatureParityRunCoordinator, RepositoryFeatureParityGate},
     },
@@ -21,8 +22,9 @@ use quant_pivot_models::{config::QuantWorkersConfig, domain::runtime::CoreEventP
 use quant_pivot_repository::{
     clickhouse::ChNativeReadRepository,
     traits::{
-        EquitySnapshotRepository, FeatureParityRepository, PolicyRepository,
-        RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
+        AttributionArtifactRepository, EquitySnapshotRepository, FeatureParityRepository,
+        PolicyRepository, RecommendationEconomicOutcomeRepository, RecommendationReportRepository,
+        RecommendationRepository, ReportRunRepository, RouteEconomicHealthRepository,
         StrategyPositionLotRepository, VenueIncentiveRepository,
     },
 };
@@ -45,6 +47,7 @@ pub struct ReportBundle {
     pub fact_delivery: Arc<ReportFactDeliveryWorker>,
     pub coordinator: Arc<ReportCoordinator>,
     pub feature_parity: Arc<FeatureParityRunCoordinator>,
+    pub economic_feedback: Arc<EconomicFeedbackService>,
 }
 
 impl ReportBundle {
@@ -148,11 +151,26 @@ impl ReportBundle {
                 ad_hoc_ttl_secs: workers.report_ad_hoc_queue_ttl_secs,
             },
         ));
+        let economic_feedback =
+            Arc::new(EconomicFeedbackService::new(EconomicFeedbackServiceDeps {
+                outcomes: Arc::clone(&repos.recommendation_economic_outcome)
+                    as Arc<dyn RecommendationEconomicOutcomeRepository>,
+                route_health: Arc::clone(&repos.route_economic_health)
+                    as Arc<dyn RouteEconomicHealthRepository>,
+                attribution_index: Arc::clone(&repos.attribution_artifact)
+                    as Arc<dyn AttributionArtifactRepository>,
+                artifacts: Arc::clone(&deps.research.artifact_store),
+                recommendations: Arc::clone(&repos.recommendation)
+                    as Arc<dyn RecommendationRepository>,
+                reports: Arc::clone(&repos.recommendation_report)
+                    as Arc<dyn RecommendationReportRepository>,
+            }));
         Ok(Self {
             lifecycle,
             fact_delivery,
             coordinator,
             feature_parity,
+            economic_feedback,
         })
     }
 }

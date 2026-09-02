@@ -435,7 +435,9 @@ impl VenueIncentiveRepository for PgVenueIncentiveRepository {
     ) -> Result<(), StorageError> {
         Self::validate_scan(&scan, &events)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        Self::validate_response_retry(&txn, &scan, &events).await?;
+        if scan.status == VenueIncentiveReconciliationScanStatus::Succeeded {
+            Self::validate_response_retry(&txn, &scan, &events).await?;
+        }
         Self::persist_scan_on(&txn, scan).await?;
         for event in events {
             Self::persist_on(&txn, event).await?;

@@ -11,20 +11,21 @@ use super::{
     checks::{
         AuthorizationPolicyCheck, BookFreshnessCheck, CalibratedReturnModelCheck,
         CapitalBudgetCheck, CategoryExposureCheck, CredentialReadinessCheck, DataQualityCheck,
-        EntryConditionCheck, EventExposureCheck, ExitMonitorReadinessCheck, IntentStateCheck,
-        KillSwitchCheck, LiquidityDepthCheck, ManualBlockCheck, MarketExposureCheck,
-        MaxOpenIntentsCheck, MaxReservedCapitalCheck, ModelRouteBindingCheck,
+        EconomicHealthCheck, EntryConditionCheck, EventExposureCheck, ExitMonitorReadinessCheck,
+        IntentStateCheck, KillSwitchCheck, LiquidityDepthCheck, ManualBlockCheck,
+        MarketExposureCheck, MaxOpenIntentsCheck, MaxReservedCapitalCheck, ModelRouteBindingCheck,
         RecommendationFreshnessCheck, ReportStatusCheck, RiskEnvelopeHashCheck,
-        SettlementRecoveryCheck, SlippageCheck, VenueGuardCheck, VenueMetadataCheck,
+        SettlementRecoveryCheck, SlippageCheck, VenueFundingCheck, VenueGuardCheck,
+        VenueMetadataCheck,
     },
 };
 use crate::observability::metrics_hub::MetricsHub;
 
-/// The 25-check admission set. A fixed-size array makes the count
+/// The 27-check admission set. A fixed-size array makes the count
 /// a compile-time invariant.
-const ADMISSION_CHECK_COUNT: usize = 25;
+const ADMISSION_CHECK_COUNT: usize = 27;
 
-/// Default admission engine: holds the 25 checks in canonical order and folds
+/// Default admission engine: holds the 27 checks in canonical order and folds
 /// their outcomes into a single decision.
 pub struct DefaultAdmissionEngine {
     checks: [Box<dyn AdmissionCheck>; ADMISSION_CHECK_COUNT],
@@ -40,11 +41,13 @@ impl DefaultAdmissionEngine {
             Box::new(RecommendationFreshnessCheck),
             Box::new(ReportStatusCheck),
             Box::new(AuthorizationPolicyCheck),
+            Box::new(EconomicHealthCheck),
             Box::new(SettlementRecoveryCheck),
             Box::new(ModelRouteBindingCheck),
             Box::new(DataQualityCheck),
             Box::new(BookFreshnessCheck),
             Box::new(VenueMetadataCheck),
+            Box::new(VenueFundingCheck),
             Box::new(EntryConditionCheck),
             Box::new(RiskEnvelopeHashCheck),
             Box::new(CapitalBudgetCheck),
@@ -117,12 +120,12 @@ impl DefaultAdmissionEngine {
 
 #[async_trait]
 impl ExecutionAdmissionEngine for DefaultAdmissionEngine {
-    async fn evaluate(&self, input: AdmissionInput) -> QuantResult<AdmissionDecision> {
-        Ok(self.decide(&input, false))
+    async fn evaluate(&self, input: &AdmissionInput) -> QuantResult<AdmissionDecision> {
+        Ok(self.decide(input, false))
     }
 
-    async fn evaluate_full(&self, input: AdmissionInput) -> QuantResult<AdmissionDecision> {
-        Ok(self.decide(&input, true))
+    async fn evaluate_full(&self, input: &AdmissionInput) -> QuantResult<AdmissionDecision> {
+        Ok(self.decide(input, true))
     }
 }
 

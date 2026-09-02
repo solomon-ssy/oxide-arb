@@ -1,6 +1,6 @@
 //! Durable settlement-case discovery and pre-submission inventory invalidation.
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{
@@ -22,8 +22,13 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::quant::settlement_redeem::SettlementRedeemRepository;
+use rand::RngExt;
+use tokio::time::sleep;
 
 use crate::execution::SettlementLifecyclePublisher;
+
+const TRANSACTION_ATTEMPTS: usize = 4;
+const TRANSACTION_RETRY_BASE_MS: u64 = 10;
 
 /// Bounded durable-poll result used by worker metrics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -92,14 +97,22 @@ impl SettlementDiscoveryService {
                 summary.unchanged += 1;
                 return Ok(());
             }
-            let committed = self
-                .repository
-                .mark_inventory_absent(MarkSettlementInventoryAbsent {
-                    settlement_redeem_id: redeem.settlement_redeem_id,
-                    expected_inventory_digest: redeem.inventory_digest,
-                    observed_at,
-                })
-                .await?;
+            let command = MarkSettlementInventoryAbsent {
+                settlement_redeem_id: redeem.settlement_redeem_id,
+                expected_inventory_digest: redeem.inventory_digest,
+                observed_at,
+            };
+            let committed =
+                match retry_transaction(|| self.repository.mark_inventory_absent(command.clone()))
+                    .await
+                {
+                    Ok(committed) => committed,
+                    Err(StorageError::StateConflict { .. }) => {
+                        summary.unchanged += 1;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error.into()),
+                };
             self.lifecycle.committed(&committed);
             summary.marked_not_required += 1;
             return Ok(());
@@ -123,23 +136,33 @@ impl SettlementDiscoveryService {
         let contributor_lots_digest = frozen.contributor_lots_digest;
         let effective_policy = frozen.effective_policy;
         let lots = frozen.into_rows(redeem.settlement_redeem_id);
-        let committed = self
-            .repository
-            .refresh_discovered_inventory(RefreshSettlementInventory {
-                settlement_redeem_id: redeem.settlement_redeem_id,
-                expected_inventory_digest: redeem.inventory_digest,
-                yes_token_id: candidate.yes_token_id,
-                no_token_id: candidate.no_token_id,
-                resolution_content_hash: candidate.resolution_content_hash,
-                resolution_outcome: candidate.resolution_outcome,
-                resolved_at: candidate.resolved_at,
-                effective_policy,
-                inventory_digest,
-                contributor_lots_digest,
-                lots,
-                observed_at,
-            })
-            .await?;
+        let command = RefreshSettlementInventory {
+            settlement_redeem_id: redeem.settlement_redeem_id,
+            expected_inventory_digest: redeem.inventory_digest,
+            yes_token_id: candidate.yes_token_id,
+            no_token_id: candidate.no_token_id,
+            resolution_content_hash: candidate.resolution_content_hash,
+            resolution_outcome: candidate.resolution_outcome,
+            resolved_at: candidate.resolved_at,
+            effective_policy,
+            inventory_digest,
+            contributor_lots_digest,
+            lots,
+            observed_at,
+        };
+        let committed = match retry_transaction(|| {
+            self.repository
+                .refresh_discovered_inventory(command.clone())
+        })
+        .await
+        {
+            Ok(committed) => committed,
+            Err(StorageError::StateConflict { .. }) => {
+                summary.unchanged += 1;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
         self.lifecycle.committed(&committed);
         summary.refreshed += 1;
         Ok(())
@@ -206,32 +229,68 @@ impl SettlementDiscoveryService {
             created_at: observed_at,
             updated_at: observed_at,
         };
-        let expected_digest = new_case.inventory_digest;
         let rows = frozen.into_rows(settlement_redeem_id);
-        match self.repository.insert_discovered_case(new_case, rows).await {
+        match retry_transaction(|| {
+            self.repository
+                .insert_discovered_case(new_case.clone(), rows.clone())
+        })
+        .await
+        {
             Ok(committed) => {
                 self.lifecycle.committed(&committed);
                 summary.discovered += 1;
             }
+            Err(StorageError::StateConflict { .. }) => {
+                summary.unchanged += 1;
+            }
             Err(StorageError::Duplicate { .. }) => {
-                let concurrent = self
-                    .repository
+                self.repository
                     .find_by_market_account(&candidate.market_id, &candidate.execution_account_id)
                     .await?
                     .ok_or_else(|| {
                         discovery_invariant("duplicate case disappeared after insert")
                     })?;
-                if concurrent.inventory_digest != expected_digest {
-                    return Err(discovery_invariant(
-                        "concurrent discovery persisted a different inventory digest",
-                    ));
-                }
                 summary.unchanged += 1;
             }
             Err(source) => return Err(QuantError::from(source)),
         }
         Ok(())
     }
+}
+
+async fn retry_transaction<T, Operation, OperationFuture>(
+    mut operation: Operation,
+) -> Result<T, StorageError>
+where
+    Operation: FnMut() -> OperationFuture,
+    OperationFuture: Future<Output = Result<T, StorageError>>,
+{
+    let mut attempt = 0_usize;
+    loop {
+        match operation().await {
+            Err(error)
+                if error.is_retryable_transaction() && attempt + 1 < TRANSACTION_ATTEMPTS =>
+            {
+                let delay = transaction_retry_delay(attempt);
+                tracing::debug!(
+                    attempt = attempt + 1,
+                    delay_ms = delay.as_millis(),
+                    %error,
+                    "retrying idempotent settlement discovery transaction"
+                );
+                sleep(delay).await;
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+fn transaction_retry_delay(attempt: usize) -> Duration {
+    let multiplier = 1_u64 << attempt.min(3);
+    let base_ms = TRANSACTION_RETRY_BASE_MS.saturating_mul(multiplier);
+    let jitter_ms = rand::rng().random_range(0..=base_ms / 2);
+    Duration::from_millis(base_ms.saturating_add(jitter_ms))
 }
 
 fn discovery_invariant(reason: &'static str) -> QuantError {

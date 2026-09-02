@@ -63,6 +63,18 @@ impl CacheBackend for RedisBackend {
         Ok(removed > 0)
     }
 
+    async fn delete_many(&self, keys: &[&str]) -> Result<usize, StorageError> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.pool.get().await?;
+        let prefixed = keys
+            .iter()
+            .map(|key| self.prefixed(key))
+            .collect::<Vec<_>>();
+        conn.del(prefixed).await.map_err(StorageError::from)
+    }
+
     async fn exists(&self, key: &str) -> Result<bool, StorageError> {
         let mut conn = self.pool.get().await?;
         let exists: bool = conn.exists(self.prefixed(key)).await?;

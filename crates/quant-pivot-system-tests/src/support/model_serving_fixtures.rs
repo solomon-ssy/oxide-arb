@@ -1435,9 +1435,7 @@ impl ModelVersionFixture {
                         matched_count: 0,
                         mismatched_count: 0,
                         pending_materialization_count: 0,
-                        feature_contract_hash: Some(
-                            contract.bindings().schemas.feature_schema_hash,
-                        ),
+                        feature_contract_hash: contract.bindings().schemas.feature_schema_hash,
                         transform_hash: None,
                         failure_code: None,
                         failure_detail: None,
@@ -1474,9 +1472,7 @@ impl ModelVersionFixture {
                         matched_count: 1,
                         mismatched_count: 0,
                         pending_materialization_count: 0,
-                        feature_contract_hash: Some(
-                            contract.bindings().schemas.feature_schema_hash,
-                        ),
+                        feature_contract_hash: contract.bindings().schemas.feature_schema_hash,
                         transform_hash: Some(contract.bindings().transform.input_transform_hash),
                         failure_code: None,
                         failure_detail: None,

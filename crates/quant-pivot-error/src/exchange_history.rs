@@ -10,6 +10,10 @@ pub enum ExchangeHistoryError {
     Extraction { detail: String },
     #[error("independent archive attestation failed: {detail}")]
     Attestation { detail: String },
+    #[error(
+        "both history providers failed (HyperSync extractor: {extractor}; independent attestor: {attestor})"
+    )]
+    ProviderFailures { extractor: String, attestor: String },
     #[error("history providers disagree for block range {from_block}..={to_block}")]
     ProviderMismatch { from_block: u64, to_block: u64 },
     #[error("accepted history has a parent-hash discontinuity at block {block}")]

@@ -29,11 +29,14 @@ use quant_pivot_models::{
         execution::{ExitReason, ExitState},
     },
     runtime_config::EmergencyExitPolicy,
-    types::{ExitReinferenceObservation, OrderIntentId, Price, RecommendationId},
+    types::{
+        ClobMarketInfoVersion, ExitReinferenceObservation, MarketId, OrderIntentId, Price,
+        RecommendationId,
+    },
 };
 use quant_pivot_repository::traits::{
-    ExecutionSubmissionRepository, OrderIntentRepository, RecommendationRepository,
-    StrategyPositionLotRepository,
+    ClobMarketInfoRepository, ExecutionSubmissionRepository, OrderIntentRepository,
+    RecommendationRepository, StrategyPositionLotRepository,
 };
 
 use crate::{
@@ -62,6 +65,7 @@ pub struct ExitMonitorServiceDeps {
     pub positions: Arc<dyn StrategyPositionLotRepository>,
     pub intents: Arc<dyn OrderIntentRepository>,
     pub recommendations: Arc<dyn RecommendationRepository>,
+    pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
     pub book_store: Arc<BookStore>,
     pub runtime_controls: RuntimeControlsHandle,
@@ -76,6 +80,21 @@ pub struct ExitMonitorServiceDeps {
 /// Scans open lots and drives the exit priority ladder.
 pub struct ExitMonitorService {
     deps: ExitMonitorServiceDeps,
+}
+
+struct PreloadedLotContext {
+    intents: HashMap<OrderIntentId, OrderIntentInfo>,
+    recommendations: HashMap<RecommendationId, RecommendationInfo>,
+    market_info: HashMap<MarketId, ClobMarketInfoVersion>,
+}
+
+#[derive(Clone, Copy)]
+struct LotEvaluationContext<'a> {
+    recommendation: Option<&'a RecommendationInfo>,
+    market_info: Option<&'a ClobMarketInfoVersion>,
+    monitor_secs: u64,
+    recheck: Duration,
+    now: DateTime<Utc>,
 }
 
 impl ExitMonitorService {
@@ -111,18 +130,28 @@ impl ExitMonitorService {
             .into_iter()
             .take(SCAN_BATCH_GUARD)
             .collect();
-        let (intents, recommendations) = self.preload_lot_context(&lots).await?;
+        let context = self.preload_lot_context(&lots, now).await?;
 
         for lot in &lots {
             let Some(intent_id) = lot.order_intent_id else {
                 continue;
             };
-            let Some(intent) = intents.get(&intent_id) else {
+            let Some(intent) = context.intents.get(&intent_id) else {
                 continue;
             };
-            let recommendation = recommendations.get(&intent.recommendation_id);
+            let recommendation = context.recommendations.get(&intent.recommendation_id);
             if let Err(error) = self
-                .evaluate_lot(lot, intent, recommendation, monitor_secs, recheck, now)
+                .evaluate_lot(
+                    lot,
+                    intent,
+                    LotEvaluationContext {
+                        recommendation,
+                        market_info: context.market_info.get(&lot.market_id),
+                        monitor_secs,
+                        recheck,
+                        now,
+                    },
+                )
                 .await
             {
                 tracing::warn!(
@@ -144,13 +173,20 @@ impl ExitMonitorService {
     async fn preload_lot_context(
         &self,
         lots: &[StrategyPositionLot],
-    ) -> QuantResult<(
-        HashMap<OrderIntentId, OrderIntentInfo>,
-        HashMap<RecommendationId, RecommendationInfo>,
-    )> {
+        now: DateTime<Utc>,
+    ) -> QuantResult<PreloadedLotContext> {
         let intent_ids: Vec<OrderIntentId> =
             lots.iter().filter_map(|lot| lot.order_intent_id).collect();
-        let intents = self.deps.intents.find_by_ids(&intent_ids).await?;
+        let market_ids: Vec<MarketId> = lots
+            .iter()
+            .map(|lot| lot.market_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let (intents, market_info) = tokio::try_join!(
+            self.deps.intents.find_by_ids(&intent_ids),
+            self.deps.clob_market_info.at_many(&market_ids, now, now),
+        )?;
         let intent_map: HashMap<OrderIntentId, OrderIntentInfo> = intents
             .into_iter()
             .map(|intent| (intent.order_intent_id, intent))
@@ -171,18 +207,30 @@ impl ExitMonitorService {
             .into_iter()
             .map(|rec| (rec.recommendation_id, rec))
             .collect();
-        Ok((intent_map, recommendation_map))
+        let market_info = market_info
+            .into_iter()
+            .map(|info| (info.market_id.clone(), info))
+            .collect();
+        Ok(PreloadedLotContext {
+            intents: intent_map,
+            recommendations: recommendation_map,
+            market_info,
+        })
     }
 
     async fn evaluate_lot(
         &self,
         lot: &StrategyPositionLot,
         intent: &OrderIntentInfo,
-        recommendation: Option<&RecommendationInfo>,
-        monitor_secs: u64,
-        recheck: Duration,
-        now: DateTime<Utc>,
+        context: LotEvaluationContext<'_>,
     ) -> QuantResult<()> {
+        let LotEvaluationContext {
+            recommendation,
+            market_info,
+            monitor_secs,
+            recheck,
+            now,
+        } = context;
         // Skip in-flight / manual / terminal exit states — only re-evaluate lots
         // that are still being actively monitored.
         if matches!(
@@ -195,31 +243,40 @@ impl ExitMonitorService {
             return Ok(());
         }
 
+        let Some(market_info) = market_info else {
+            self.require_manual(
+                intent,
+                lot,
+                ExitReason::MarketAbnormal,
+                "current CLOB market info is unavailable",
+                now,
+            )
+            .await?;
+            return Ok(());
+        };
+        if let Err(error) = market_info.validate() {
+            self.require_manual(
+                intent,
+                lot,
+                ExitReason::MarketAbnormal,
+                &format!("current CLOB market info is invalid: {error}"),
+                now,
+            )
+            .await?;
+            return Ok(());
+        }
+
         let snapshot = match self.deps.book_store.load_fresh_by_id(&lot.token_id) {
             Ok(snapshot) => snapshot,
             Err(unavailable) => {
-                self.deps
-                    .submission
-                    .mark_exit_manual(&intent.order_intent_id, ExitReason::DataStale)
-                    .await?;
-                self.deps
-                    .alerts
-                    .dispatch_operator_notification(
-                        Alert::new(
-                            format!("exit-book-unavailable:{}", intent.order_intent_id),
-                            AlertLevel::Critical,
-                            AlertCategory::TradingSafety,
-                            AlertSource::Execution,
-                            "Automatic exit requires manual intervention",
-                            format!(
-                                "intent={} token={} fresh book unavailable ({unavailable:?}); automatic pricing and submission were blocked",
-                                intent.order_intent_id, lot.token_id
-                            ),
-                            now,
-                        )
-                        .with_dedupe_secs(60),
-                    )
-                    .await;
+                self.require_manual(
+                    intent,
+                    lot,
+                    ExitReason::DataStale,
+                    &format!("fresh book unavailable ({unavailable:?})"),
+                    now,
+                )
+                .await?;
                 return Ok(());
             }
         };
@@ -259,6 +316,7 @@ impl ExitMonitorService {
         let emergency_policy = self.emergency_policy();
         let input = ExitMonitorInput {
             lot: lot.clone(),
+            minimum_order_size: market_info.minimum_order_size,
             exit_policy: intent.exit_policy_json.clone(),
             mark_price,
             book_fresh,
@@ -305,6 +363,39 @@ impl ExitMonitorService {
             }
             ExitDecision::Hold => {}
         }
+        Ok(())
+    }
+
+    async fn require_manual(
+        &self,
+        intent: &OrderIntentInfo,
+        lot: &StrategyPositionLot,
+        reason: ExitReason,
+        detail: &str,
+        now: DateTime<Utc>,
+    ) -> QuantResult<()> {
+        self.deps
+            .submission
+            .mark_exit_manual(&intent.order_intent_id, reason)
+            .await?;
+        self.deps
+            .alerts
+            .dispatch_operator_notification(
+                Alert::new(
+                    format!("exit-input-unavailable:{}", intent.order_intent_id),
+                    AlertLevel::Critical,
+                    AlertCategory::TradingSafety,
+                    AlertSource::Execution,
+                    "Automatic exit requires manual intervention",
+                    format!(
+                        "intent={} token={} {detail}; automatic pricing and submission were blocked",
+                        intent.order_intent_id, lot.token_id
+                    ),
+                    now,
+                )
+                .with_dedupe_secs(60),
+            )
+            .await;
         Ok(())
     }
 

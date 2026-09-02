@@ -32,6 +32,29 @@ cargo test --workspace
 
 ## 计算负载门禁
 
+Research orchestration 的 offline job/CPU lease 只允许覆盖 page-bounded owned kernel，
+repository、ClickHouse、S3 与其他网络等待不得持有 job/CPU lease。普通 kernel 的 memory
+lease 由 Rayon worker 持有到实际退出；当 resident payload/encoded bytes 必须跨 async I/O
+或 PostgreSQL await 时，必须先取得 executor-owned `OfflineMemoryLease`，随后所有 kernel 复用
+该 reservation，直到最后一次 readback/commit 才释放。reservation 使用 RAII，且 worker 持有
+内部 `Arc`，caller future 被 abort 也不得在 Rayon 内核退出前提前归还 memory permits；禁止在
+owned lease 内再次 acquire memory 形成双重计费或锁序反转。
+
+Model training 在 Parquet GET 前取得唯一 8 GiB owned lease，并覆盖 decode、fit、classical
+estimator PUT/readback、outer model artifact PUT/readback 与 model-version/run PostgreSQL 原子
+commit；同一对象的 URI/key readback 必须顺序验证，禁止同时保留无界重复副本。Model-score
+calibration 在 replay prepare 前取得唯一 10 GiB owned lease，并覆盖 Dataset/Source Slice
+decode、allocation-independent replay、isotonic/Platt fit、artifact/run transaction 与最终
+readback。
+
+FeatureParity 的固定顺序是 evidence I/O → canonical plan kernel → PIT/history I/O →
+materialized PIT/selection/cross-section/model/comparison kernel。禁止在 offline worker 内用
+`Handle::block_on` 驱动可达 repository 或 artifact store 的 async graph；允许它只驱动已预取、
+无外部 I/O owner 的内存 async facade。所有 serving/offline CPU kernel 必须在提交前形成
+owned `'static` input（大对象使用 move/`Arc`，不得用深拷贝换生命周期）；调用方 future 始终
+保持可 poll，Rayon worker 自己持有 job/CPU/memory lease 直至实际退出。生产代码禁止
+`run_offline_scoped`、`run_serving_scoped` 或在应用 Tokio worker 上调用 `block_in_place`。
+
 1M×128 训练矩阵使用 single-shot binary 测量，避免 Criterion 重复 sample
 扭曲峰值 RSS：
 
@@ -112,6 +135,58 @@ cargo build --release -p quant-pivot-bench --bin report_funnel_gate
 fixed runner 的真实 PostgreSQL/ClickHouse 套件验收，不以 funnel 数值替代。
 
 ## 在线热路径门禁
+
+Canonical L2 由唯一 coordinator 在应用内按最多 20ms / 8,192 rows 聚合，并通过
+独占 critical lane 执行同步 ClickHouse insert（显式 `async_insert=0`、
+`insert_deduplicate=1`）。不得再叠加 server async-insert queue：durable publication 的
+2 秒 quarantine 是 submit→ack 的 fail-closed 边界，未知结果只允许在 12 秒 final
+reconciliation 内收敛。`quant_book_l2_ledger_persistence_stage_seconds` 必须同时观察
+`admission_to_sink` 与 `sink_ack`，用来区分 Tokio/coordinator 调度停顿和存储 ACK 延迟；
+不得靠放宽 deadline 掩盖任一阶段的超时。
+
+所有 bulk facts 同样由应用侧有界 writer 聚合后显式同步插入；禁止再启用 ClickHouse
+server async-insert queue。`book_microstructure_1s` 的应用聚合窗口为 1 秒，其他 analytics
+沿用部署配置的 5 秒 / 5,000-row 默认批次；双层 5ms/100ms flush 会制造 tiny parts，属于
+架构回归。
+
+Self-managed ClickHouse 必须加载
+`docker/clickhouse/config.d/quant-pivot-governance.xml`：后台 merge pool 固定有界，保留低量
+`query_log`，通过 9363 `/metrics` 暴露当前 metrics/events/asynchronous metrics/errors/
+histograms，并禁用会自增 MergeTree 压力的 metric/asynchronous/text/trace/processors/
+query-thread/query-view/part 等持久 system logs。分析读取由
+`db.clickhouse.max_concurrent_reads` 做进程级 admission，并由
+`max_threads_per_query` 限制单查询线程；canonical/bulk/read 的 foreground priority 分别为
+1/4/8，但该 priority **不能**调度 background merges，不能把它描述为 merge 隔离。
+`ch_read_admission_wait_seconds{operation}` 的 p99 与告警预算必须由 fixed mixed-workload
+runner 的已签收 baseline 给出；本次 production rehearsal 要求 read wait 不持续饱和且不触发
+canonical quarantine。`ch_read_permits_used` 不应长期贴满上限，任何
+`ch_read_admission_rejections_total` 增长都阻断 performance 签收。Provider-managed
+ClickHouse 保留相同应用侧 admission/thread caps；provider capacity、system-log retention
+与 mixed-workload benchmark 证据属于独立 promotion gate，进程不会伪装拥有 server 配置权。
+
+所有 ClickHouse I/O 都由 `db.clickhouse.io` 的 typed deadline 包络。runtime read 的默认
+30 秒预算覆盖 admission、connect、response 和 decode，同时下推向上取整的
+`max_execution_time`；maintenance/bootstrap 的每条请求默认 120 秒，只使用 client-side
+总包络以兼容 DDL/SYSTEM。critical insert 默认 send/end/attempt 为 300/1,200/1,800ms，bulk
+为 750/1,750/3,000ms；send + end 必须小于等于 attempt，为 metadata/调度保留显式余量，
+attempt 必须覆盖 lane permit、metadata、全部 chunks 与最终 ACK，
+三次尝试复用固定 100/200ms backoff。`flush_interval_secs` 限于 1..=5，`batch_size`
+限于 1..=5,000，variable bulk queue 还受 `max_inflight_write_bytes`（默认 64MiB）约束。
+默认 bulk retry window 为 9.3 秒；一秒 derived-fact flush + retry + 500ms margin 为
+10.8 秒，保持在共享 12 秒 receipt deadline 内。通用 bulk receipt 的最坏预算按
+`flush + retry window + 500ms scheduling margin` 同源计算；配置上界16秒、默认 crypto 上界14.8秒，20 秒 shutdown
+stage 覆盖 stop-production→flush→receipt drain。上述默认值是首次 mixed-load calibration
+前的 bootstrap capacity budget，不是延迟 SLO；调整后必须重新运行 fixed mixed-workload
+runner，且不能破坏 canonical 2 秒 publication/final reconciliation 边界。超时返回 typed
+transient `ClickHouseTimeout`，并必须通过 RAII 归还 read/write permits。
+
+Crypto source facts 通过全局 acknowledged writer 按 5 秒 / 5,000 rows 上限聚合；禁止逐事件
+同步 INSERT。`quant_pivot_system_async_writer_inflight_items{writer="quant_crypto_price_report"}`
+和 `quant_pivot_system_async_writer_inflight_bytes{writer="quant_crypto_price_report"}` 分别覆盖
+worker 已取走但 receipt 尚未完成 cursor commit 的总 row 数与 resident bytes，不能用 channel
+`queue_depth` 代替。source shutdown 先停止生产，再触发同一 FIFO 的 flush barrier 并按 source
+顺序提交 ACK/cursor；WsIngress 与 Analytics stage 均使用 20 秒同源 deadline，覆盖受治理的
+bulk retry ceiling，超时 fail closed 且不越过 cursor。
 
 SessionHub 的资源上限属于二进制架构契约，不是部署可调参数：control lane 1,024、
 reliable lane 2,048、best-effort topic 8,192、共享 frame budget 64 MiB、单 frame

@@ -12,7 +12,6 @@ quant-pivot-allocator  = { workspace = true }
 quant-pivot-compute    = { workspace = true }
 quant-pivot-error      = { workspace = true, features = ["storage", "config", "serde"] }
 quant-pivot-models     = { workspace = true }
-quant-pivot-migration  = { workspace = true }
 quant-pivot-api        = { workspace = true, default-features = false }
 quant-pivot-storage    = { workspace = true }
 quant-pivot-repository = { workspace = true }
@@ -72,7 +71,6 @@ tokio = { workspace = true, features = ["test-util"] }
 serde_json = { workspace = true }
 loom = { workspace = true }
 proptest = { workspace = true }
-sea-orm = { workspace = true }
 
 [features]
 default = ["serving", "research-jobs", "domain-chainlink"]

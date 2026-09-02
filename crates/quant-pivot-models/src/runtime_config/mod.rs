@@ -335,6 +335,8 @@ impl Default for OperationsPolicy {
 pub struct ExecutionAuthorizationPolicy {
     #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
     pub schema_version: SchemaVersion,
+    /// Seconds an operator authorization remains valid before admission must
+    /// obtain fresh account, market, policy, and economic-health evidence.
     pub operator_approval_ttl_secs: u64,
     pub policy_automatic_limits: PolicyAutomaticLimits,
 }

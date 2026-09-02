@@ -12,17 +12,16 @@ use quant_pivot_api::{
         nsidc::NsidcSeaIceSource, nws::NwsObservationSource, tornado::TornadoSource,
     },
 };
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantError, QuantResult};
 #[cfg(feature = "domain-chainlink")]
 use quant_pivot_models::types::DomainSourceId;
 use quant_pivot_models::{
     clickhouse::{
-        CryptoPriceReportRow, DomainEventRow, DomainObservationRow, ExchangeEventRow,
-        ExchangeFeeChargeRow, ExchangeHistoryAcceptanceRow, ExchangeLogRawRow, ExchangeMatchRow,
-        ExecutionParticipantRow, MarketExecutionRow, WeatherForecastFactRow,
-        WeatherObservationFactRow,
+        DomainEventRow, DomainObservationRow, ExchangeEventRow, ExchangeFeeChargeRow,
+        ExchangeHistoryAcceptanceRow, ExchangeLogRawRow, ExchangeMatchRow, ExecutionParticipantRow,
+        MarketExecutionRow, WeatherForecastFactRow, WeatherObservationFactRow,
     },
-    config::BinanceSourceConfig,
+    config::{BinanceSourceConfig, CLICKHOUSE_DURABLE_ADMISSION_TIMEOUT_MS},
 };
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
@@ -32,6 +31,7 @@ use quant_pivot_repository::{
         FactWriter, MarketLinkageRepository, MarketRepository,
     },
 };
+use quant_pivot_storage::write::DurableWriteTimeouts;
 
 use super::AppContext;
 #[cfg(feature = "domain-chainlink")]
@@ -114,7 +114,7 @@ impl AppContext {
                 worker.run(token).await
             });
         }
-        self.register_domain_ingest_workers(runner, binance_budgets);
+        self.register_domain_ingest_workers(runner, binance_budgets)?;
         let projections =
             Arc::clone(&self.infra.repos.domain_projection) as Arc<dyn DomainProjectionRepository>;
         let worker = Arc::new(DomainEventOutboxWorker::new(
@@ -370,7 +370,7 @@ impl AppContext {
         &self,
         runner: &mut AppRunner,
         binance_budgets: BinanceBudgets,
-    ) {
+    ) -> QuantResult<()> {
         let sources = &self.config.domain_sources;
         let ConnectedDomainSources {
             binance,
@@ -401,27 +401,19 @@ impl AppContext {
             .collect::<BTreeSet<_>>();
         #[cfg(not(feature = "domain-chainlink"))]
         let credential_ready_sources = BTreeSet::new();
-        let source_supervisor = match DomainSourceSupervisor::new(
+        let source_supervisor = Arc::new(DomainSourceSupervisor::new(
             Arc::clone(&self.infra.repos.domain_source_expectation)
                 as Arc<dyn DomainSourceExpectationRepository>,
             Arc::clone(&self.infra.repos.market_linkage) as Arc<dyn MarketLinkageRepository>,
             sources.weather_stations.clone(),
             sources.weather_vertical_bindings.clone(),
             credential_ready_sources,
-        ) {
-            Ok(supervisor) => Arc::new(supervisor),
-            Err(error) => {
-                tracing::error!(%error, "domain ingest disabled: capability registry is invalid");
-                return;
-            }
-        };
+        )?);
         let supervisor_task = Arc::clone(&source_supervisor);
-        runner.spawn(TaskId::DomainSourceSupervisor, move |token| async move {
-            if let Err(error) = supervisor_task.ensure_boot_reconciled().await {
-                tracing::error!(%error, "domain source supervisor boot reconciliation failed");
-                return;
-            }
+        runner.spawn_critical(TaskId::DomainSourceSupervisor, move |token| async move {
+            supervisor_task.ensure_boot_reconciled().await?;
             supervisor_task.run_periodic(token).await;
+            Ok(())
         });
         self.register_crypto_ingest_workers(
             runner,
@@ -434,7 +426,7 @@ impl AppContext {
                 chainlink,
                 rtds,
             },
-        );
+        )?;
         let weather_writer = Arc::new(ChFactWriter::<WeatherObservationFactRow>::new(
             Arc::clone(&self.infra.ch),
             Arc::clone(&self.infra.ch_write_manager),
@@ -505,6 +497,7 @@ impl AppContext {
         runner.spawn(TaskId::WeatherPublicIngestWorker, move |token| async move {
             Box::pin(weather_public.run(token)).await;
         });
+        Ok(())
     }
 
     fn register_crypto_ingest_workers(
@@ -513,7 +506,7 @@ impl AppContext {
         binance_budgets: BinanceBudgets,
         source_supervisor: Arc<DomainSourceSupervisor>,
         sources: ConnectedCryptoSources,
-    ) {
+    ) -> QuantResult<()> {
         if let Some(worker) =
             self.build_kline_worker(binance_budgets, Arc::clone(&source_supervisor))
         {
@@ -523,11 +516,15 @@ impl AppContext {
                 }
             });
         }
-        let crypto_writer = Arc::new(ChFactWriter::<CryptoPriceReportRow>::new(
-            Arc::clone(&self.infra.ch),
-            Arc::clone(&self.infra.ch_write_manager),
-            "quant_crypto_price_report",
-        )) as Arc<dyn FactWriter<CryptoPriceReportRow>>;
+        let clickhouse = &self.config.db.clickhouse;
+        let acknowledgement_ms = clickhouse.bulk_ack_window_ms().ok_or_else(|| {
+            QuantError::config("Crypto durable acknowledgement window overflowed")
+        })?;
+        let write_timeouts = DurableWriteTimeouts::new(
+            Duration::from_millis(CLICKHOUSE_DURABLE_ADMISSION_TIMEOUT_MS),
+            Duration::from_millis(acknowledgement_ms),
+        );
+        let crypto_writer = Arc::clone(&self.infra.crypto_price_writer);
         let rtds_worker = Arc::new(CryptoRtdsIngestWorker::new(CryptoRtdsIngestDeps {
             source_supervisor: Arc::clone(&source_supervisor),
             linkages: Arc::clone(&self.infra.repos.market_linkage)
@@ -537,10 +534,11 @@ impl AppContext {
             projections: Arc::clone(&self.infra.repos.domain_projection)
                 as Arc<dyn DomainProjectionRepository>,
             writer: Arc::clone(&crypto_writer),
+            write_timeouts,
             source: sources.rtds,
         }));
-        runner.spawn(TaskId::CryptoRtdsIngestWorker, move |token| async move {
-            rtds_worker.run(token).await;
+        runner.spawn_critical(TaskId::CryptoRtdsIngestWorker, move |token| async move {
+            rtds_worker.run(token).await
         });
         let crypto_worker = Arc::new(CryptoLiveIngestWorker::new(CryptoLiveIngestDeps {
             source_supervisor,
@@ -551,14 +549,16 @@ impl AppContext {
             projections: Arc::clone(&self.infra.repos.domain_projection)
                 as Arc<dyn DomainProjectionRepository>,
             crypto_writer,
+            write_timeouts,
             binance: sources.binance,
             binance_usdm_futures: sources.binance_usdm_futures,
             #[cfg(feature = "domain-chainlink")]
             chainlink: sources.chainlink,
         }));
-        runner.spawn(TaskId::CryptoLiveIngestWorker, move |token| async move {
-            crypto_worker.run(token).await;
+        runner.spawn_critical(TaskId::CryptoLiveIngestWorker, move |token| async move {
+            crypto_worker.run(token).await
         });
+        Ok(())
     }
 
     fn build_history_worker(&self) -> QuantResult<Option<Arc<ExchangeHistoryWorker>>> {

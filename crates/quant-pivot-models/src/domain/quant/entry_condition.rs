@@ -5,6 +5,7 @@ use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    domain::data_plane::DomainSourceCheckpoint,
     entities::{
         quant_entry_condition_artifact, quant_entry_condition_audit, quant_entry_condition_instance,
     },
@@ -243,6 +244,8 @@ pub struct CryptoPriceProjectionInfo {
     pub report_hash: ContentHash,
     pub gap_generation: i64,
     pub source_healthy: bool,
+    pub committed_checkpoint: DomainSourceCheckpoint,
+    pub committed_checkpoint_hash: ContentHash,
 }
 
 /// Current corrected NOAA airport-local-day temperature extreme used by the

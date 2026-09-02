@@ -1,12 +1,24 @@
 //! Map Polymarket SDK errors into domain [`ApiError`] with retry semantics.
 
 use polymarket_client_sdk_v2::error::{Error as SdkError, Kind, Status};
-use quant_pivot_error::api::ApiError;
-use reqwest::{Method, StatusCode};
+use quant_pivot_error::api::{ApiError, ClobOrderError};
+use reqwest::{Error as ReqwestError, Method, StatusCode};
+use serde_json::Error as JsonError;
 
 /// Local wrapper for orphan-safe [`From`] into [`ApiError`].
 #[derive(Debug, Clone, Copy)]
 pub struct SdkClobError<'a>(pub &'a SdkError);
+
+impl SdkClobError<'_> {
+    /// Preserve transport/status failures while classifying any remaining SDK
+    /// read failure as malformed snapshot evidence.
+    pub fn snapshot(self, context: &'static str) -> ApiError {
+        match ApiError::from(self) {
+            ApiError::Sdk(detail) => ClobOrderError::MalformedSnapshot { context, detail }.into(),
+            error => error,
+        }
+    }
+}
 
 impl From<SdkClobError<'_>> for ApiError {
     fn from(err: SdkClobError<'_>) -> Self {
@@ -17,6 +29,21 @@ impl From<SdkClobError<'_>> for ApiError {
 fn map_sdk_error(err: &SdkError) -> ApiError {
     if let Some(status) = err.downcast_ref::<Status>() {
         return map_http_status(status);
+    }
+    if let Some(error) = err.downcast_ref::<ReqwestError>() {
+        return ApiError::Http {
+            method: "HTTP",
+            url: error.url().map_or_else(String::new, ToString::to_string),
+            status: error.status().map_or(0, |status| status.as_u16()),
+            body: error.to_string(),
+            retryable: error.is_timeout() || error.is_connect() || error.is_body(),
+        };
+    }
+    if let Some(error) = err.downcast_ref::<JsonError>() {
+        return ApiError::Deserialize {
+            context: "Polymarket SDK response".to_owned(),
+            detail: error.to_string(),
+        };
     }
 
     match err.kind() {
@@ -130,5 +157,37 @@ mod tests {
         );
         let api = ApiError::from(SdkClobError(&err));
         assert!(!api.is_retryable());
+    }
+
+    #[test]
+    fn snapshot_preserves_transport() {
+        let err = SdkError::status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Method::GET,
+            "/book".into(),
+            "unavailable",
+        );
+        let api = SdkClobError(&err).snapshot("order book");
+        assert!(matches!(
+            api,
+            ApiError::Http {
+                status: 503,
+                retryable: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn snapshot_types_malformed() {
+        let err = SdkError::validation("invalid order book response");
+        let api = SdkClobError(&err).snapshot("order book");
+        assert!(matches!(
+            api,
+            ApiError::ClobOrder(ClobOrderError::MalformedSnapshot {
+                context: "order book",
+                ..
+            })
+        ));
     }
 }

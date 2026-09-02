@@ -34,8 +34,8 @@ use quant_pivot_models::{
     enums::{domain::DomainFamily, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig},
     types::{
-        DecisionPolicySnapshotId, DomainInstrumentKey, FinalizedExecutionEvidence, MarketId,
-        NullReason, ResearchFeatureContract, TokenId, Usd, stable_name::FeatureName,
+        BookSnapshotRef, DecisionPolicySnapshotId, DomainInstrumentKey, FinalizedExecutionEvidence,
+        MarketId, NullReason, ResearchFeatureContract, TokenId, Usd, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -50,12 +50,14 @@ use quant_pivot_research::{
     features::{
         ConfiguredFeatureBuilder, DomainSliceInputs, ExecutableFeatureSchema, FeatureSourceWindows,
         FeatureVector, FinalizedExecutionWindowSnapshot, MarketDecisionCapture,
-        MarketWindowSnapshot, RejectedMarketDraft, ResolvedMarketBundle,
+        MarketWindowSnapshot, RejectedMarketDraft, ResolvedBook, ResolvedDataQualityInput,
+        ResolvedInputs, ResolvedLeg, ResolvedMarketBundle, ResolvedMarketContext,
         draft_data_quality_snapshot, feature_events,
     },
     pit::PointInTimeSnapshotSource,
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
+use rayon::prelude::*;
 
 use crate::{
     observability::{
@@ -102,7 +104,12 @@ pub struct RejectedMarket {
     pub market_id: MarketId,
     /// The primary outcome token, when scoped.
     pub token_id: Option<TokenId>,
+    /// Aggregate data-quality classification that caused exclusion.
+    pub data_quality: DataQualityStatus,
     /// Required features that were missing, with their reasons.
+    ///
+    /// This can be empty when a non-model-required schema feature carries a
+    /// fail-closed `RejectMarket` null policy.
     pub missing_required: Vec<(FeatureName, NullReason)>,
 }
 
@@ -240,8 +247,14 @@ impl FeaturePipelineService {
                             ),
                         })
                     })?;
-                let domain = windows.domain.get(&market.market_id);
-                Ok((index, market, window, execution_history, domain))
+                let domain = windows.domain.get(&market.market_id).map(Arc::clone);
+                Ok(FeatureResolveJob {
+                    index,
+                    market,
+                    window: Arc::clone(window),
+                    execution_history: Arc::clone(execution_history),
+                    domain,
+                })
             })
             .collect::<QuantResult<Vec<_>>>()?;
 
@@ -257,35 +270,54 @@ impl FeaturePipelineService {
         // category's requirement here never falsely gates a market outside
         // that category.
         let required = request.model_requirements.union_all();
-        let vectors = self
+        let required_names: HashSet<FeatureName> = required.iter().cloned().collect();
+        let features = request.features.clone();
+        let data_quality = request.data_quality.clone();
+        let batch = OwnedFeatureBatch {
+            builder,
+            bundles,
+            required,
+            features,
+            data_quality,
+        };
+        let (builder, built) = self
             .compute
-            .run_serving_scoped(|| {
-                builder.build_batch(&bundles, &required, request.features, request.data_quality)
-            })
+            .run_serving(move || batch.build_parallel())
             .await?;
 
-        let required_names: HashSet<FeatureName> = required.iter().cloned().collect();
-        let partition = partition_feature_vectors(&bundles, &vectors, &required_names)?;
+        let (vectors, resolved): (Vec<_>, Vec<_>) = built
+            .into_iter()
+            .map(|built| (built.vector, built.resolved))
+            .unzip();
+        let partition = partition_feature_vectors(&vectors, &required_names);
         let persistence = self
-            .persist_vectors(&vectors, &partition.captures, builder.schema(), &request)
+            .persist_vectors(&vectors, &resolved, builder.schema(), &request)
             .await?;
+        let data_quality_inputs = resolved
+            .iter()
+            .map(ResolvedFeatureEvidence::data_quality_input)
+            .collect::<Vec<_>>();
         let data_quality_snapshot = draft_data_quality_snapshot(
             request.boundary.decision_at(),
             request.decision_policy_snapshot_id,
-            &bundles,
+            &data_quality_inputs,
             &vectors,
             &persistence.all,
             &partition.rejected_drafts,
         )?;
         self.persist_basis_alerts(&partition.accepted, &windows.domain, request.domain)
             .await?;
+        let captures = resolved
+            .into_iter()
+            .map(|resolved| (resolved.capture.market_id.clone(), resolved.capture))
+            .collect();
 
         Ok(FeaturePipelineResult {
             accepted: partition.accepted,
             rejected: partition.rejected,
             persisted: persistence.accepted,
             feature_evidence: persistence.evidence,
-            captures: partition.captures,
+            captures,
             data_quality_snapshot,
         })
     }
@@ -297,32 +329,36 @@ impl FeaturePipelineService {
     async fn persist_vectors(
         &self,
         vectors: &[FeatureVector],
-        captures: &HashMap<MarketId, MarketDecisionCapture>,
+        resolved: &[ResolvedFeatureEvidence],
         schema: &ExecutableFeatureSchema,
         request: &FeaturePipelineRequest<'_>,
     ) -> QuantResult<PersistedFeatureVectors> {
+        if vectors.len() != resolved.len() {
+            return Err(ReportError::InvariantViolation {
+                stage: "feature_pipeline",
+                detail: format!(
+                    "feature persistence alignment mismatch: vectors={}, resolved={}",
+                    vectors.len(),
+                    resolved.len()
+                ),
+            }
+            .into());
+        }
         let rows = vectors
             .iter()
-            .map(|vector| {
-                let capture = captures.get(&vector.market_id).ok_or_else(|| {
-                    ReportError::InvariantViolation {
-                        stage: "feature_pipeline",
-                        detail: format!(
-                            "market {} has no decision capture before persistence",
-                            vector.market_id
-                        ),
-                    }
-                })?;
-                if capture.token_id
-                    != vector
-                        .token_id
-                        .clone()
-                        .ok_or_else(|| ReportError::InvariantViolation {
-                            stage: "feature_pipeline",
-                            detail: format!(
-                                "market {} feature vector has no token id",
-                                vector.market_id
-                            ),
+            .zip(resolved)
+            .map(|(vector, resolved)| {
+                let capture = &resolved.capture;
+                if capture.market_id != vector.market_id
+                    || capture.token_id
+                        != vector.token_id.clone().ok_or_else(|| {
+                            ReportError::InvariantViolation {
+                                stage: "feature_pipeline",
+                                detail: format!(
+                                    "market {} feature vector has no token id",
+                                    vector.market_id
+                                ),
+                            }
                         })?
                     || capture.data_quality != vector.data_quality
                     || capture.snapshot.boundary != request.boundary
@@ -394,7 +430,7 @@ impl FeaturePipelineService {
     async fn persist_basis_alerts(
         &self,
         accepted: &[FeatureVector],
-        domain_inputs: &HashMap<MarketId, DomainSliceInputs>,
+        domain_inputs: &HashMap<MarketId, Arc<DomainSliceInputs>>,
         domain: &DomainConfig,
     ) -> QuantResult<()> {
         let cooldown_secs =
@@ -517,9 +553,18 @@ impl FeaturePipelineService {
             HashMap::new()
         };
         Ok(FeaturePrefetchWindows {
-            microstructure,
-            execution_history,
-            domain,
+            microstructure: microstructure
+                .into_iter()
+                .map(|(token_id, window)| (token_id, Arc::new(window)))
+                .collect(),
+            execution_history: execution_history
+                .into_iter()
+                .map(|(market_id, window)| (market_id, Arc::new(window)))
+                .collect(),
+            domain: domain
+                .into_iter()
+                .map(|(market_id, inputs)| (market_id, Arc::new(inputs)))
+                .collect(),
         })
     }
 
@@ -641,38 +686,33 @@ impl FeaturePipelineService {
     ///
     /// Neg-risk membership and every sibling leg are projected from the same
     /// immutable catalog snapshot inside [`ConfiguredFeatureBuilder::resolve_inputs`].
-    async fn resolve_bundles<'a>(
+    async fn resolve_bundles(
         builder: &ConfiguredFeatureBuilder,
-        request: &FeaturePipelineRequest<'a>,
-        resolve_jobs: &[(
-            usize,
-            &'a SelectedMarket,
-            &'a MarketWindowSnapshot,
-            &'a FinalizedExecutionWindowSnapshot,
-            Option<&'a DomainSliceInputs>,
-        )],
+        request: &FeaturePipelineRequest<'_>,
+        resolve_jobs: &[FeatureResolveJob<'_>],
         max_concurrent: usize,
-    ) -> QuantResult<Vec<ResolvedMarketBundle<'a>>> {
+    ) -> QuantResult<Vec<OwnedFeatureBuildInput>> {
         let mut bundles = Vec::with_capacity(resolve_jobs.len());
         for chunk in resolve_jobs.chunks(max_concurrent) {
-            let chunk_results = join_all(chunk.iter().map(
-                |(_, market, window, execution_history, domain)| {
-                    builder.resolve_inputs(
-                        market,
-                        &request.boundary,
-                        request.pit,
-                        FeatureSourceWindows {
-                            microstructure: window,
-                            execution_history,
-                            domain: *domain,
-                        },
-                        request.liquidity_cap_usd,
-                    )
-                },
-            ))
+            let chunk_results = join_all(chunk.iter().map(|job| {
+                builder.resolve_inputs(
+                    job.market,
+                    &request.boundary,
+                    request.pit,
+                    FeatureSourceWindows {
+                        microstructure: job.window.as_ref(),
+                        execution_history: job.execution_history.as_ref(),
+                        domain: job.domain.as_deref(),
+                    },
+                    request.liquidity_cap_usd,
+                )
+            }))
             .await;
-            for ((index, _, _, _, _), bundle) in chunk.iter().zip(chunk_results) {
-                bundles.push((*index, bundle?));
+            for (job, bundle) in chunk.iter().zip(chunk_results) {
+                bundles.push((
+                    job.index,
+                    OwnedFeatureBuildInput::from_bundle(bundle?, job)?,
+                ));
             }
         }
         bundles.sort_by_key(|(index, _)| *index);
@@ -687,6 +727,176 @@ struct LiveDomainLinkages {
     weather_subject_keys: HashSet<String>,
     weather_history_from: DateTime<Utc>,
     weather_valid_to: DateTime<Utc>,
+}
+
+struct FeatureResolveJob<'a> {
+    index: usize,
+    market: &'a SelectedMarket,
+    window: Arc<MarketWindowSnapshot>,
+    execution_history: Arc<FinalizedExecutionWindowSnapshot>,
+    domain: Option<Arc<DomainSliceInputs>>,
+}
+
+struct OwnedFeatureBuildInput {
+    market: SelectedMarket,
+    decision_at: DateTime<Utc>,
+    book: Option<ResolvedBook>,
+    secondary_book: Option<ResolvedBook>,
+    secondary_book_snapshot_ref: Option<BookSnapshotRef>,
+    market_ctx: Option<ResolvedMarketContext>,
+    window: Arc<MarketWindowSnapshot>,
+    execution_history: Arc<FinalizedExecutionWindowSnapshot>,
+    domain: Option<Arc<DomainSliceInputs>>,
+    sibling_legs: Vec<ResolvedLeg>,
+    sibling_leg_total: usize,
+    capture: MarketDecisionCapture,
+}
+
+impl OwnedFeatureBuildInput {
+    fn from_bundle(
+        bundle: ResolvedMarketBundle<'_>,
+        job: &FeatureResolveJob<'_>,
+    ) -> QuantResult<Self> {
+        let ResolvedMarketBundle { inputs, capture } = bundle;
+        let ResolvedInputs {
+            market,
+            decision_at,
+            book,
+            secondary_book,
+            secondary_book_snapshot_ref,
+            market_ctx,
+            window: _,
+            execution_history: _,
+            domain,
+            sibling_legs,
+            sibling_leg_total,
+        } = inputs;
+        let domain = match domain {
+            Some(_) => Some(job.domain.as_ref().map(Arc::clone).ok_or_else(|| {
+                ReportError::InvariantViolation {
+                    stage: "feature_pipeline",
+                    detail: format!(
+                        "resolved market {} consumed domain inputs absent from its owned job",
+                        market.market_id
+                    ),
+                }
+            })?),
+            None => None,
+        };
+        let capture = capture.ok_or_else(|| ResearchError::Determinism {
+            detail: "online feature pipeline requires recommendation execution capture".to_owned(),
+        })?;
+        Ok(Self {
+            market: market.clone(),
+            decision_at,
+            book,
+            secondary_book,
+            secondary_book_snapshot_ref,
+            market_ctx,
+            window: Arc::clone(&job.window),
+            execution_history: Arc::clone(&job.execution_history),
+            domain,
+            sibling_legs,
+            sibling_leg_total,
+            capture,
+        })
+    }
+
+    fn build(
+        self,
+        builder: &ConfiguredFeatureBuilder,
+        required: &[FeatureName],
+        features: &FeaturesConfig,
+        data_quality: &DataQualityConfig,
+    ) -> QuantResult<BuiltFeatureMarket> {
+        let Self {
+            market,
+            decision_at,
+            book,
+            secondary_book,
+            secondary_book_snapshot_ref,
+            market_ctx,
+            window,
+            execution_history,
+            domain,
+            sibling_legs,
+            sibling_leg_total,
+            capture,
+        } = self;
+        let mut bundle = ResolvedMarketBundle {
+            inputs: ResolvedInputs {
+                market: &market,
+                decision_at,
+                book,
+                secondary_book,
+                secondary_book_snapshot_ref,
+                market_ctx,
+                window: window.as_ref(),
+                execution_history: execution_history.as_ref(),
+                domain: domain.as_deref(),
+                sibling_legs,
+                sibling_leg_total,
+            },
+            capture: Some(capture),
+        };
+        let vector = builder.compute_vector(&bundle, required, features, data_quality)?;
+        let mut capture = bundle
+            .capture
+            .take()
+            .ok_or_else(|| ResearchError::Determinism {
+                detail: "owned feature build lost its recommendation execution capture".to_owned(),
+            })?;
+        capture.data_quality = vector.data_quality;
+        drop(bundle);
+        Ok(BuiltFeatureMarket {
+            vector,
+            resolved: ResolvedFeatureEvidence { capture, window },
+        })
+    }
+}
+
+struct BuiltFeatureMarket {
+    vector: FeatureVector,
+    resolved: ResolvedFeatureEvidence,
+}
+
+struct OwnedFeatureBatch {
+    builder: ConfiguredFeatureBuilder,
+    bundles: Vec<OwnedFeatureBuildInput>,
+    required: Vec<FeatureName>,
+    features: FeaturesConfig,
+    data_quality: DataQualityConfig,
+}
+
+impl OwnedFeatureBatch {
+    fn build_parallel(self) -> QuantResult<(ConfiguredFeatureBuilder, Vec<BuiltFeatureMarket>)> {
+        let Self {
+            builder,
+            bundles,
+            required,
+            features,
+            data_quality,
+        } = self;
+        let built = bundles
+            .into_par_iter()
+            .map(|bundle| bundle.build(&builder, &required, &features, &data_quality))
+            .collect::<QuantResult<Vec<_>>>()?;
+        Ok((builder, built))
+    }
+}
+
+struct ResolvedFeatureEvidence {
+    capture: MarketDecisionCapture,
+    window: Arc<MarketWindowSnapshot>,
+}
+
+impl ResolvedFeatureEvidence {
+    fn data_quality_input(&self) -> ResolvedDataQualityInput<'_> {
+        ResolvedDataQualityInput {
+            capture: &self.capture,
+            window: self.window.as_ref(),
+        }
+    }
 }
 
 fn collect_live_domain_linkages(
@@ -777,15 +987,14 @@ fn weather_local_day_end(subject: &WeatherSubject) -> QuantResult<DateTime<Utc>>
 }
 
 struct FeaturePrefetchWindows {
-    microstructure: HashMap<TokenId, MarketWindowSnapshot>,
-    execution_history: HashMap<MarketId, FinalizedExecutionWindowSnapshot>,
-    domain: HashMap<MarketId, DomainSliceInputs>,
+    microstructure: HashMap<TokenId, Arc<MarketWindowSnapshot>>,
+    execution_history: HashMap<MarketId, Arc<FinalizedExecutionWindowSnapshot>>,
+    domain: HashMap<MarketId, Arc<DomainSliceInputs>>,
 }
 
 struct FeatureVectorPartition {
     accepted: Vec<FeatureVector>,
     rejected: Vec<RejectedMarket>,
-    captures: HashMap<MarketId, MarketDecisionCapture>,
     rejected_drafts: Vec<RejectedMarketDraft>,
 }
 
@@ -801,10 +1010,9 @@ struct PersistedFeatureVectors {
 }
 
 fn partition_feature_vectors(
-    bundles: &[ResolvedMarketBundle<'_>],
     vectors: &[FeatureVector],
     required_names: &HashSet<FeatureName>,
-) -> QuantResult<FeatureVectorPartition> {
+) -> FeatureVectorPartition {
     let mut accepted = Vec::with_capacity(vectors.len());
     let mut rejected = Vec::new();
     let mut rejected_drafts = Vec::new();
@@ -820,13 +1028,11 @@ fn partition_feature_vectors(
             accepted.push(vector.clone());
         }
     }
-    let captures = finalize_captures(bundles, vectors)?;
-    Ok(FeatureVectorPartition {
+    FeatureVectorPartition {
         accepted,
         rejected,
-        captures,
         rejected_drafts,
-    })
+    }
 }
 
 /// Reorder `INSERT ... RETURNING` rows to submission order and reject any
@@ -930,28 +1136,6 @@ fn insert_mismatch(info: &FeatureVectorInfo, row: &NewFeatureVector) -> Option<&
     }
 }
 
-/// Merge post-build data quality into frozen captures for every market.
-fn finalize_captures(
-    bundles: &[ResolvedMarketBundle<'_>],
-    vectors: &[FeatureVector],
-) -> QuantResult<HashMap<MarketId, MarketDecisionCapture>> {
-    bundles
-        .iter()
-        .zip(vectors)
-        .map(|(bundle, vector)| -> QuantResult<_> {
-            let mut capture = bundle
-                .capture
-                .clone()
-                .ok_or_else(|| ResearchError::Determinism {
-                    detail: "online feature pipeline requires recommendation execution capture"
-                        .to_owned(),
-                })?;
-            capture.data_quality = vector.data_quality;
-            Ok((capture.market_id.clone(), capture))
-        })
-        .collect()
-}
-
 /// Summarize why a market was rejected: the required features that
 /// were missing, with their reasons.
 fn reject_market(vector: &FeatureVector, required_names: &HashSet<FeatureName>) -> RejectedMarket {
@@ -967,6 +1151,7 @@ fn reject_market(vector: &FeatureVector, required_names: &HashSet<FeatureName>) 
     RejectedMarket {
         market_id: vector.market_id.clone(),
         token_id: vector.token_id.clone(),
+        data_quality: vector.data_quality,
         missing_required,
     }
 }

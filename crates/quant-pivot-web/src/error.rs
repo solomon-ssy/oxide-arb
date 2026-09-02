@@ -167,10 +167,12 @@ impl From<StorageError> for WebError {
             StorageError::CapacityExceeded { entity, limit } => {
                 Self::TooManyRequests(format!("{entity} queue capacity {limit} reached"))
             }
+            StorageError::Schema(_) => Self::Internal("storage schema contract failure".to_owned()),
             StorageError::Connection(_)
             | StorageError::Redis(_)
             | StorageError::RedisPool(_)
-            | StorageError::Timeout { .. } => {
+            | StorageError::Timeout { .. }
+            | StorageError::ClickHouseTimeout { .. } => {
                 Self::ServiceUnavailable("storage temporarily unavailable".to_owned())
             }
             other => Self::Internal(other.to_string()),
@@ -213,6 +215,8 @@ impl From<ExecutionError> for WebError {
         match error {
             ExecutionError::CapitalRecoveryFailed { .. }
             | ExecutionError::AdmissionDeferred { .. }
+            | ExecutionError::ExitFundingDeferred { .. }
+            | ExecutionError::ExitPriceDeferred { .. }
             | ExecutionError::OutcomeReconciliationSource { .. } => {
                 Self::ServiceUnavailable(error.to_string())
             }
@@ -225,6 +229,7 @@ impl From<ExecutionError> for WebError {
             | ExecutionError::ApprovalInvalidated { .. }
             | ExecutionError::ReconciliationUnresolvable { .. }
             | ExecutionError::AccountChainProjection { .. }
+            | ExecutionError::AccountRecovery { .. }
             | ExecutionError::ReconciliationNotResolvable { .. }
             | ExecutionError::SettlementRecoveryUnavailable { .. } => {
                 Self::Conflict(error.to_string())
@@ -268,6 +273,8 @@ impl From<QuantError> for WebError {
                 InfraError::MetricsRegistration { .. }
                 | InfraError::ChannelClosed { .. }
                 | InfraError::ChannelTimeout { .. }
+                | InfraError::CanonicalLedger { .. }
+                | InfraError::DerivedFactPersistence { .. }
                 | InfraError::ComputeDeadline { .. }
                 | InfraError::VenueIncentiveReconciliation { .. } => {
                     Self::ServiceUnavailable("service temporarily unavailable".to_owned())
@@ -330,6 +337,8 @@ impl From<GovernanceError> for WebError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use actix_web::http::StatusCode;
     use quant_pivot_error::{
         QuantError,
@@ -360,6 +369,21 @@ mod tests {
             "invalid create payload",
         ));
         assert_eq!(web.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn storage_schema_maps_500() {
+        let web = WebError::from(StorageError::Schema("schema drift".to_owned()));
+        assert_eq!(web.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn clickhouse_timeout_maps_503() {
+        let web = WebError::from(StorageError::ClickHouseTimeout {
+            operation: "test.query",
+            duration: Duration::from_millis(50),
+        });
+        assert_eq!(web.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
@@ -453,6 +477,15 @@ mod tests {
         let web = WebError::from(QuantError::from(InfraError::ComputeDeadline {
             subsystem: "password crypto",
             deadline_ms: 15_000,
+        }));
+        assert_eq!(web.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(web.client_message(), "service temporarily unavailable");
+    }
+
+    #[test]
+    fn derived_fact_maps_503() {
+        let web = WebError::from(QuantError::from(InfraError::DerivedFactPersistence {
+            partition: 2,
         }));
         assert_eq!(web.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(web.client_message(), "service temporarily unavailable");

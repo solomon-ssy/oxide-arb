@@ -1,5 +1,7 @@
 //! Atomic typed domain projections and durable `ClickHouse` event outbox.
 
+use std::cmp::Ordering;
+
 use chrono::{DateTime, NaiveDate, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
@@ -21,7 +23,9 @@ use quant_pivot_models::{
             Column as QuantDomainEventOutboxColumn, Entity as QuantDomainEventOutboxEntity,
         },
         quant_domain_source_cursor::{
+            ActiveModel as QuantDomainSourceCursorActiveModel,
             Column as QuantDomainSourceCursorColumn, Entity as QuantDomainSourceCursorEntity,
+            Model as QuantDomainSourceCursorModel,
         },
         quant_weather_daily_temperature_projection::{
             ActiveModel as QuantWeatherDailyTemperatureProjectionActiveModel, Column,
@@ -55,6 +59,36 @@ use crate::{
 
 const ENTITY: &str = "quant_domain_projection";
 
+struct CryptoMutation {
+    report: CryptoPriceReport,
+    checkpoint: DomainSourceCheckpoint,
+    gap_generation: i64,
+    source_sequence: i64,
+    checkpoint_hash: ContentHash,
+    source_healthy: bool,
+}
+
+impl CryptoMutation {
+    fn try_new(
+        report: CryptoPriceReport,
+        checkpoint: DomainSourceCheckpoint,
+        gap_generation: u64,
+        source_healthy: bool,
+    ) -> Result<Self, StorageError> {
+        report
+            .validate_checkpoint(&checkpoint)
+            .map_err(|error| invariant(error.to_string()))?;
+        Ok(Self {
+            source_sequence: to_i64(report.source_sequence, "crypto source sequence")?,
+            gap_generation: to_i64(gap_generation, "crypto gap generation")?,
+            checkpoint_hash: hash_checkpoint(&checkpoint)?,
+            report,
+            checkpoint,
+            source_healthy,
+        })
+    }
+}
+
 pub struct PgDomainProjectionRepository {
     db: DatabaseConnection,
 }
@@ -63,6 +97,131 @@ impl PgDomainProjectionRepository {
     #[must_use]
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
+    }
+
+    async fn update_crypto_projection(
+        txn: &DatabaseTransaction,
+        mutation: &CryptoMutation,
+        existing: QuantCryptoPriceProjectionModel,
+        cursor: Option<&QuantDomainSourceCursorModel>,
+    ) -> Result<QuantCryptoPriceProjectionModel, StorageError> {
+        if mutation.gap_generation != existing.gap_generation {
+            return Err(conflict(format!(
+                "crypto report gap generation {} does not match durable generation {}",
+                mutation.gap_generation, existing.gap_generation
+            )));
+        }
+        let cursor = cursor
+            .ok_or_else(|| invariant("crypto projection has no authoritative source cursor"))?;
+        validate_crypto_cursor(&existing, cursor)?;
+        match cursor
+            .checkpoint_json
+            .compare_crypto(&mutation.checkpoint)
+            .map_err(|error| invariant(error.to_string()))?
+        {
+            Ordering::Less => return Err(conflict("crypto report checkpoint regressed")),
+            Ordering::Equal => {
+                return Self::recover_crypto_replay(txn, mutation, existing, cursor).await;
+            }
+            Ordering::Greater if existing.report_hash == mutation.report.report_hash => {
+                return Err(invariant(
+                    "crypto report hash was reused across source checkpoints",
+                ));
+            }
+            Ordering::Greater => {}
+        }
+        if mutation.source_sequence < existing.source_sequence
+            || mutation.report.event_time < existing.event_time
+            || mutation.report.available_at < existing.available_at
+        {
+            return Err(conflict(
+                "crypto report timing regressed behind the durable projection",
+            ));
+        }
+        let previous_price = existing.current_price;
+        let mut active = existing.into_active_model();
+        active.previous_price = ActiveValue::Set(Some(previous_price));
+        active.current_price = ActiveValue::Set(mutation.report.price);
+        active.source_sequence = ActiveValue::Set(mutation.source_sequence);
+        active.event_time = ActiveValue::Set(mutation.report.event_time);
+        active.available_at = ActiveValue::Set(mutation.report.available_at);
+        active.report_hash = ActiveValue::Set(mutation.report.report_hash);
+        active.gap_generation = ActiveValue::Set(mutation.gap_generation);
+        active.source_healthy = ActiveValue::Set(mutation.source_healthy);
+        let updated = active.update(txn).await.map_err(StorageError::from)?;
+        if previous_price != mutation.report.price {
+            let event = crypto_event(
+                &mutation.report,
+                previous_price,
+                mutation.gap_generation,
+                mutation.checkpoint_hash,
+            )?;
+            insert_outbox(txn, event).await?;
+        }
+        Ok(updated)
+    }
+
+    async fn recover_crypto_replay(
+        txn: &DatabaseTransaction,
+        mutation: &CryptoMutation,
+        existing: QuantCryptoPriceProjectionModel,
+        cursor: &QuantDomainSourceCursorModel,
+    ) -> Result<QuantCryptoPriceProjectionModel, StorageError> {
+        if existing.report_hash != mutation.report.report_hash {
+            return Err(conflict(
+                "crypto source equivocation at the current checkpoint",
+            ));
+        }
+        if cursor.checkpoint_hash != mutation.checkpoint_hash {
+            return Err(invariant(
+                "equal crypto checkpoint has a different content hash",
+            ));
+        }
+        if !mutation.source_healthy || existing.source_healthy {
+            return Ok(existing);
+        }
+        if mutation.report.available_at < existing.available_at {
+            return Err(conflict(
+                "crypto replay availability regressed during recovery",
+            ));
+        }
+        let mut active = existing.into_active_model();
+        active.source_healthy = ActiveValue::Set(true);
+        active.available_at = ActiveValue::Set(mutation.report.available_at);
+        active.update(txn).await.map_err(StorageError::from)
+    }
+
+    async fn insert_crypto_projection(
+        txn: &DatabaseTransaction,
+        mutation: &CryptoMutation,
+        cursor: Option<&QuantDomainSourceCursorModel>,
+    ) -> Result<QuantCryptoPriceProjectionModel, StorageError> {
+        if cursor.is_some() {
+            return Err(invariant(
+                "crypto source cursor exists without its current projection",
+            ));
+        }
+        if mutation.gap_generation != 0 {
+            return Err(conflict(
+                "first crypto projection must start at gap generation zero",
+            ));
+        }
+        ActiveModel {
+            source_id: ActiveValue::Set(mutation.report.source_id.clone()),
+            instrument_key: ActiveValue::Set(mutation.report.instrument_key.clone()),
+            previous_price: ActiveValue::Set(None),
+            current_price: ActiveValue::Set(mutation.report.price),
+            source_sequence: ActiveValue::Set(mutation.source_sequence),
+            event_time: ActiveValue::Set(mutation.report.event_time),
+            available_at: ActiveValue::Set(mutation.report.available_at),
+            report_hash: ActiveValue::Set(mutation.report.report_hash),
+            gap_generation: ActiveValue::Set(mutation.gap_generation),
+            source_healthy: ActiveValue::Set(mutation.source_healthy),
+            ..Default::default()
+        }
+        .insert(txn)
+        .await
+        .map_err(StorageError::from)
     }
 }
 
@@ -75,73 +234,43 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         gap_generation: u64,
         source_healthy: bool,
     ) -> Result<CryptoPriceProjectionInfo, StorageError> {
-        validate_binding(&report.source_id, &report.instrument_key)?;
-        let gap_generation = to_i64(gap_generation, "crypto gap generation")?;
-        let source_sequence = to_i64(report.source_sequence, "crypto source sequence")?;
-        let checkpoint_hash = hash_checkpoint(&checkpoint)?;
+        let mutation = CryptoMutation::try_new(report, checkpoint, gap_generation, source_healthy)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let existing =
-            Entity::find_by_id((report.source_id.clone(), report.instrument_key.clone()))
-                .lock_exclusive()
-                .one(&txn)
-                .await
-                .map_err(StorageError::from)?;
-
-        let model = match existing {
-            Some(existing) if existing.report_hash == report.report_hash => existing,
-            Some(existing) => {
-                if source_sequence < existing.source_sequence
-                    || (source_sequence == existing.source_sequence
-                        && report.available_at <= existing.available_at)
-                {
-                    return Err(conflict("crypto report is older than current projection"));
-                }
-                let previous_price = existing.current_price;
-                let mut active = existing.into_active_model();
-                active.previous_price = ActiveValue::Set(Some(previous_price));
-                active.current_price = ActiveValue::Set(report.price);
-                active.source_sequence = ActiveValue::Set(source_sequence);
-                active.event_time = ActiveValue::Set(report.event_time);
-                active.available_at = ActiveValue::Set(report.available_at);
-                active.report_hash = ActiveValue::Set(report.report_hash);
-                active.gap_generation = ActiveValue::Set(gap_generation);
-                active.source_healthy = ActiveValue::Set(source_healthy);
-                let updated = active.update(&txn).await.map_err(StorageError::from)?;
-                if previous_price != report.price {
-                    let event =
-                        crypto_event(&report, previous_price, gap_generation, checkpoint_hash)?;
-                    insert_outbox(&txn, event).await?;
-                }
-                updated
-            }
-            None => ActiveModel {
-                source_id: ActiveValue::Set(report.source_id.clone()),
-                instrument_key: ActiveValue::Set(report.instrument_key.clone()),
-                previous_price: ActiveValue::Set(None),
-                current_price: ActiveValue::Set(report.price),
-                source_sequence: ActiveValue::Set(source_sequence),
-                event_time: ActiveValue::Set(report.event_time),
-                available_at: ActiveValue::Set(report.available_at),
-                report_hash: ActiveValue::Set(report.report_hash),
-                gap_generation: ActiveValue::Set(gap_generation),
-                source_healthy: ActiveValue::Set(source_healthy),
-                ..Default::default()
-            }
-            .insert(&txn)
-            .await
-            .map_err(StorageError::from)?,
+        let existing = Entity::find_by_id((
+            mutation.report.source_id.clone(),
+            mutation.report.instrument_key.clone(),
+        ))
+        .lock_exclusive()
+        .one(&txn)
+        .await
+        .map_err(StorageError::from)?;
+        let existing_cursor = QuantDomainSourceCursorEntity::find_by_id((
+            mutation.report.source_id.clone(),
+            mutation.report.instrument_key.clone(),
+        ))
+        .lock_exclusive()
+        .one(&txn)
+        .await
+        .map_err(StorageError::from)?;
+        let model = if let Some(existing) = existing {
+            Self::update_crypto_projection(&txn, &mutation, existing, existing_cursor.as_ref())
+                .await?
+        } else {
+            Self::insert_crypto_projection(&txn, &mutation, existing_cursor.as_ref()).await?
         };
-        upsert_cursor(
+        let committed_checkpoint = mutation.checkpoint.clone();
+        Self::persist_crypto_cursor(
             &txn,
-            &report.source_id,
-            &report.instrument_key,
-            checkpoint,
-            checkpoint_hash,
+            existing_cursor,
+            &mutation.report.source_id,
+            &mutation.report.instrument_key,
+            mutation.checkpoint,
+            mutation.checkpoint_hash,
         )
         .await?;
         notify_input_change(&txn, "crypto").await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Self::crypto_info(model)
+        Self::crypto_info(model, committed_checkpoint, mutation.checkpoint_hash)
     }
 
     async fn apply_weather_report(
@@ -282,10 +411,38 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?;
+        let cursor =
+            QuantDomainSourceCursorEntity::find_by_id((source_id.clone(), instrument_key.clone()))
+                .lock_exclusive()
+                .one(&txn)
+                .await
+                .map_err(StorageError::from)?;
         let Some(row) = row else {
+            if cursor.is_some() {
+                return Err(invariant(
+                    "crypto source cursor exists without its current projection",
+                ));
+            }
             txn.commit().await.map_err(StorageError::from)?;
             return Ok(0);
         };
+        let cursor = cursor
+            .as_ref()
+            .ok_or_else(|| invariant("crypto projection has no authoritative source cursor"))?;
+        validate_crypto_cursor(&row, cursor)?;
+        if row.gap_generation < 0 {
+            return Err(invariant("crypto gap generation is negative"));
+        }
+        if observed_at < row.available_at {
+            return Err(conflict(
+                "crypto gap observation regressed behind the durable projection clock",
+            ));
+        }
+        if !row.source_healthy {
+            let generation = from_i64(row.gap_generation, "crypto gap generation")?;
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(generation);
+        }
         let generation = checked_add(row.gap_generation, "crypto gap generation")?;
         let mut active = row.into_active_model();
         active.gap_generation = ActiveValue::Set(generation);
@@ -875,6 +1032,46 @@ async fn insert_outboxes<C: ConnectionTrait>(
     Ok(())
 }
 
+impl PgDomainProjectionRepository {
+    async fn persist_crypto_cursor(
+        txn: &DatabaseTransaction,
+        existing: Option<QuantDomainSourceCursorModel>,
+        source_id: &DomainSourceId,
+        instrument_key: &DomainInstrumentKey,
+        checkpoint: DomainSourceCheckpoint,
+        checkpoint_hash: ContentHash,
+    ) -> Result<(), StorageError> {
+        let now = Utc::now();
+        match existing {
+            Some(existing) => {
+                let mut active = existing.into_active_model();
+                active.checkpoint_json = ActiveValue::Set(checkpoint);
+                active.checkpoint_hash = ActiveValue::Set(checkpoint_hash);
+                active.status = ActiveValue::Set(DomainCursorStatus::Live);
+                active.last_error = ActiveValue::Set(None);
+                active.updated_at = ActiveValue::Set(now);
+                active.update(txn).await.map_err(StorageError::from)?;
+            }
+            None => {
+                QuantDomainSourceCursorActiveModel {
+                    source_id: ActiveValue::Set(source_id.clone()),
+                    instrument_key: ActiveValue::Set(instrument_key.clone()),
+                    checkpoint_json: ActiveValue::Set(checkpoint),
+                    checkpoint_hash: ActiveValue::Set(checkpoint_hash),
+                    status: ActiveValue::Set(DomainCursorStatus::Live),
+                    last_error: ActiveValue::Set(None),
+                    updated_at: ActiveValue::Set(now),
+                    ..Default::default()
+                }
+                .insert(txn)
+                .await
+                .map_err(StorageError::from)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 async fn upsert_cursor<C: ConnectionTrait>(
     db: &C,
     source_id: &DomainSourceId,
@@ -910,6 +1107,34 @@ async fn upsert_cursor<C: ConnectionTrait>(
         .await
         .map_err(StorageError::from)?;
     Ok(())
+}
+
+fn validate_crypto_cursor(
+    projection: &QuantCryptoPriceProjectionModel,
+    cursor: &QuantDomainSourceCursorModel,
+) -> Result<(), StorageError> {
+    if cursor.source_id != projection.source_id
+        || cursor.instrument_key != projection.instrument_key
+    {
+        return Err(invariant(
+            "crypto projection and source cursor bindings diverged",
+        ));
+    }
+    if cursor.checkpoint_hash != hash_checkpoint(&cursor.checkpoint_json)? {
+        return Err(invariant(
+            "stored crypto cursor hash does not match its checkpoint",
+        ));
+    }
+    let source_sequence = from_i64(projection.source_sequence, "crypto source sequence")?;
+    cursor
+        .checkpoint_json
+        .validate_crypto_head(
+            &projection.source_id,
+            source_sequence,
+            projection.event_time,
+            projection.report_hash,
+        )
+        .map_err(|error| invariant(error.to_string()))
 }
 
 fn validate_binding(
@@ -950,18 +1175,36 @@ fn hash_checkpoint(checkpoint: &DomainSourceCheckpoint) -> Result<ContentHash, S
 impl PgDomainProjectionRepository {
     fn crypto_info(
         row: QuantCryptoPriceProjectionModel,
+        committed_checkpoint: DomainSourceCheckpoint,
+        committed_checkpoint_hash: ContentHash,
     ) -> Result<CryptoPriceProjectionInfo, StorageError> {
+        if hash_checkpoint(&committed_checkpoint)? != committed_checkpoint_hash {
+            return Err(invariant(
+                "committed Crypto checkpoint hash differs from its content",
+            ));
+        }
+        let source_sequence = from_i64(row.source_sequence, "crypto source sequence")?;
+        committed_checkpoint
+            .validate_crypto_head(
+                &row.source_id,
+                source_sequence,
+                row.event_time,
+                row.report_hash,
+            )
+            .map_err(|error| invariant(error.to_string()))?;
         Ok(CryptoPriceProjectionInfo {
             source_id: row.source_id,
             instrument_key: row.instrument_key,
             previous_price: row.previous_price,
             current_price: row.current_price,
-            source_sequence: from_i64(row.source_sequence, "crypto source sequence")?,
+            source_sequence,
             event_time: row.event_time,
             available_at: row.available_at,
             report_hash: row.report_hash,
             gap_generation: row.gap_generation,
             source_healthy: row.source_healthy,
+            committed_checkpoint,
+            committed_checkpoint_hash,
         })
     }
 

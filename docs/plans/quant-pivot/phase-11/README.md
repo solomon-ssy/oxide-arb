@@ -1,12 +1,18 @@
 # Phase 11 — Alpha Quality & Closed-Loop Hardening 子phase索引
 
+> **SUPERSEDED EXECUTION STATUS**：本文保留 Phase 11 设计与历史 closure 语境，但不再拥有 current
+> task、Implementation Closure 或恢复入口。当前实施状态只认
+> [`../phase-12/12.1-implementation-ledger.md`](../phase-12/12.1-implementation-ledger.md)；下文 canary
+> 只可解释为 Phase 12 完成之后、另行精确授权的 Operational Activation，不能阻断或替代 disposable
+> Implementation Closure。
+
 <!-- quant-pivot-deployment-contract:v1 -->
 > **Deployment contract**
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
+> - `pre_deployment_behavior`: 允许 clean-break 与唯一 fresh terminal bootstrap rewrite；任何真实数据销毁仍需操作者单独授权。
+> - `post_deployment_behavior`: 本次实现只交付唯一 fresh terminal bootstrap；不设计 upgrade/downgrade 或 data/schema/version migration。
+> - `rollback_and_data_verification`: 只在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置必须另行授权。
 
 > 状态：生产级破坏式重构。**11.1 已落地并完成收尾闭环加固**（时间原生 EMA/MACD、
 > 退出/卖出复用入场冻结因子面、共线默认 raw 面板 + 类别中性化、Indeterminate 置零 confidence、
@@ -32,8 +38,8 @@
 > Source Slice producer/ledger/strict replay、signed latency/retention readiness、cash-budget/fee provenance、
 > Weather candidate state-machine fitter、56-fold/21-path CPCV/DSR/PBO/ESS、2× latency、typed Evidence
 > sealing、独立 async Validate 和 PG→ClickHouse verified fact-delivery outbox 已落地；真实 Published
-> research policy 与端到端激活仍受目标环境迁移/真实数据验收和
-> 连续 24 小时 ReportOnly shadow 阻断；
+> research policy 与端到端激活仍受目标环境 fresh bootstrap/真实数据验收和
+> 连续 24 小时 non-executing shadow 阻断；
 > **11.8 已完成（含 2026-07-16 P0 收尾复核）**：ReportRun / Prepared→Published、
 > PG durable scheduler、scope current、supersession execution cascade、censored attribution 与
 > operator workflow 的唯一验收真相见 11.8；**11.9 的 current-byte Implementation Closure
@@ -41,14 +47,14 @@
 > route-owned shadow、RecipePlan、execution feedback、durable recovery 和真实 production-stack
 > E2E。独立 11.10 已 `MERGED INTO 11.9`，不再形成后继依赖节点。
 > `Operational Activation` 仍独立 blocked：没有 authenticated current-data、mature labels、
-> 完整 retraining cooldown 的真实 ReportOnly shadow 或已授权 route activation，就不存在真实资金、
+> 完整 retraining cooldown 的真实 non-executing shadow 或已授权 route activation，就不存在真实资金、
 > current Champion route 或 execution-authority 扩大声明。唯一逐项进度与证据真相见 11.9
 > Implementation Ledger；11.0/11.2.1/11.3/11.7.2/11.11 其余工作仍在设计、实施或部分落地阶段。
 >
 > 父文档（概念真理）：
 > [`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)、
 > [`../04-topn-report-and-recommendation.md`](../04-topn-report-and-recommendation.md)、
-> [`../05-execution-risk-and-governance.md`](../05-execution-risk-and-governance.md)、
+> [`../phase-12/12.0-execution-authority-account-recovery-fast-feedback.md`](../phase-12/12.0-execution-authority-account-recovery-fast-feedback.md)、
 > [`../08-third-party-crates-and-ml-stack.md`](../08-third-party-crates-and-ml-stack.md)、
 > [`../09-account-capital-position-reconciliation.md`](../09-account-capital-position-reconciliation.md)
 >
@@ -66,12 +72,12 @@
 | Feature / Scoring / Domain / Research Method profile | `schema_version = 1` | immutable content-addressed artifact |
 | Dataset / Model / Trade Policy / Evidence | `schema_version = 1` | 对应 artifact contract |
 | evaluator / manifest / internal format | `version = 1` | 对应 typed contract module |
-| PostgreSQL migration | `m00000000_000001_bootstrap` | deploy-only migration CLI |
-| ClickHouse migration | `version = 1` bootstrap | deploy-only schema CLI |
+| PostgreSQL fresh bootstrap | `m00000000_000001_bootstrap` | deploy-only schema CLI |
+| ClickHouse fresh bootstrap | `version = 1` bootstrap | deploy-only schema CLI |
 | Rust workspace packages | `0.1.0` | 首个未正式发布的 production candidate |
 
 项目未生产部署，schema、ClickHouse 表和 artifacts 从空基线重建；不提供旧 runtime parser、artifact
-loader、JSONB 双读、alias、版本映射或 re-export。`production_frozen` 后才恢复单调版本与正式 migration discipline。
+loader、JSONB 双读、alias、版本映射或 re-export。本实施不定义部署后的 schema/data/version evolution。
 
 ## 0. 为什么单独开 Phase 11
 
@@ -135,7 +141,7 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.6 | Training-Serving Parity & No-Silent-Zero | 决策时钟、PIT catalog、FeatureCell、frozen transform、运行期 parity/latch — **W0–W4/W6 与全部本地/容器门禁已完成；W5 空库首次激活待执行** | 10, 11 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
 | 11.7 | Executable Labeling, Entry & Exit Closed-Loop | TradePolicyArtifact + 可执行标签 + 审批即 Arm + 冻结退出策略 — **执行/control/operational closeout 与受保护 UI/E2E 已完成；真实 Published policy 激活受 11.7.2 阻断** | 14, 15, 16, 18 | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 11.7.1 | Composable Entry Conditions + Crypto/Weather Events | typed AST + PIT facts/events + Recommendation shadow + vertical gates — **实施中** | — | [11.7.1](11.7.1-composable-entry-event-triggers.md) |
-| 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility baseline + cash-budget + PIT fee + purged CPCV/uniqueness/DSR/PBO/ESS，交付至 ReportOnly shadow — **仓库契约已闭环：Weather/structural producers、56/21 CPCV、2× latency、Evidence v3、独立 Validate、分页 drilldown 与 fact outbox 已接通；物理迁移/真实数据验收与 24h shadow 待目标环境完成；真实 canary 已移交 11.11** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
+| 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility baseline + cash-budget + PIT fee + purged CPCV/uniqueness/DSR/PBO/ESS，交付至 non-executing shadow — **仓库契约已闭环：Weather/structural producers、56/21 CPCV、2× latency、Evidence v3、独立 Validate、分页 drilldown 与 fact outbox 已接通；真实数据验收与 24h shadow 待目标环境完成；真实 canary 属于独立 Operational Activation** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
 | 11.8 | Report Lifecycle, Durable Scheduling & Operator Workflow | **已完成（含 P0 收尾复核）**：CH decision-fact、delivery claim-loss 与 censor accounting 闭环；历史版本已被 boot 基线取代 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
 | 11.9 | Crypto / Weather Verticals, Attribution Feedback & Auto-Retraining | canonical truth、attempt/rollup、自动再训练、质量治理、三类 attribution、Weather 8-family、唯一 route authority 与 UI/ops — **Implementation Closure=BLOCKED；Business Loop Closure=BLOCKED；Operational Activation=BLOCKED** | 19, 20, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
@@ -215,9 +221,9 @@ flowchart TD
   current-byte remediation、测试和关闭证据已于 2026-07-31 完成，逐项状态只见
   [11.9 Implementation Ledger](11.9-attribution-feedback-and-auto-retraining.md#11-implementation-ledger)；
   Operational Activation 仍由 authenticated current truth、activation-eligible profile、真实成熟标签
-  及至少一个完整 retraining cooldown 的 ReportOnly shadow 阻断。
+  及至少一个完整 retraining cooldown 的 non-executing shadow 阻断。
   Tier 2 LLM linkage 若在首次部署前落地，直接修改 boot contract 并 fresh-install 验证；首次部署后必须正式
-  bump 和 migration，任何状态都不得静默改写既有 persisted artifact。
+  upgrade 或 persisted-artifact 转换；任何状态都不得静默改写既有 artifact。
 
 ## 4. 全局设计基线(贯穿全部子phase)
 
@@ -225,7 +231,7 @@ flowchart TD
 
 1. **可解释优先**:任何新模型族(LTR/GBDT/校准器)必须能输出 recommendation-level 的预测解释
    (见 11.9);无法通过 exact explanation efficiency gate 的模型不能成为 Champion，更不能进入
-   auto-execution(与 08 §15.5 一致)。
+   `PolicyAutomatic` execution authority（与 08 §15.5 一致）。
 2. **校准是硬不变量**：任何进入 candidate admission、scenario cashflow 或 global portfolio 的概率/
    uncertainty 必须来自校准后的 promoted artifact；未校准 artifact 禁止 publish（11.3）。
 3. **防过拟合是硬门禁**:任何 model version publish 前必须有 CPCV 多路径分布 + Deflated Sharpe +
@@ -269,13 +275,10 @@ flowchart TD
 cargo fmt --all --
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p quant-pivot-research --features ml-classical,dataframe,optimize,lp-solver -- -D warnings
-bash scripts/lint-architecture.sh
-bash scripts/lint-quant-pivot-boundary.sh
-bash scripts/lint-quant-pivot-errors.sh
-bash scripts/lint-dead-semantics.sh   # 11.0 新增
-bash scripts/lint-training-serving-parity.sh   # 11.6 新增
+cargo xtask architecture audit-functions
+cargo xtask architecture check
 cargo test --workspace
-cd ui && pnpm lint && pnpm check && pnpm test:unit && pnpm build:antdv-next
+cd ui && pnpm lint && pnpm check:type && pnpm test:unit && pnpm build:antdv-next
 ```
 
 文档中的 `[x]` 只表示对应代码波次已实现，不替代本节当前合并态质量门，也不代表已在目标环境从空库

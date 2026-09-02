@@ -193,7 +193,8 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
         // under active-policy authorization; a human owns the exit for
         // operator-authorized positions, so re-inference holds fail-safe.
         if ctx.intent.authorization_kind != Some(AuthorizationKind::ActivePolicy) {
-            self.metrics.inc_exit_signal_reinference("skipped_non_auto");
+            self.metrics
+                .inc_exit_signal_reinference("skipped_non_active_policy");
             return ExitSignalEvaluation::verdict(ExitSignalVerdict::Indeterminate {
                 detail: "thesis-invalidation forced exit requires active-policy authorization"
                     .to_owned(),

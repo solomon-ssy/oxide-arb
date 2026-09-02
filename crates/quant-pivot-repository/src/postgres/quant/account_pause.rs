@@ -1,38 +1,39 @@
 //! Durable account-pause envelope journal.
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::{StorageError, entity::QUANT_ACCOUNT_PAUSE_SUBMISSION};
+use quant_pivot_error::storage::{StorageError, entity::QUANT_ACCOUNT_PAUSE_OPERATION};
 use quant_pivot_models::{
     domain::quant::{
-        AccountPauseConfirmation, AccountPauseDispatch, AccountPauseSubmissionInfo,
-        NewAccountPauseSubmission,
+        AccountPauseConfirmation, AccountPauseDispatch, AccountPauseOperationInfo,
+        NewAccountPauseOperation,
     },
-    entities::quant_account_pause_submission::{ActiveModel, Column, Entity, Model},
-    enums::execution::AccountPauseSubmissionState,
-    types::{AccountPauseSubmissionId, AccountRecoveryIncidentId},
+    entities::quant_account_pause_operation::{ActiveModel, Column, Entity, Model},
+    enums::execution::{AccountPauseOperationKind, AccountPauseOperationState},
+    types::{AccountPauseOperationId, AccountRecoveryIncidentId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
     QueryFilter,
 };
 
-use crate::traits::AccountPauseRepository;
+use crate::traits::AccountPauseOperationRepository;
 
-pub struct PgAccountPauseRepository {
+pub struct PgAccountPauseOperationRepository {
     db: DatabaseConnection,
 }
 
-impl PgAccountPauseRepository {
+impl PgAccountPauseOperationRepository {
     #[must_use]
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
 
-    fn exact_retry(stored: &Model, incoming: &NewAccountPauseSubmission) -> bool {
-        stored.account_pause_submission_id == incoming.account_pause_submission_id
+    fn exact_retry(stored: &Model, incoming: &NewAccountPauseOperation) -> bool {
+        stored.account_pause_operation_id == incoming.account_pause_operation_id
             && stored.recovery_incident_id == incoming.recovery_incident_id
             && stored.exchange_address == incoming.exchange_address
-            && stored.kind == incoming.kind
+            && stored.operation_kind == incoming.operation_kind
+            && stored.submission_kind == incoming.submission_kind
             && stored.requested_block == incoming.requested_block
             && stored.interval_blocks == incoming.interval_blocks
             && stored.effective_block == incoming.effective_block
@@ -49,12 +50,12 @@ impl PgAccountPauseRepository {
 }
 
 #[async_trait::async_trait]
-impl AccountPauseRepository for PgAccountPauseRepository {
+impl AccountPauseOperationRepository for PgAccountPauseOperationRepository {
     async fn insert_prepared(
         &self,
-        submission: NewAccountPauseSubmission,
-    ) -> Result<AccountPauseSubmissionInfo, StorageError> {
-        if let Some(stored) = Entity::find_by_id(submission.account_pause_submission_id)
+        submission: NewAccountPauseOperation,
+    ) -> Result<AccountPauseOperationInfo, StorageError> {
+        if let Some(stored) = Entity::find_by_id(submission.account_pause_operation_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -63,9 +64,9 @@ impl AccountPauseRepository for PgAccountPauseRepository {
                 return Ok(stored.into());
             }
             return Err(StorageError::state_conflict(
-                QUANT_ACCOUNT_PAUSE_SUBMISSION,
-                Some(&submission.account_pause_submission_id),
-                "pause envelope replay changed durable bytes or chain scope",
+                QUANT_ACCOUNT_PAUSE_OPERATION,
+                Some(&submission.account_pause_operation_id),
+                "pause-state operation replay changed durable bytes or chain scope",
             ));
         }
         Entity::insert(submission.into_active_model())
@@ -78,12 +79,14 @@ impl AccountPauseRepository for PgAccountPauseRepository {
     async fn recoverable(
         &self,
         incident_id: &AccountRecoveryIncidentId,
-    ) -> Result<Vec<AccountPauseSubmissionInfo>, StorageError> {
+        operation_kind: AccountPauseOperationKind,
+    ) -> Result<Vec<AccountPauseOperationInfo>, StorageError> {
         Entity::find()
             .filter(Column::RecoveryIncidentId.eq(*incident_id))
+            .filter(Column::OperationKind.eq(operation_kind))
             .filter(Column::State.is_in([
-                AccountPauseSubmissionState::Prepared,
-                AccountPauseSubmissionState::Ambiguous,
+                AccountPauseOperationState::Prepared,
+                AccountPauseOperationState::Ambiguous,
             ]))
             .all(&self.db)
             .await
@@ -94,9 +97,11 @@ impl AccountPauseRepository for PgAccountPauseRepository {
     async fn for_incident(
         &self,
         incident_id: &AccountRecoveryIncidentId,
-    ) -> Result<Vec<AccountPauseSubmissionInfo>, StorageError> {
+        operation_kind: AccountPauseOperationKind,
+    ) -> Result<Vec<AccountPauseOperationInfo>, StorageError> {
         Entity::find()
             .filter(Column::RecoveryIncidentId.eq(*incident_id))
+            .filter(Column::OperationKind.eq(operation_kind))
             .all(&self.db)
             .await
             .map_err(StorageError::from)
@@ -105,34 +110,32 @@ impl AccountPauseRepository for PgAccountPauseRepository {
 
     async fn record_dispatch(
         &self,
-        submission_id: &AccountPauseSubmissionId,
+        submission_id: &AccountPauseOperationId,
         dispatch: AccountPauseDispatch,
         dispatched_at: DateTime<Utc>,
-    ) -> Result<AccountPauseSubmissionInfo, StorageError> {
+    ) -> Result<AccountPauseOperationInfo, StorageError> {
         let stored = Entity::find_by_id(*submission_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::not_found(QUANT_ACCOUNT_PAUSE_SUBMISSION, submission_id)
-            })?;
+            .ok_or_else(|| StorageError::not_found(QUANT_ACCOUNT_PAUSE_OPERATION, submission_id))?;
         if matches!(
             stored.state,
-            AccountPauseSubmissionState::Dispatched | AccountPauseSubmissionState::Confirmed
+            AccountPauseOperationState::Dispatched | AccountPauseOperationState::Confirmed
         ) {
             return Ok(stored.into());
         }
         let mut active: ActiveModel = stored.into();
         match dispatch {
             AccountPauseDispatch::EoaAccepted => {
-                active.state = ActiveValue::Set(AccountPauseSubmissionState::Dispatched);
+                active.state = ActiveValue::Set(AccountPauseOperationState::Dispatched);
             }
             AccountPauseDispatch::RelayerAccepted(transaction_id) => {
-                active.state = ActiveValue::Set(AccountPauseSubmissionState::Dispatched);
+                active.state = ActiveValue::Set(AccountPauseOperationState::Dispatched);
                 active.relayer_transaction_id = ActiveValue::Set(Some(transaction_id));
             }
             AccountPauseDispatch::Ambiguous => {
-                active.state = ActiveValue::Set(AccountPauseSubmissionState::Ambiguous);
+                active.state = ActiveValue::Set(AccountPauseOperationState::Ambiguous);
             }
         }
         active.dispatched_at = ActiveValue::Set(Some(dispatched_at));
@@ -145,28 +148,26 @@ impl AccountPauseRepository for PgAccountPauseRepository {
 
     async fn confirm(
         &self,
-        submission_id: &AccountPauseSubmissionId,
+        submission_id: &AccountPauseOperationId,
         confirmation: AccountPauseConfirmation,
-    ) -> Result<AccountPauseSubmissionInfo, StorageError> {
+    ) -> Result<AccountPauseOperationInfo, StorageError> {
         let stored = Entity::find_by_id(*submission_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::not_found(QUANT_ACCOUNT_PAUSE_SUBMISSION, submission_id)
-            })?;
-        if stored.state == AccountPauseSubmissionState::Confirmed {
+            .ok_or_else(|| StorageError::not_found(QUANT_ACCOUNT_PAUSE_OPERATION, submission_id))?;
+        if stored.state == AccountPauseOperationState::Confirmed {
             return Ok(stored.into());
         }
-        if stored.state != AccountPauseSubmissionState::Dispatched {
+        if stored.state != AccountPauseOperationState::Dispatched {
             return Err(StorageError::state_conflict(
-                QUANT_ACCOUNT_PAUSE_SUBMISSION,
+                QUANT_ACCOUNT_PAUSE_OPERATION,
                 Some(submission_id),
-                "only a dispatched pause envelope can be confirmed",
+                "only a dispatched pause-state operation can be confirmed",
             ));
         }
         let mut active: ActiveModel = stored.into();
-        active.state = ActiveValue::Set(AccountPauseSubmissionState::Confirmed);
+        active.state = ActiveValue::Set(AccountPauseOperationState::Confirmed);
         active.confirmation_block_number = ActiveValue::Set(Some(confirmation.block_number));
         active.confirmation_block_hash = ActiveValue::Set(Some(confirmation.block_hash));
         active.confirmation_transaction_hash =

@@ -3459,7 +3459,7 @@ impl PermitEvidenceProbe<'_> {
             bindings: PermitBindingEvidence {
                 scope_exact: permit_scope == *self.preflight.scope(),
                 preflight_hash_exact: self.permit.preflight_hash == self.preflight.preflight_hash(),
-                runtime_mode_exact: runtime.entry_authorization_policy
+                authorization_policy_exact: runtime.entry_authorization_policy
                     == self.preflight.current_entry_authorization_policy()
                     && match runtime.entry_authorization_policy {
                         EntryAuthorizationPolicy::OperatorApprovalRequired => {
@@ -4105,7 +4105,7 @@ impl PromotionHarness {
         }
     }
 
-    async fn change_mode(&self, mode: EntryAuthorizationPolicy, reason: &str) {
+    async fn change_authorization(&self, policy: EntryAuthorizationPolicy, reason: &str) {
         let current = self
             .runtime_repository
             .load()
@@ -4115,7 +4115,7 @@ impl PromotionHarness {
             .runtime_repository
             .compare_and_set(RuntimeControlUpdate {
                 expected_revision: current.revision,
-                entry_authorization_policy: Some(mode),
+                entry_authorization_policy: Some(policy),
                 settlement_write_policy: None,
                 kill_switch_state: None,
                 kill_switch_requires_ack: None,
@@ -4123,7 +4123,7 @@ impl PromotionHarness {
                 reason: reason.to_owned(),
             })
             .await
-            .expect("apply P06 runtime mode change");
+            .expect("apply P06 authorization policy change");
         self.runtime_controls
             .publish_local(RuntimeControlSnapshot::from(changed));
     }
@@ -4721,20 +4721,20 @@ impl AtomicPromotionCase {
         Box::pin(self.assert_unchanged()).await;
     }
 
-    async fn assert_mode_drift(&self) {
+    async fn assert_authorization_drift(&self) {
         self.harness
-            .change_mode(
-                EntryAuthorizationPolicy::OperatorApprovalRequired,
-                "move outside P06 permit mode scope",
+            .change_authorization(
+                EntryAuthorizationPolicy::PolicyAutomatic,
+                "move outside P06 permit authorization scope",
             )
             .await;
         assert_eq!(
             self.harness.runtime_controls.entry_authorization_policy(),
-            EntryAuthorizationPolicy::OperatorApprovalRequired
+            EntryAuthorizationPolicy::PolicyAutomatic
         );
         let error = Box::pin(self.harness.service.activate(self.request.clone()))
             .await
-            .expect_err("runtime mode outside P06 permit scope must fail closed");
+            .expect_err("authorization policy outside P06 permit scope must fail closed");
         assert!(matches!(
             error,
             QuantError::Feedback(FeedbackError::InvalidPromotionPreflight { .. })
@@ -4746,9 +4746,9 @@ impl AtomicPromotionCase {
 
     async fn assert_revision_cas(&self) {
         self.harness
-            .change_mode(
+            .change_authorization(
                 EntryAuthorizationPolicy::OperatorApprovalRequired,
-                "restore mode while advancing P06 runtime revision",
+                "restore authorization while advancing P06 runtime revision",
             )
             .await;
         let current = self
@@ -5532,7 +5532,7 @@ async fn rejection_fault_matrix() {
     Box::pin(case.assert_revoked()).await;
     Box::pin(case.assert_hash_drift()).await;
     Box::pin(case.assert_expiry_race()).await;
-    Box::pin(case.assert_mode_drift()).await;
+    Box::pin(case.assert_authorization_drift()).await;
     Box::pin(case.assert_revision_cas()).await;
 }
 

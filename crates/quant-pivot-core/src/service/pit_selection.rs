@@ -274,6 +274,7 @@ mod tests {
                 fee::MarketMakerRebateEvidence,
                 registry::{MarketRegistryInfo, NegRiskLegSet, TokenInfo},
             },
+            order::PolymarketOrderRules,
             quant::{
                 CryptoSubject, DomainAvailability, GroundingProof, LinkageOutcome,
                 MarketDataHealth, MarketLinkage, MarketSubject, PriceComparator, ResolutionOracle,
@@ -364,6 +365,9 @@ mod tests {
             end_date: market.end_date,
             created_at: market.created_at,
             fee_schedule: None,
+            order_rules: Some(
+                PolymarketOrderRules::new(TickSize::Hundredth, Shares::ONE).expect("rules"),
+            ),
             maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         }
     }

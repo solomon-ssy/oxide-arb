@@ -9,12 +9,9 @@ use std::{
 use quant_pivot_allocator as _;
 use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, research::ResearchError};
 use rayon::{ThreadPool, ThreadPoolBuilder};
-use tokio::{
-    runtime::{Handle, RuntimeFlavor},
-    sync::{
-        OwnedSemaphorePermit, Semaphore,
-        oneshot::{self, Receiver},
-    },
+use tokio::sync::{
+    OwnedSemaphorePermit, Semaphore, TryAcquireError,
+    oneshot::{self, Receiver},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -75,6 +72,29 @@ impl OfflineMemory {
     }
 }
 
+/// Executor-owned offline-memory reservation that remains held across async
+/// artifact I/O and persistence boundaries.
+///
+/// The permit is released automatically on drop. A lease may only be used by
+/// the [`ComputeExecutor`] that created it; cross-executor use fails closed.
+pub struct OfflineMemoryLease {
+    reservation: Arc<OfflineMemoryReservation>,
+}
+
+struct OfflineMemoryReservation {
+    owner: Arc<Semaphore>,
+    _permit: OwnedSemaphorePermit,
+    reserved_mib: u32,
+}
+
+impl OfflineMemoryLease {
+    /// Logical bytes reserved from the process-wide offline-memory budget.
+    #[must_use]
+    pub fn reserved_bytes(&self) -> usize {
+        self.reservation.reserved_mib as usize * MIB_BYTES
+    }
+}
+
 /// Join handle for a governed computation whose leases live until the work
 /// actually stops, even when its caller is cancelled.
 pub struct ComputeTask<T> {
@@ -91,10 +111,21 @@ impl<T> ComputeTask<T> {
     }
 }
 
-struct OfflineLeases {
+/// Exclusive offline admission covering memory, one job, and the fixed CPU pool.
+///
+/// Dropping an unused lease releases every permit. Once submitted through
+/// [`ComputeExecutor::run_admitted`], the actual Rayon work owns the permits
+/// until its closure and cleanup finish, independently of caller cancellation.
+#[derive(Debug)]
+pub struct OfflineComputeLease {
+    job: OwnedSemaphorePermit,
+    cpu: OwnedSemaphorePermit,
+    memory: OwnedSemaphorePermit,
+}
+
+struct OfflineCpuLeases {
     _job: OwnedSemaphorePermit,
     _cpu: OwnedSemaphorePermit,
-    _memory: OwnedSemaphorePermit,
 }
 
 /// The only production owner of application Rayon pools.
@@ -144,27 +175,6 @@ impl ComputeExecutor {
         ComputeTask { result }.join().await
     }
 
-    /// Run borrowed serving inputs on the governed pool. In the production
-    /// multi-thread runtime, the Tokio worker only waits while Rayon owns the
-    /// CPU work; current-thread runtimes are supported for deterministic tests.
-    pub async fn run_serving_scoped<T, F>(&self, work: F) -> QuantResult<T>
-    where
-        T: Send,
-        F: FnOnce() -> QuantResult<T> + Send,
-    {
-        let cpu = Arc::clone(&self.serving_cpu)
-            .acquire_many_owned(SERVING_CPU_PERMITS)
-            .await
-            .map_err(|_| compute_closed("serving CPU"))?;
-        let execute = || self.serving_pool.install(|| catch_compute(work));
-        let result = match Handle::current().runtime_flavor() {
-            RuntimeFlavor::MultiThread => tokio::task::block_in_place(execute),
-            _ => execute(),
-        };
-        drop(cpu);
-        result
-    }
-
     /// Run credential hashing or verification on the isolated single-thread
     /// security pool. Authentication never occupies an Actix/Tokio worker and
     /// cannot queue behind report-serving or offline research computations.
@@ -195,6 +205,67 @@ impl ComputeExecutor {
         self.spawn_offline(memory, work).await?.join().await
     }
 
+    /// Attempt complete offline admission without entering any semaphore queue.
+    ///
+    /// Capacity pressure returns `None`. Acquisitions use the same memory ->
+    /// job -> CPU order as every blocking path, and a partial acquisition is
+    /// released before returning. Closed resources remain typed failures.
+    pub fn try_acquire_offline(
+        &self,
+        memory: OfflineMemory,
+    ) -> QuantResult<Option<OfflineComputeLease>> {
+        for (semaphore, resource) in [
+            (&self.offline_memory, "offline memory"),
+            (&self.offline_jobs, "offline job"),
+            (&self.offline_cpu, "offline CPU"),
+        ] {
+            if semaphore.is_closed() {
+                return Err(compute_closed(resource).into());
+            }
+        }
+        let Some(memory) = try_acquire(
+            Arc::clone(&self.offline_memory),
+            memory.permits_mib,
+            "offline memory",
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(job) = try_acquire(Arc::clone(&self.offline_jobs), 1, "offline job")? else {
+            return Ok(None);
+        };
+        let Some(cpu) = try_acquire(
+            Arc::clone(&self.offline_cpu),
+            OFFLINE_CPU_PERMITS,
+            "offline CPU",
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(OfflineComputeLease { job, cpu, memory }))
+    }
+
+    /// Submit an already admitted pure CPU closure to this executor's offline pool.
+    ///
+    /// No further resource wait occurs. A foreign lease is rejected before
+    /// spawning; after spawning, cancellation drops only the result receiver.
+    pub async fn run_admitted<T, F>(&self, lease: OfflineComputeLease, work: F) -> QuantResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QuantResult<T> + Send + 'static,
+    {
+        if !Arc::ptr_eq(&self.offline_memory, lease.memory.semaphore())
+            || !Arc::ptr_eq(&self.offline_jobs, lease.job.semaphore())
+            || !Arc::ptr_eq(&self.offline_cpu, lease.cpu.semaphore())
+        {
+            return Err(InfraError::ComputeExecution {
+                detail: "offline compute lease belongs to another compute executor".to_owned(),
+            }
+            .into());
+        }
+        self.spawn_offline_with_leases(lease, work).join().await
+    }
+
     pub async fn run_offline_cancellable<T, F>(
         &self,
         memory: OfflineMemory,
@@ -211,26 +282,104 @@ impl ComputeExecutor {
             .await
     }
 
-    /// Borrowed counterpart for offline kernels assembled from immutable
-    /// request slices. The caller's Tokio worker waits; Rayon owns the CPU.
-    pub async fn run_offline_scoped<T, F>(
+    /// Reserve offline memory independently of CPU execution so owned
+    /// artifacts remain governed while crossing async I/O and database awaits.
+    pub async fn acquire_offline_memory(
         &self,
         memory: OfflineMemory,
+    ) -> QuantResult<OfflineMemoryLease> {
+        self.acquire_memory(memory, None).await
+    }
+
+    /// Cancellation-aware counterpart to [`Self::acquire_offline_memory`].
+    pub async fn acquire_offline_memory_cancellable(
+        &self,
+        memory: OfflineMemory,
+        cancel: &CancellationToken,
+    ) -> QuantResult<OfflineMemoryLease> {
+        self.acquire_memory(memory, Some(cancel)).await
+    }
+
+    async fn acquire_memory(
+        &self,
+        memory: OfflineMemory,
+        cancel: Option<&CancellationToken>,
+    ) -> QuantResult<OfflineMemoryLease> {
+        let permit = acquire(
+            Arc::clone(&self.offline_memory),
+            memory.permits_mib,
+            cancel,
+            "offline memory",
+        )
+        .await?;
+        Ok(OfflineMemoryLease {
+            reservation: Arc::new(OfflineMemoryReservation {
+                owner: Arc::clone(&self.offline_memory),
+                _permit: permit,
+                reserved_mib: memory.permits_mib,
+            }),
+        })
+    }
+
+    /// Run exclusive offline CPU work under an existing memory reservation.
+    /// The borrowed lease remains live until the computation has joined.
+    pub async fn run_offline_with_lease<T, F>(
+        &self,
+        lease: &OfflineMemoryLease,
+        work: F,
+    ) -> QuantResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QuantResult<T> + Send + 'static,
+    {
+        self.run_with_lease(lease, None, work).await
+    }
+
+    /// Cancellation-aware counterpart to [`Self::run_offline_with_lease`].
+    pub async fn run_leased_cancellable<T, F>(
+        &self,
+        lease: &OfflineMemoryLease,
         cancel: &CancellationToken,
         work: F,
     ) -> QuantResult<T>
     where
-        T: Send,
-        F: FnOnce() -> QuantResult<T> + Send,
+        T: Send + 'static,
+        F: FnOnce() -> QuantResult<T> + Send + 'static,
     {
-        let leases = self.acquire_offline(memory, Some(cancel)).await?;
-        let execute = || self.offline_pool.install(|| catch_compute(work));
-        let result = match Handle::current().runtime_flavor() {
-            RuntimeFlavor::MultiThread => tokio::task::block_in_place(execute),
-            _ => execute(),
-        };
-        drop(leases);
-        result
+        self.run_with_lease(lease, Some(cancel), work).await
+    }
+
+    async fn run_with_lease<T, F>(
+        &self,
+        lease: &OfflineMemoryLease,
+        cancel: Option<&CancellationToken>,
+        work: F,
+    ) -> QuantResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QuantResult<T> + Send + 'static,
+    {
+        if !Arc::ptr_eq(&self.offline_memory, &lease.reservation.owner) {
+            return Err(InfraError::ComputeExecution {
+                detail: "offline memory lease belongs to another compute executor".to_owned(),
+            }
+            .into());
+        }
+        let leases = self.acquire_offline_cpu(cancel).await?;
+        let reservation = Arc::clone(&lease.reservation);
+        let (sender, result) = oneshot::channel();
+        self.offline_pool.spawn(move || {
+            let _leases = leases;
+            let _reservation = reservation;
+            let _ = sender.send(catch_compute(work));
+        });
+        ComputeTask { result }.join().await
+    }
+
+    /// Currently unreserved bytes in the fixed offline-memory semaphore.
+    #[must_use]
+    pub fn available_offline_memory_bytes(&self) -> usize {
+        self.offline_memory.available_permits() * MIB_BYTES
     }
 
     /// Start streaming offline work after acquiring the same exclusive job,
@@ -262,7 +411,11 @@ impl ComputeExecutor {
         Ok(self.spawn_offline_with_leases(leases, work))
     }
 
-    fn spawn_offline_with_leases<T, F>(&self, leases: OfflineLeases, work: F) -> ComputeTask<T>
+    fn spawn_offline_with_leases<T, F>(
+        &self,
+        leases: OfflineComputeLease,
+        work: F,
+    ) -> ComputeTask<T>
     where
         T: Send + 'static,
         F: FnOnce() -> QuantResult<T> + Send + 'static,
@@ -279,7 +432,17 @@ impl ComputeExecutor {
         &self,
         memory: OfflineMemory,
         cancel: Option<&CancellationToken>,
-    ) -> QuantResult<OfflineLeases> {
+    ) -> QuantResult<OfflineComputeLease> {
+        // All offline paths acquire in memory -> job -> CPU order. Owned
+        // memory leases use the same order before calling
+        // `acquire_offline_cpu`, preventing cross-path lock inversion.
+        let memory = acquire(
+            Arc::clone(&self.offline_memory),
+            memory.permits_mib,
+            cancel,
+            "offline memory",
+        )
+        .await?;
         let job = acquire(Arc::clone(&self.offline_jobs), 1, cancel, "offline job").await?;
         let cpu = acquire(
             Arc::clone(&self.offline_cpu),
@@ -288,17 +451,24 @@ impl ComputeExecutor {
             "offline CPU",
         )
         .await?;
-        let memory = acquire(
-            Arc::clone(&self.offline_memory),
-            memory.permits_mib,
+        Ok(OfflineComputeLease { job, cpu, memory })
+    }
+
+    async fn acquire_offline_cpu(
+        &self,
+        cancel: Option<&CancellationToken>,
+    ) -> QuantResult<OfflineCpuLeases> {
+        let job = acquire(Arc::clone(&self.offline_jobs), 1, cancel, "offline job").await?;
+        let cpu = acquire(
+            Arc::clone(&self.offline_cpu),
+            OFFLINE_CPU_PERMITS,
             cancel,
-            "offline memory",
+            "offline CPU",
         )
         .await?;
-        Ok(OfflineLeases {
+        Ok(OfflineCpuLeases {
             _job: job,
             _cpu: cpu,
-            _memory: memory,
         })
     }
 }
@@ -338,6 +508,18 @@ async fn acquire(
         acquire.await
     };
     permit.map_err(|_| compute_closed(resource).into())
+}
+
+fn try_acquire(
+    semaphore: Arc<Semaphore>,
+    permits: u32,
+    resource: &'static str,
+) -> QuantResult<Option<OwnedSemaphorePermit>> {
+    match semaphore.try_acquire_many_owned(permits) {
+        Ok(permit) => Ok(Some(permit)),
+        Err(TryAcquireError::NoPermits) => Ok(None),
+        Err(TryAcquireError::Closed) => Err(compute_closed(resource).into()),
+    }
 }
 
 fn catch_compute<T, F>(work: F) -> QuantResult<T>
@@ -380,16 +562,297 @@ mod tests {
         time::Duration,
     };
 
-    use quant_pivot_error::{QuantResult, infra::InfraError};
+    use quant_pivot_error::{QuantError, QuantResult, infra::InfraError};
+    use tokio::{sync::oneshot, task, time::timeout};
     use tokio_util::sync::CancellationToken;
 
-    use super::{ComputeExecutor, OFFLINE_MEMORY_BYTES, OfflineMemory};
+    use super::{ComputeExecutor, OFFLINE_MEMORY_BYTES, OFFLINE_THREADS, OfflineMemory};
 
     #[test]
     fn memory_reservation_rejects_budget() {
         let error = OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES + 1)
             .expect_err("reservation must fail closed");
         assert!(error.to_string().contains("offline memory reservation"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn offline_keeps_runtime_live() -> QuantResult<()> {
+        let executor = Arc::new(ComputeExecutor::new()?);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = Arc::clone(&executor);
+        let computation = task::spawn(async move {
+            worker
+                .run_offline(OfflineMemory::try_gib(1)?, move || {
+                    let thread_name =
+                        thread::current().name().map(str::to_owned).ok_or_else(|| {
+                            InfraError::ComputeExecution {
+                                detail: "offline worker has no thread name".to_owned(),
+                            }
+                        })?;
+                    let _ = started_tx.send(thread_name);
+                    release_rx
+                        .recv()
+                        .map_err(|error| InfraError::ComputeExecution {
+                            detail: format!("wait for offline liveness release: {error}"),
+                        })?;
+                    Ok(())
+                })
+                .await
+        });
+        let thread_name = started_rx.await.map_err(|_| InfraError::ComputeExecution {
+            detail: "offline liveness worker exited before start".to_owned(),
+        })?;
+        assert!(thread_name.starts_with("quant-offline-"));
+
+        let (heartbeat_tx, heartbeat_rx) = oneshot::channel();
+        task::spawn(async move {
+            task::yield_now().await;
+            let _ = heartbeat_tx.send(());
+        });
+        timeout(Duration::from_millis(100), heartbeat_rx)
+            .await
+            .map_err(|_| InfraError::ComputeExecution {
+                detail: "offline kernel blocked the single Tokio worker".to_owned(),
+            })?
+            .map_err(|_| InfraError::ComputeExecution {
+                detail: "offline liveness heartbeat sender exited".to_owned(),
+            })?;
+
+        release_tx
+            .send(())
+            .map_err(|error| InfraError::ComputeExecution {
+                detail: format!("release offline liveness worker: {error}"),
+            })?;
+        computation
+            .await
+            .map_err(|error| InfraError::ComputeExecution {
+                detail: format!("join offline liveness caller: {error}"),
+            })??;
+        Ok(())
+    }
+
+    #[test]
+    fn busy_admission_releases_partial() -> QuantResult<()> {
+        let executor = ComputeExecutor::new()?;
+        let memory = OfflineMemory::try_gib(4)?;
+        let job = Arc::clone(&executor.offline_jobs)
+            .try_acquire_owned()
+            .expect("idle job permit");
+        for _ in 0..3 {
+            assert!(executor.try_acquire_offline(memory)?.is_none());
+            assert_eq!(
+                executor.available_offline_memory_bytes(),
+                OFFLINE_MEMORY_BYTES
+            );
+            assert_eq!(executor.offline_cpu.available_permits(), OFFLINE_THREADS);
+            assert_eq!(executor.offline_jobs.available_permits(), 0);
+        }
+        drop(job);
+        let cpu = Arc::clone(&executor.offline_cpu)
+            .try_acquire_owned()
+            .expect("idle CPU permit");
+        for _ in 0..3 {
+            assert!(executor.try_acquire_offline(memory)?.is_none());
+            assert_eq!(
+                executor.available_offline_memory_bytes(),
+                OFFLINE_MEMORY_BYTES
+            );
+            assert_eq!(executor.offline_jobs.available_permits(), 1);
+            assert_eq!(
+                executor.offline_cpu.available_permits(),
+                OFFLINE_THREADS - 1
+            );
+        }
+        drop(cpu);
+        let lease = executor
+            .try_acquire_offline(memory)?
+            .expect("idle offline admission");
+        assert_eq!(executor.offline_jobs.available_permits(), 0);
+        assert_eq!(executor.offline_cpu.available_permits(), 0);
+        drop(lease);
+        assert_eq!(
+            executor.available_offline_memory_bytes(),
+            OFFLINE_MEMORY_BYTES
+        );
+        assert_eq!(executor.offline_jobs.available_permits(), 1);
+        assert_eq!(executor.offline_cpu.available_permits(), OFFLINE_THREADS);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_pressure_returns_none() -> QuantResult<()> {
+        let executor = ComputeExecutor::new()?;
+        let existing = executor
+            .acquire_offline_memory(OfflineMemory::try_gib(7)?)
+            .await?;
+        let remaining = OFFLINE_MEMORY_BYTES - existing.reserved_bytes();
+        assert!(
+            executor
+                .try_acquire_offline(OfflineMemory::try_gib(4)?)?
+                .is_none()
+        );
+        assert_eq!(executor.available_offline_memory_bytes(), remaining);
+        assert_eq!(executor.offline_jobs.available_permits(), 1);
+        assert_eq!(executor.offline_cpu.available_permits(), OFFLINE_THREADS);
+        drop(existing);
+        let lease = executor
+            .try_acquire_offline(OfflineMemory::try_gib(4)?)?
+            .expect("memory restored after the independent reservation");
+        drop(lease);
+        assert_eq!(
+            executor.available_offline_memory_bytes(),
+            OFFLINE_MEMORY_BYTES
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn closed_admission_is_error() -> QuantResult<()> {
+        for resource in ["offline memory", "offline job", "offline CPU"] {
+            let executor = ComputeExecutor::new()?;
+            match resource {
+                "offline memory" => executor.offline_memory.close(),
+                "offline job" => executor.offline_jobs.close(),
+                _ => executor.offline_cpu.close(),
+            }
+            let error = executor
+                .try_acquire_offline(OfflineMemory::try_gib(1)?)
+                .expect_err("closed resources are not retryable capacity pressure");
+            assert!(
+                matches!(error, QuantError::Infra(InfraError::ComputeExecution { detail })
+                if detail == format!("governed {resource} semaphore closed"))
+            );
+            assert_eq!(
+                executor.available_offline_memory_bytes(),
+                OFFLINE_MEMORY_BYTES
+            );
+            assert_eq!(executor.offline_jobs.available_permits(), 1);
+            assert_eq!(executor.offline_cpu.available_permits(), OFFLINE_THREADS);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn foreign_admission_is_rejected() -> QuantResult<()> {
+        let owner = ComputeExecutor::new()?;
+        let foreign = ComputeExecutor::new()?;
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&invoked);
+        let result = {
+            let lease = owner
+                .try_acquire_offline(OfflineMemory::try_gib(10)?)?
+                .expect("owner admission");
+            foreign
+                .run_admitted(lease, move || {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+        };
+        assert!(
+            matches!(result, Err(QuantError::Infra(InfraError::ComputeExecution { detail }))
+            if detail.contains("another compute executor"))
+        );
+        assert_eq!(invoked.load(Ordering::SeqCst), 0);
+        assert_eq!(owner.available_offline_memory_bytes(), OFFLINE_MEMORY_BYTES);
+        assert_eq!(owner.offline_jobs.available_permits(), 1);
+        assert_eq!(owner.offline_cpu.available_permits(), OFFLINE_THREADS);
+        assert_eq!(
+            foreign.available_offline_memory_bytes(),
+            OFFLINE_MEMORY_BYTES
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unpolled_admission_releases_leases() -> QuantResult<()> {
+        let executor = ComputeExecutor::new()?;
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&invoked);
+        let future = executor.run_admitted(
+            executor
+                .try_acquire_offline(OfflineMemory::try_gib(10)?)?
+                .expect("unpolled admission"),
+            move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        drop(future);
+        assert_eq!(invoked.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            executor.available_offline_memory_bytes(),
+            OFFLINE_MEMORY_BYTES
+        );
+        assert_eq!(executor.offline_jobs.available_permits(), 1);
+        assert_eq!(executor.offline_cpu.available_permits(), OFFLINE_THREADS);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_admission_keeps_leases() -> QuantResult<()> {
+        let executor = Arc::new(ComputeExecutor::new()?);
+        let lease = executor
+            .try_acquire_offline(OfflineMemory::try_gib(10)?)?
+            .expect("initial admission");
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = Arc::clone(&executor);
+        let caller = tokio::spawn(async move {
+            worker
+                .run_admitted(lease, move || {
+                    let _ = started_tx.send(());
+                    release_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .map_err(|error| InfraError::ComputeExecution {
+                            detail: format!("wait for admitted worker release: {error}"),
+                        })?;
+                    Ok(())
+                })
+                .await
+        });
+        started_rx.await.map_err(|_| InfraError::ComputeExecution {
+            detail: "admitted worker exited before its start signal".to_owned(),
+        })?;
+        caller.abort();
+        assert!(caller.await.is_err());
+        assert_eq!(executor.available_offline_memory_bytes(), 0);
+        assert_eq!(executor.offline_jobs.available_permits(), 0);
+        assert_eq!(executor.offline_cpu.available_permits(), 0);
+        assert!(
+            executor
+                .try_acquire_offline(OfflineMemory::try_gib(1)?)?
+                .is_none()
+        );
+        release_tx
+            .send(())
+            .map_err(|error| InfraError::ComputeExecution {
+                detail: format!("release admitted worker: {error}"),
+            })?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                {
+                    let admission = executor.try_acquire_offline(OfflineMemory::try_gib(10)?)?;
+                    if let Some(lease) = admission {
+                        drop(lease);
+                        return Ok::<(), QuantError>(());
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| InfraError::ComputeExecution {
+            detail: "admitted worker did not release all permits after completion".to_owned(),
+        })??;
+        assert_eq!(
+            executor.available_offline_memory_bytes(),
+            OFFLINE_MEMORY_BYTES
+        );
+        assert_eq!(executor.offline_jobs.available_permits(), 1);
+        assert_eq!(executor.offline_cpu.available_permits(), OFFLINE_THREADS);
+        Ok(())
     }
 
     #[tokio::test]
@@ -479,6 +942,55 @@ mod tests {
                 detail: format!("join second offline task: {error}"),
             })??;
         assert_eq!(second_started.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aborted_caller_keeps_reservation() -> QuantResult<()> {
+        let executor = Arc::new(ComputeExecutor::new()?);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = Arc::clone(&executor);
+        let caller = tokio::spawn(async move {
+            let lease = worker
+                .acquire_offline_memory(OfflineMemory::try_gib(10)?)
+                .await?;
+            assert_eq!(lease.reserved_bytes(), OFFLINE_MEMORY_BYTES);
+            let result = worker
+                .run_offline_with_lease(&lease, move || {
+                    let _ = started_tx.send(());
+                    release_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .map_err(|error| InfraError::ComputeExecution {
+                            detail: format!("wait for leased worker release: {error}"),
+                        })?;
+                    Ok(())
+                })
+                .await;
+            drop(lease);
+            result
+        });
+        started_rx.await.map_err(|_| InfraError::ComputeExecution {
+            detail: "leased worker exited before its start signal".to_owned(),
+        })?;
+        caller.abort();
+        assert!(caller.await.is_err());
+        assert_eq!(executor.available_offline_memory_bytes(), 0);
+
+        release_tx
+            .send(())
+            .map_err(|error| InfraError::ComputeExecution {
+                detail: format!("release leased worker: {error}"),
+            })?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while executor.available_offline_memory_bytes() != OFFLINE_MEMORY_BYTES {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| InfraError::ComputeExecution {
+            detail: "leased worker did not release its memory reservation".to_owned(),
+        })?;
         Ok(())
     }
 

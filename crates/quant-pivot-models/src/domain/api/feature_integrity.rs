@@ -103,14 +103,9 @@ pub struct FeatureParityRunView {
     pub created_at: DateTime<Utc>,
 }
 
-impl FeatureParityRunView {
-    /// Build the frozen wire view, rejecting legacy/incomplete rows that do not
-    /// carry the contract hash required to interpret their evidence.
-    pub fn try_from_info(info: FeatureParityRunInfo) -> Result<Self, &'static str> {
-        let feature_contract_hash = info
-            .feature_contract_hash
-            .ok_or("parity run is missing feature_contract_hash")?;
-        Ok(Self {
+impl From<FeatureParityRunInfo> for FeatureParityRunView {
+    fn from(info: FeatureParityRunInfo) -> Self {
+        Self {
             parity_run_id: info.run_id,
             kind: info.kind,
             status: info.status,
@@ -124,7 +119,7 @@ impl FeatureParityRunView {
             matched_count: info.matched_count,
             mismatched_count: info.mismatched_count,
             pending_materialization_count: info.pending_materialization_count,
-            feature_contract_hash,
+            feature_contract_hash: info.feature_contract_hash,
             transform_hash: info.transform_hash,
             triggered_by: info.triggered_by,
             requested_by: info.requested_by,
@@ -137,7 +132,7 @@ impl FeatureParityRunView {
             containment_completed_at: info.containment_completed_at,
             finished_at: info.finished_at,
             created_at: info.created_at,
-        })
+        }
     }
 }
 
@@ -271,7 +266,7 @@ mod tests {
             matched_count: 0,
             mismatched_count: 0,
             pending_materialization_count: 0,
-            feature_contract_hash: Some(ContentHash::parse(HASH).expect("canonical hash")),
+            feature_contract_hash: ContentHash::parse(HASH).expect("canonical hash"),
             transform_hash: None,
             failure_code: Some(DiagnosticCode::new("replay_failed")),
             failure_detail: Some("durable evidence unavailable".to_owned()),
@@ -283,7 +278,7 @@ mod tests {
             updated_at: now,
         };
 
-        let view = FeatureParityRunView::try_from_info(info).expect("complete run view");
+        let view = FeatureParityRunView::from(info);
         assert_eq!(view.report_id.as_ref(), Some(&report_id));
         assert_eq!(view.model_version_id.as_ref(), Some(&model_version_id));
         assert_eq!(

@@ -15,7 +15,8 @@ use crate::{
     },
     execution::{
         AccountChainExecutionProjector, AccountChainExecutionProjectorDeps,
-        AccountPauseCoordinator, AdmissionInputBuilder, AdmissionInputBuilderDeps, ClobOrderClient,
+        AccountPauseCoordinator, AccountRecoveryService, AccountRecoveryServiceDeps,
+        AdmissionInputBuilder, AdmissionInputBuilderDeps, ClobOrderClient,
         ClobReconciliationReader, CompositeExitSignalEvaluator, CoreExecutionDispatcher,
         CoreExitDispatcher, DefaultAdmissionEngine, DispatchWake, EvidenceCollector,
         ExecutionBreaker, ExecutionDispatcherDeps, ExecutionOrderLifecyclePublisher,
@@ -50,6 +51,10 @@ use crate::{
             ModelBackedOpportunisticSellScorer, ModelBackedOpportunisticSellScorerDeps,
             OpportunisticSellSignalEvaluator, OpportunisticSellSignalEvaluatorDeps,
         },
+        recommendation_economic_outcome::{
+            CanonicalRecommendationEconomicReplaySource, RecommendationEconomicReplaySource,
+        },
+        route_economic_health::RouteEconomicHealthService,
         signal_reinference::{ReinferenceSignalEvaluator, ReinferenceSignalEvaluatorDeps},
     },
 };
@@ -75,15 +80,16 @@ use quant_pivot_models::{
     types::WorkerId,
 };
 use quant_pivot_repository::traits::{
-    AccountChainExecutionRepository, AccountPauseRepository, AccountRecoveryRepository,
+    AccountChainExecutionRepository, AccountPauseOperationRepository, AccountRecoveryRepository,
     CapitalAllocationRepository, ClobMarketInfoRepository, DomainSourceCursorRepository,
     EntryConditionRepository, ExchangeHistoryRepository, ExecutionAttemptOutcomeRepository,
     ExecutionOrderRepository, ExecutionSubmissionRepository, FactorRepository,
     FeatureParityRepository, MarketRepository, ModelRegistryRepository, OperationLogRepository,
-    OrderIntentRepository, PolicyRepository, RecommendationExecutionRollupRepository,
-    RecommendationReportRepository, RecommendationRepository,
-    RecommendationResolutionOutcomeRepository, ReconciliationRepository,
-    ResolutionObservationRepository, StrategyPositionLotRepository, TradePolicyRepository,
+    OrderIntentRepository, PolicyRepository, RecommendationEconomicOutcomeRepository,
+    RecommendationExecutionRollupRepository, RecommendationReportRepository,
+    RecommendationRepository, RecommendationResolutionOutcomeRepository, ReconciliationRepository,
+    ReservedCapitalRepository, ResolutionObservationRepository, RouteEconomicHealthRepository,
+    StrategyPositionLotRepository, TradePolicyRepository,
     quant::{
         settlement_governance::{
             SettlementExternalCursorRepository, SettlementGovernanceRepository,
@@ -122,8 +128,10 @@ pub struct ExecutionBundle {
     pub reconciliation: Arc<ReconciliationService>,
     pub account_chain_projector: Arc<AccountChainExecutionProjector>,
     pub account_pause: Arc<AccountPauseCoordinator>,
+    pub account_recovery: Arc<AccountRecoveryService>,
     /// Produces orthogonal resolution and execution outcome truth.
     pub outcome_reconciliation: Arc<OutcomeReconciliationService>,
+    pub route_economic_health: Arc<RouteEconomicHealthService>,
     /// Exit-monitor engine: scans open lots and drives the exit ladder.
     pub exit_monitor: Arc<ExitMonitorService>,
     /// Exit-monitor health hot read consumed by admission `#20`.
@@ -144,8 +152,7 @@ pub struct ExecutionBundle {
 impl ExecutionBundle {
     /// Assemble the execution subsystem from the shared planes.
     pub fn assemble(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Self> {
-        let infra = deps.infra;
-        let repos = &infra.repos;
+        let repos = &deps.infra.repos;
 
         let breaker = build_execution_breaker(deps)?;
         let settlement = build_settlement_runtime(deps)?;
@@ -154,19 +161,19 @@ impl ExecutionBundle {
         ));
 
         // Exit-monitor health seam: owned by the governance bundle so it
-        // is shared with the mode preflight; published by the worker, read by
+        // is shared with the entry-authorization preflight; published by the worker, read by
         // admission `#20`. Starts not-ready (fail-closed) until the first scan.
         let exit_monitor_health = deps.governance.exit_monitor_health.clone();
 
         // Stateless admission: input builder (breaker venue-health + exit-monitor
-        // seams) + the 25-check engine.
+        // seams) + the 26-check engine.
         let admission_builder = build_admission_builder(
             deps,
             &breaker,
             exit_monitor_health.clone(),
             Arc::clone(&settlement.recovery_admission),
         );
-        let admission = Arc::new(DefaultAdmissionEngine::new(Arc::clone(&infra.metrics)));
+        let admission = Arc::new(DefaultAdmissionEngine::new(Arc::clone(&deps.infra.metrics)));
 
         let clob = Arc::clone(&deps.clob);
         let order_client: Arc<dyn PolymarketOrderClient> =
@@ -177,19 +184,21 @@ impl ExecutionBundle {
         let account_pause = Arc::new(AccountPauseCoordinator::connect(
             &deps.deploy.polymarket.onchain,
             Arc::clone(&settlement.wallet_executor),
-            Arc::clone(&repos.account_pause) as Arc<dyn AccountPauseRepository>,
+            Arc::clone(&repos.account_pause_operation) as Arc<dyn AccountPauseOperationRepository>,
         )?);
+        let account_recovery = build_account_recovery(deps, &clob, &account_pause)?;
         let account_chain_projector = Arc::new(AccountChainExecutionProjector::new(
             AccountChainExecutionProjectorDeps {
                 execution_account_id: deps.account.execution_account.execution_account_id,
                 funder: deps.account.execution_account.funder_address.clone(),
-                facts: Arc::clone(&infra.quant_fact_read),
+                facts: Arc::clone(&deps.infra.quant_fact_read),
                 executions: Arc::clone(&repos.account_chain_execution)
                     as Arc<dyn AccountChainExecutionRepository>,
                 recovery: Arc::clone(&repos.account_recovery) as Arc<dyn AccountRecoveryRepository>,
                 kill_switch: Arc::clone(&deps.governance.kill_switch),
                 alerts: Arc::clone(&deps.governance.alerts),
                 pause: Arc::clone(&account_pause),
+                recovery_service: Arc::clone(&account_recovery),
             },
         ));
         let intents: Arc<dyn OrderIntentRepository> =
@@ -204,8 +213,8 @@ impl ExecutionBundle {
                 admission,
                 order_client: Arc::clone(&order_client),
                 breaker: Arc::clone(&breaker),
-                metrics: Arc::clone(&infra.metrics),
-                execution_events: Arc::clone(&infra.execution_event_writer),
+                metrics: Arc::clone(&deps.infra.metrics),
+                execution_events: Arc::clone(&deps.infra.execution_event_writer),
                 intent_lifecycle: Arc::clone(&deps.intent_lifecycle),
                 order_lifecycle: Arc::clone(&order_lifecycle),
                 feature_parity_gate: Arc::new(RepositoryFeatureParityGate::new(Arc::clone(
@@ -220,7 +229,7 @@ impl ExecutionBundle {
             Arc::new(ClobReconciliationReader::new(Arc::clone(&clob)));
         let collector: Arc<dyn EvidenceCollector> = Arc::new(VenueEvidenceCollector::new(
             reader,
-            Arc::clone(&infra.quant_fact_read),
+            Arc::clone(&deps.infra.quant_fact_read),
             deps.wallet,
             Arc::clone(&deps.data.book_store),
             Arc::clone(&deps.data.catalog_ledger_repo),
@@ -240,12 +249,12 @@ impl ExecutionBundle {
             clob_market_info: Arc::clone(&repos.clob_market_info)
                 as Arc<dyn ClobMarketInfoRepository>,
             breaker: Arc::clone(&breaker),
-            metrics: Arc::clone(&infra.metrics),
+            metrics: Arc::clone(&deps.infra.metrics),
             config: Arc::clone(&deps.governance.runtime_config),
             capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
-            execution_events: Arc::clone(&infra.execution_event_writer),
-            capital_events: Arc::clone(&infra.capital_allocation_event_writer),
-            position_events: Arc::clone(&infra.position_event_writer),
+            execution_events: Arc::clone(&deps.infra.execution_event_writer),
+            capital_events: Arc::clone(&deps.infra.capital_allocation_event_writer),
+            position_events: Arc::clone(&deps.infra.position_event_writer),
             intent_lifecycle: Arc::clone(&deps.intent_lifecycle),
             order_lifecycle: Arc::clone(&order_lifecycle),
             events: deps.intent_lifecycle.publisher(),
@@ -255,10 +264,11 @@ impl ExecutionBundle {
         let exit_monitor = build_exit_monitor(
             ExitMonitorWiring {
                 deploy: deps.deploy,
-                infra,
+                infra: deps.infra,
                 data: deps.data,
                 governance: deps.governance,
                 research: deps.research,
+                clob: &deps.clob,
             },
             &submission,
             &order_client,
@@ -267,6 +277,10 @@ impl ExecutionBundle {
             exit_monitor_health.clone(),
         );
         let outcome_reconciliation = build_outcome_reconciliation_service(deps)?;
+        let route_economic_health = Arc::new(RouteEconomicHealthService::new(Arc::clone(
+            &repos.route_economic_health,
+        )
+            as Arc<dyn RouteEconomicHealthRepository>));
 
         Ok(Self {
             clob,
@@ -277,7 +291,9 @@ impl ExecutionBundle {
             reconciliation,
             account_chain_projector,
             account_pause,
+            account_recovery,
             outcome_reconciliation,
+            route_economic_health,
             exit_monitor,
             exit_monitor_health,
             dispatch_wake: DispatchWake::new(),
@@ -302,6 +318,30 @@ struct SettlementRuntime {
     control: Arc<dyn SettlementControlPort>,
     recovery_admission: Arc<dyn SettlementRecoveryAdmissionPort>,
     wallet_executor: Arc<ProductionSettlementExecutor>,
+}
+
+fn build_account_recovery(
+    deps: &ExecutionBundleDeps<'_>,
+    clob: &Arc<ClobClient>,
+    account_pause: &Arc<AccountPauseCoordinator>,
+) -> QuantResult<Arc<AccountRecoveryService>> {
+    let repos = &deps.infra.repos;
+    AccountRecoveryService::connect(AccountRecoveryServiceDeps {
+        onchain: deps.deploy.polymarket.onchain.clone(),
+        execution_account_id: deps.account.execution_account.execution_account_id,
+        funder: deps.account.execution_account.funder_address.clone(),
+        clob: Arc::clone(clob),
+        data_api: Arc::clone(&deps.account.data_api),
+        market_registry: Arc::clone(&deps.data.market_registry),
+        pause: Arc::clone(account_pause),
+        pause_operations: Arc::clone(&repos.account_pause_operation)
+            as Arc<dyn AccountPauseOperationRepository>,
+        recovery: Arc::clone(&repos.account_recovery) as Arc<dyn AccountRecoveryRepository>,
+        positions: Arc::clone(&repos.position) as Arc<dyn StrategyPositionLotRepository>,
+        reserved: Arc::clone(&repos.reserved_capital) as Arc<dyn ReservedCapitalRepository>,
+        settlement: Arc::clone(&repos.settlement_redeem) as Arc<dyn SettlementRedeemRepository>,
+    })
+    .map(Arc::new)
 }
 
 fn build_settlement_runtime(deps: &ExecutionBundleDeps<'_>) -> QuantResult<SettlementRuntime> {
@@ -440,6 +480,14 @@ fn build_outcome_reconciliation_service(
         AlloyFinalizedResolutionReader::connect(&deps.deploy.polymarket.onchain)
             .map_err(|source| QuantError::config(source.to_string()))?,
     ) as Arc<dyn ResolutionSourceReader>;
+    let economic_outcomes = Arc::clone(&repos.recommendation_economic_outcome)
+        as Arc<dyn RecommendationEconomicOutcomeRepository>;
+    let economic_replay = Arc::new(CanonicalRecommendationEconomicReplaySource::new(
+        Arc::clone(&economic_outcomes),
+        Arc::clone(&deps.infra.quant_fact_read),
+        Arc::clone(&repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
+        Arc::clone(&deps.research.compute),
+    )) as Arc<dyn RecommendationEconomicReplaySource>;
     Ok(Arc::new(OutcomeReconciliationService::new(
         OutcomeReconciliationServiceDeps {
             resolution_source,
@@ -456,6 +504,8 @@ fn build_outcome_reconciliation_service(
                 as Arc<dyn ExecutionAttemptOutcomeRepository>,
             execution_rollups: Arc::clone(&repos.recommendation_execution_rollup)
                 as Arc<dyn RecommendationExecutionRollupRepository>,
+            economic_outcomes,
+            economic_replay,
         },
     )))
 }
@@ -475,6 +525,8 @@ fn build_admission_builder(
             as Arc<dyn RecommendationReportRepository>,
         model_registry: Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>,
         trade_policies: Arc::clone(&repos.trade_policy) as Arc<dyn TradePolicyRepository>,
+        economic_health: Arc::clone(&repos.route_economic_health)
+            as Arc<dyn RouteEconomicHealthRepository>,
         artifact_store: Arc::clone(&deps.research.artifact_store),
         calibration_loader: Arc::clone(&deps.research.calibration_loader),
         reconciliation: Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
@@ -507,6 +559,7 @@ struct ExitMonitorWiring<'a> {
     data: &'a DataBundle,
     governance: &'a GovernanceBundle,
     research: &'a ResearchBundle,
+    clob: &'a Arc<ClobClient>,
 }
 
 /// Assemble the exit-monitor engine: model-backed signal re-inference
@@ -581,7 +634,11 @@ fn build_exit_monitor(
         metrics: Arc::clone(&metrics),
         execution_events: Arc::clone(&wiring.infra.execution_event_writer),
         intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
+        recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
+        reports: Arc::clone(&repos.recommendation_report)
+            as Arc<dyn RecommendationReportRepository>,
         clob_market_info: Arc::clone(&repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
+        clob: Arc::clone(wiring.clob),
         book_store: Arc::clone(&wiring.data.book_store),
         order_lifecycle: Arc::clone(order_lifecycle),
     }));
@@ -589,6 +646,7 @@ fn build_exit_monitor(
         positions: Arc::clone(&repos.position) as Arc<dyn StrategyPositionLotRepository>,
         intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
         recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
+        clob_market_info: Arc::clone(&repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
         submission: Arc::clone(submission),
         book_store: Arc::clone(&wiring.data.book_store),
         runtime_controls: wiring.governance.runtime_controls.clone(),

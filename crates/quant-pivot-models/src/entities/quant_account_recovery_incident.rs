@@ -4,7 +4,8 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    quant_account_chain_execution, quant_account_pause_submission, quant_execution_account,
+    quant_account_chain_execution, quant_account_clean_funder_blocker,
+    quant_account_pause_operation, quant_account_recovery_manifest, quant_execution_account,
 };
 use crate::{
     enums::execution::{AccountRecoveryIncidentKind, AccountRecoveryIncidentStatus},
@@ -47,8 +48,12 @@ pub struct Model {
         to = "account_chain_execution_id"
     )]
     pub trigger_chain_execution: BelongsTo<Option<quant_account_chain_execution::Entity>>,
-    #[sea_orm(has_many, relation_enum = "PauseSubmission")]
-    pub pause_submission: HasMany<quant_account_pause_submission::Entity>,
+    #[sea_orm(has_many, relation_enum = "PauseOperation")]
+    pub pause_operation: HasMany<quant_account_pause_operation::Entity>,
+    #[sea_orm(has_many, relation_enum = "RecoveryManifest")]
+    pub recovery_manifest: HasMany<quant_account_recovery_manifest::Entity>,
+    #[sea_orm(has_one, relation_enum = "CleanFunderBlocker")]
+    pub clean_funder_blocker: HasOne<quant_account_clean_funder_blocker::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

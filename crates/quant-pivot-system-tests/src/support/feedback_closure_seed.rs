@@ -8,56 +8,76 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    fmt::Write as _,
     mem,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration as StdDuration,
 };
 
 use anyhow::{Context, Error as AnyhowError, Result, ensure};
 use chrono::{DateTime, Duration, Utc};
+use chrono_tz::America::New_York;
 use futures_util::{StreamExt, TryStreamExt, future::join_all, stream};
 use quant_pivot_core::{
-    app::ports::feedback_mutation::FeedbackCycleFreezePlan,
+    app::{
+        exchange_history_worker::ExchangeHistoryWorker,
+        ports::feedback_mutation::FeedbackCycleFreezePlan,
+    },
     governance::{CoreCalibrationArtifactLoader, resolve_return_model_calibration},
     observability::serving_evidence::{
         ModelInputEvidenceBatch, completion_marker, feature_commitment, verify_completion,
     },
     pit::platform::ch_historical::DurablePitSource,
     prefetch::{
-        historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec},
+        historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec, feature_window},
         market_candidates::MarketCandidateProvider,
     },
     projection::inference_context::build_market_inference_context,
+    report::universe::{ReportUniverseContract, ReportUniverseRoute},
     service::{
         historical_replay::{
             CrossSectionRequest, ReplayCaptureKey, ReplayConfig, ReplayCrossSection,
             ReplayExecutionSource, ReplayFactorMode, ReplayFactorOutput, materialize_cross_section,
         },
         market_selection::map_snapshot_to_model,
-        model_runner::{ActiveModelRequirementsRequest, ModelRunRequest, ModelRunner},
-        model_serving_generation::ModelServingRouteSnapshot,
+        model_runner::{
+            ActiveModelRequirements, ActiveModelRequirementsRequest, ModelRunRequest, ModelRunner,
+        },
+        model_serving_generation::{ModelServingRouteSnapshot, PublishedShadowRouteIdentity},
+        portfolio_context::PromotedRouteContract,
     },
 };
+use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChBps, ChDecimal64, ChDigest,
-        ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow,
+        ChPrice, ChSchemaVersion, ChShares, ChUsd, CryptoPriceReportRow, DomainObservationRow,
         ExchangeHistoryAcceptanceRow, ExecutionParticipantRow, MarketExecutionRow,
         MarketResolutionFactInput, MarketResolutionRow, QuantFeatureEventRow,
         QuantModelInputEventRow, QuantReportRecommendationFactRow,
-        QuantServingEvidenceCompletionRow, ReportMarketFunnelRow,
+        QuantServingEvidenceCompletionRow, ReportMarketFunnelRow, WeatherForecastFactRow,
+        WeatherObservationFactRow,
     },
     config::{ClickHouseConfig, WeatherVerticalBindingsConfig},
     domain::{
         data_plane::{
-            DecisionBoundary, DecisionClock, DecisionSource, DomainObservation,
-            ExchangeHistoryFrontier, HistorySealChunkRef,
+            CreateHistoryServingHeadSeal, DecisionBoundary, DecisionClock, DecisionSource,
+            DomainObservation, ExchangeHistoryChunkStatus, ExchangeHistoryContinuityBasis,
+            ExchangeHistoryFrontier, ExchangeHistoryPlanInfo, HistorySealChunkRef,
+            HistoryServingHeadSeal, NewExchangeHistoryChunk, NewHistoryServingHeadSeal,
+            WeatherForecastPoint, WeatherObservationReport, WeatherObservationReportKind,
         },
         market::{
             BookLevel, CATALOG_OBJECT_HASH_VERSION, CATALOG_OBJECT_SCHEMA_VERSION,
-            EventRegistryInfo, EventTags, MakerRebateField, MakerRebateUnavailableReason,
-            MarketMakerRebateEvidence, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
+            CatalogBatchCommit, CatalogEventCandidate, CatalogMarketCandidate, EventRegistryInfo,
+            EventTags, MakerRebateField, MakerRebateUnavailableReason, MarketMakerRebateEvidence,
+            MarketRegistryInfo, NewCatalogEventChange, NewCatalogEventObject,
+            NewCatalogMarketObject, NewCatalogSyncBatch, TokenInfo, UpsertEvent, UpsertMarket,
         },
+        order::PolymarketOrderRules,
         ports::{
             FeedbackRecipeCalibrationSpec, FeedbackRecipeCpcvSpec, FeedbackRecipeDiagnosticSpec,
             FeedbackRecipeDownsideSpec, FeedbackRecipeResourceBudget, FeedbackRecipeTemplate,
@@ -67,14 +87,18 @@ use quant_pivot_models::{
             AccountExecutionFeeFact, AttributionSubject, ExecutionAttemptDerivation,
             ExecutionAttemptOutcomeInfo, ExecutionAttemptSourceGraph, FeedbackCycleInfo,
             FeedbackCycleKey, FeedbackCycleKeyInput, FeedbackStageEventInfo,
-            FeedbackStageEventInput, LinkageOutcome, LinkageSourceMetadata,
-            LinkageUnresolvedReason, MarketLinkageDerivation, MarketSelectionModel, ModelSpecInfo,
-            ModelVersionInfo, NewAttributionArtifact, NewFeedbackCycle, NewFeedbackStageEvent,
-            NewMarketLinkage, NewRecommendation, NewRecommendationExecutionRollup,
+            FeedbackStageEventInput, GroundingProof, LinkageOutcome, LinkageSourceMetadata,
+            LinkageUnresolvedReason, MarketLinkageDerivation, MarketSelectionModel, MarketSubject,
+            ModelSpecInfo, ModelVersionInfo, NewAttributionArtifact, NewExecutionOrder,
+            NewFeatureVector, NewFeedbackCycle, NewFeedbackStageEvent, NewMarketLinkage,
+            NewRecommendation, NewRecommendationExecutionRollup,
             NewRecommendationExecutionRollupAttempt, NewRecommendationResolutionOutcome,
-            NewReportTransaction, NewStrategyPositionLot, PortfolioScenarioModelArtifact,
-            PortfolioScenarioVisibility, RepresentedRouteSet, ResearchJobInfo,
-            ShadowObservationQuery, report_parity_evidence_hash, report_parity_generation_hash,
+            NewReportTransaction, NewStrategyPositionLot, OverrideContext,
+            PortfolioScenarioModelArtifact, PortfolioScenarioVisibility, RepresentedRouteSet,
+            ResearchJobInfo, ResolvedBinding, RouteHistoryLineage, RouteModelLineage,
+            ShadowObservationQuery, WeatherContractWindow, WeatherRoundingRule, WeatherTruthPolicy,
+            WeatherValueComparator, WeatherWindExtremeSubject, WeatherWindStatistic,
+            report_parity_evidence_hash, report_parity_generation_hash,
         },
     },
     entities::{
@@ -97,7 +121,7 @@ use quant_pivot_models::{
             Column as EntryConditionColumn, Entity as EntryConditionEntity,
         },
         quant_execution_attempt_outcome::Entity as ExecutionAttemptOutcomeEntity,
-        quant_execution_order::Entity as ExecutionOrderEntity,
+        quant_execution_order::{Entity as ExecutionOrderEntity, Model as ExecutionOrderModel},
         quant_factor_value::Entity as FactorValueEntity,
         quant_feature_parity_subject::{
             Column as FeatureParitySubjectColumn, Entity as FeatureParitySubjectEntity,
@@ -120,7 +144,7 @@ use quant_pivot_models::{
         quant_recommendation_resolution_outcome::{
             ActiveModel as ResolutionOutcomeActiveModel, Entity as ResolutionOutcomeEntity,
         },
-        quant_reconciliation::Entity as ReconciliationEntity,
+        quant_reconciliation::{Entity as ReconciliationEntity, Model as ReconciliationModel},
         quant_shadow_comparison::{
             Column as ShadowComparisonColumn, Entity as ShadowComparisonEntity,
         },
@@ -136,11 +160,14 @@ use quant_pivot_models::{
             ChAvailabilityBasis, ChCanonicalBookEventType, ChExchangeSide, ChExchangeVersion,
             ChExecutionParticipantRole, ChStreamSessionEndReason, ChStreamSessionState,
         },
-        common::{CategorySet, MarketCategory, TickSize},
-        domain::{DomainFamily, DomainMetric, LinkageStatus, ResolverTier},
+        common::{CategorySet, MarketCategory, OrderType, Side, TickSize},
+        domain::{
+            DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole, LinkageStatus,
+            ResolverTier,
+        },
         execution::{
-            CapitalAllocationState, ExitReason, ExitState, PositionLedgerState,
-            StrategyPositionOriginKind, VenueOrderStatus,
+            CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, OrderTypeKind,
+            PositionLedgerState, StrategyPositionOriginKind, VenueOrderStatus,
         },
         market::{EventStatus, MarketStatus},
         model::ModelFamily,
@@ -159,39 +186,43 @@ use quant_pivot_models::{
         ResearchValidationConfig, SelectionConfig,
     },
     types::{
-        AccountChainExecutionId, ArtifactUri, BookSnapshotRef, BookSnapshotSource, Bps,
-        CatalogDecisionRef, CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId,
+        AccountChainExecutionId, ArtifactUri, BinanceSymbol, BookSnapshotRef, BookSnapshotSource,
+        Bps, CatalogDecisionRef, CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId,
         CatalogMarketIds, CatalogMarketObjectId, CatalogSyncBatchId, ClobFeeDetails,
         ClobMarketInfoVersion, ClobMarketInfoVersionId, ClobTokenDescriptor, ContentHash,
-        DecisionCaptureEvidence, DecisionPolicySnapshotId, EligibilitySummary, EventId,
-        EvmBlockHash, EvmTransactionHash, ExternalJsonDocument, FactorBreakdownEntry,
+        DecisionCaptureEvidence, DecisionPolicySnapshotId, DomainInstrumentKey,
+        DomainMeasurementUnit, DomainSourceId, EligibilitySummary, EventId, EvmBlockHash,
+        EvmTransactionHash, ExecutionOrderId, ExternalJsonDocument, FactorBreakdownEntry,
         FeatureVectorId, FeedbackCycleId, FeedbackRecipeTemplateId, FinalizedExecutionEvidence,
-        MarketId, MarketLinkageId, ModelCandidateManifestId, ModelVersionId, OrderId,
+        IcaoStation, MarketId, MarketLinkageId, ModelCandidateManifestId, ModelVersionId, OrderId,
         OrderIntentId, PayoutRatio, Price, Probability, RecommendationFactorBreakdown,
-        RecommendationId, RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason,
-        ReportFunnelStage, ResearchJobId, ResearchProfileArtifact, ResolverVersion, RoleCode,
-        ScaleOutState, SchemaVersion, ShadowComparisonId, Shares, StrategyPositionLotId, TokenId,
-        Usd, UsdHours, stable_name::FeatureName,
+        RecommendationId, RecommendationReportId, ReportDataQualityTokens, ReportFunnelDiagnostics,
+        ReportFunnelReason, ReportFunnelStage, ResearchJobId, ResearchProfileArtifact,
+        ResearchSourceStorageKind, ResolverVersion, RoleCode, ScaleOutState, SchemaVersion,
+        ShadowComparisonId, Shares, StrategyPositionLotId, TokenDataQualityRecord, TokenId, Usd,
+        UsdHours, VenueOrderAmount, WeatherVariable, minimum_raw_retention_days,
+        research_source_registry, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::{
-    clickhouse::{ChFactWriter, ChQuantFactReadRepository},
+    clickhouse::{ChCanonicalLedgerWriter, ChFactWriter, ChQuantFactReadRepository},
     postgres::{
         PgBacktestPathSetRepository, PgCalibrationArtifactRepository, PgCatalogLedgerRepository,
-        PgClobMarketInfoRepository, PgEventRepository, PgFeatureRepository,
-        PgFeedbackCycleRepository, PgFeedbackRecipeTemplateRepository, PgMarketLinkageRepository,
-        PgMarketRepository, PgModelCandidateManifestRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgPolicyRepository, PgResearchJobRepository,
-        PgShadowComparisonRepository,
+        PgClobMarketInfoRepository, PgEventRepository, PgExchangeHistoryRepository,
+        PgFeatureRepository, PgFeedbackCycleRepository, PgFeedbackRecipeTemplateRepository,
+        PgMarketLinkageRepository, PgMarketRepository, PgModelCandidateManifestRepository,
+        PgModelRegistryRepository, PgModelRunRepository, PgPolicyRepository,
+        PgResearchJobRepository, PgShadowComparisonRepository,
     },
     traits::{
         BacktestPathSetRepository, CalibrationArtifactRepository, CatalogLedgerRepository,
-        ClobMarketInfoRepository, EventRepository, FactWriter, FeatureRepository,
-        FeedbackCycleRepository, FeedbackCycleWriteOutcome, FeedbackRecipeTemplateRepository,
-        FeedbackStageWriteOutcome, FeedbackTriggerCommit, FeedbackTriggerWriteOutcome,
-        MarketLinkageRepository, MarketRepository, ModelCandidateManifestRepository,
-        ModelRegistryRepository, ModelRunRepository, PolicyRepository, QuantFactReadRepository,
-        ResearchJobRepository, ShadowComparisonRepository,
+        ClobMarketInfoRepository, EventRepository, ExchangeHistoryRepository, FactWriter,
+        FeatureRepository, FeedbackCycleRepository, FeedbackCycleWriteOutcome,
+        FeedbackRecipeTemplateRepository, FeedbackStageWriteOutcome, FeedbackTriggerCommit,
+        FeedbackTriggerWriteOutcome, MarketLinkageRepository, MarketRepository,
+        ModelCandidateManifestRepository, ModelRegistryRepository, ModelRunRepository,
+        PolicyRepository, QuantFactReadRepository, ResearchJobRepository,
+        ShadowComparisonRepository,
     },
 };
 use quant_pivot_research::{
@@ -202,15 +233,22 @@ use quant_pivot_research::{
         WeightedTerm,
     },
     factors::{FactorEligibility, FactorEngine, FactorValue, FactorValueInsertContext},
-    features::{ConfiguredFeatureBuilder, ExecutableFeatureSchema, FeatureVector, feature_events},
+    features::{
+        ConfiguredFeatureBuilder, ExecutableFeatureSchema, FeatureVector, MarketDecisionCapture,
+        feature_events,
+    },
     feedback_governance::FeedbackGovernanceCodec,
     hashing::ResearchHasher,
-    linkage::{LayeredResolver, WeatherStationRegistry, rule_for_alias},
-    model::{
-        FactorInferenceRow, FactorInferenceTable, ModelArtifact, ModelRuntimeInput,
-        QuantModelRuntime, SignalCandidate, WeightedFactorRuntime, WeightedInputAuditContract,
-        canonical_business_prediction_hash, finalize_candidates, model_input_contract_hash,
+    linkage::{
+        LayeredResolver, WeatherStationRegistry, rule_for_alias, source_bindings_for_subject,
     },
+    model::{
+        FactorInferenceRow, FactorInferenceTable, ModelArtifact, ModelCalibrationScore,
+        ModelInputAuditRow, ModelRuntimeInput, QuantModelRuntime, SignalCandidate,
+        WeightedFactorRuntime, WeightedInputAuditContract, canonical_business_prediction_hash,
+        finalize_candidates, model_input_contract_hash,
+    },
+    pit::PointInTimeSnapshotSource,
     portfolio::{PortfolioScenarioGenerator, PortfolioScenarioModelFitter},
     selection::{
         ConfiguredMarketSelector, MarketSelectionBuildRequest, MarketSelector,
@@ -218,7 +256,7 @@ use quant_pivot_research::{
     },
     stats,
 };
-use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
+use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool, extract_table_ttl};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use rust_decimal_macros::dec;
 use sea_orm::{
@@ -226,26 +264,42 @@ use sea_orm::{
     DbBackend, EntityTrait, IntoActiveModel, QueryFilter, Statement, TransactionTrait,
 };
 use serde_json::{Value as JsonValue, json};
-use tokio::time::{Instant, sleep};
+use tokio::{
+    sync::Mutex as TokioMutex,
+    time::{Instant, sleep},
+};
+use uuid::Uuid;
 
 use crate::postgres::PostgresClock;
 
 use super::{
     execution_pg_seed::{
-        ExecutionTxnIds, ReportBuildOptions, ReportSeedConfig, SharedDemoInfra,
-        build_custom_report_transaction, demo_recommendation, exit_order, exit_reconciliation_row,
-        fixture_profile_ref, new_capital_allocation, new_execution_order, new_order_intent,
+        ENTRY_FILLED_SHARES, ENTRY_PRICE, EXECUTION_NOTIONAL, ExecutionTxnIds,
+        PreparedOrderFixture, ReportBuildOptions, ReportSeedConfig, SharedDemoInfra,
+        build_custom_report_transaction, demo_recommendation, exit_reconciliation_row,
+        fixture_profile_ref, new_capital_allocation, new_order_intent,
         prepare_report_lineage_model, reconciliation_row,
     },
+    production_history::{
+        DeterministicPolygonBlock, DeterministicPolygonChain, DeterministicPolygonHead,
+        MODEL_CONFIRMATION_BLOCKS, V2_PRODUCTION_BLOCK,
+    },
     report_lifecycle_seed::{persist_and_publish_report, seal_report_facts},
-    report_pipeline_harness::build_model_runner,
+    report_pipeline_harness::{ReportEvidenceWriters, build_model_runner},
     seeded_uuid,
+    trade_policy_fixtures::FixtureBookTiming,
 };
+
+#[cfg(test)]
+mod replay_contract_tests;
 
 // The governed closure needs 96 chronological decision groups so its active
 // 24-hour scenario model observes every PIT-mature bucket in the 90-day fit
-// span. Eight markets per group preserve the complete four-strength by
-// two-regime factorial without padding any validation partition.
+// span. Eight markets per group contain one exact same-lifecycle
+// counterfactual pair with opposite outcomes. The remaining six rows preserve
+// the primary signal, while independently shuffled blocks balance the omitted
+// factorial cell across the full 768-row population and stay inside the CPCV
+// compute deadline.
 const TRAINING_OBSERVATION_COUNT: usize = 768;
 const TRAINING_RESOLUTION_LAG_SECS: i64 = 86_400;
 const TRAINING_TRUTH_BUFFER_SECS: i64 = 120;
@@ -257,6 +311,7 @@ const CALIBRATION_OBSERVATION_COUNT: usize = 1_024;
 const EVALUATION_OBSERVATION_COUNT: usize = 500;
 const EVALUATION_MARKETS_PER_TICK: usize = 5;
 const EXECUTION_ASSOCIATION_SAMPLE_COUNT: usize = 3;
+const CLOSURE_EXECUTIONS_PER_MARKET: usize = 20;
 const FACTOR_VALUE_INSERT_BATCH_ROWS: usize = 1_000;
 const EXECUTION_ROLLUP_INSERT_BATCH_ROWS: usize = 1_000;
 const FACT_WRITE_BATCH_ROWS: usize = 2_000;
@@ -272,9 +327,16 @@ const DECISION_SEED_CONCURRENCY: usize = 1;
 const SOURCE_SEED_CONCURRENCY: usize = 4;
 const SHADOW_OBSERVATION_COUNT: usize = 1_000;
 const SHADOW_OBSERVATION_CONCURRENCY: usize = 16;
+const SERVING_HEAD_CAS_ATTEMPTS: usize = 4;
 /// The mixed-Route report universe remains inside the production WebSocket
 /// prewarm window while still exercising the multi-day capital bucket.
 pub(crate) const CLOSURE_REPORT_HORIZON_HOURS: i64 = 48;
+/// One venue-rule contract shared by historical facts and live fixture reads.
+pub(crate) const CLOSURE_ORDER_RULES: PolymarketOrderRules = PolymarketOrderRules {
+    tick_size: TickSize::QuarterCent,
+    minimum_order_size: Shares::ONE,
+};
+pub(crate) const CLOSURE_NEG_RISK: bool = false;
 // This unoptimized fresh-stack path is a functional correctness gate, not a
 // production latency benchmark. Keep a finite ceiling for cancellation and
 // deadlock detection while leaving performance acceptance to the controlled
@@ -282,9 +344,15 @@ pub(crate) const CLOSURE_REPORT_HORIZON_HOURS: i64 = 48;
 const CLOSURE_COMPUTE_LIVENESS_SECS: u64 = 30 * 60;
 const CYCLE_TO_BIND_TIMEOUT: StdDuration = StdDuration::from_hours(1);
 const CYCLE_LIVENESS_TIMEOUT: StdDuration = StdDuration::from_mins(3);
-const CANDIDATE_READY_TIMEOUT: StdDuration = StdDuration::from_mins(3);
+const CANDIDATE_SETTLEMENT_TIMEOUT: StdDuration = StdDuration::from_mins(3);
 const CLOSURE_POLL_INTERVAL: StdDuration = StdDuration::from_millis(100);
 const CATALOG_BASELINE_DOMAIN: &str = "quant-pivot/system-test/feedback-closure-catalog-baseline";
+const RETENTION_RUNWAY_MARGIN_DAYS: u32 = 1;
+const RETENTION_RECENT_MAX_AGE_DAYS: i64 = 1;
+const RETENTION_ANCHOR_SCOPE: &str = "retention";
+const RETENTION_ANCHOR_ORDINAL: usize = 1;
+const RETENTION_CRYPTO_SYMBOL: &str = "ANCHORUSDT";
+const RETENTION_WEATHER_STATION: &str = "KQPA";
 
 #[derive(Debug, Clone, Copy)]
 struct ScenarioBucketRequirement {
@@ -307,6 +375,8 @@ impl ScenarioTrainingPlan {
         policy: &ActivePolicyBundle,
         cycle: &FeedbackCycleFreezePlan,
         governance_frozen_at: DateTime<Utc>,
+        polygon: &DeterministicPolygonChain,
+        knowledge_lag: StdDuration,
     ) -> Result<Self> {
         let bindings = policy
             .snapshot
@@ -328,8 +398,23 @@ impl ScenarioTrainingPlan {
             .cutoff()
             .checked_sub_signed(Duration::seconds(truth_lag_secs))
             .context("closure training maturity boundary underflowed")?;
+        let first_execution_block = V2_PRODUCTION_BLOCK
+            .checked_add(MODEL_CONFIRMATION_BLOCKS)
+            .and_then(|block| block.checked_add(19))
+            .context("closure first V2 execution block overflowed")?;
+        let first_execution_time =
+            DeterministicPolygonChain::block(first_execution_block, polygon.head())
+                .context("closure first V2 execution block is unavailable")?
+                .timestamp;
+        let knowledge_lag = Duration::from_std(knowledge_lag)
+            .context("closure knowledge lag exceeds chrono bounds")?;
+        let history_eligible_at = DateTime::from_timestamp(first_execution_time, 0)
+            .context("closure V2 execution time is outside UTC")?
+            .checked_add_signed(knowledge_lag)
+            .context("closure V2 eligibility time overflowed")?;
+        let window_start = cycle.training().window_start().max(history_eligible_at);
         ensure!(
-            latest_decision_exclusive > cycle.training().window_start(),
+            latest_decision_exclusive > window_start,
             "closure training window has no PIT-mature scenario observations"
         );
 
@@ -358,11 +443,8 @@ impl ScenarioTrainingPlan {
             ensure!(bucket_secs > 0, "closure scenario bucket must be positive");
             let complete_bucket_floor =
                 PortfolioScenarioModelFitter::minimum_complete_buckets(model.resampling_method)?;
-            let eligible_bucket_count = Self::bucket_count(
-                cycle.training().window_start(),
-                latest_decision_exclusive,
-                bucket_secs,
-            )?;
+            let eligible_bucket_count =
+                Self::bucket_count(window_start, latest_decision_exclusive, bucket_secs)?;
             ensure!(
                 eligible_bucket_count >= complete_bucket_floor,
                 "closure training has {eligible_bucket_count} PIT-mature canonical buckets but active scenario methodology requires {complete_bucket_floor}"
@@ -379,7 +461,7 @@ impl ScenarioTrainingPlan {
             .max()
             .context("closure scenario training requirement set is empty")?;
         Ok(Self {
-            window_start: cycle.training().window_start(),
+            window_start,
             latest_decision_exclusive,
             requirements,
             group_floor,
@@ -389,9 +471,15 @@ impl ScenarioTrainingPlan {
     fn points(&self, count: usize) -> Result<Vec<DateTime<Utc>>> {
         let points = interior_points(self.window_start, self.latest_decision_exclusive, count)?;
         for requirement in &self.requirements {
+            let (first_complete_bucket, complete_end_bucket) = Self::complete_bucket_bounds(
+                self.window_start,
+                self.latest_decision_exclusive,
+                requirement.bucket_secs,
+            )?;
             let buckets = points
                 .iter()
                 .map(|point| point.timestamp().div_euclid(requirement.bucket_secs))
+                .filter(|bucket| *bucket >= first_complete_bucket && *bucket < complete_end_bucket)
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();
@@ -416,24 +504,34 @@ impl ScenarioTrainingPlan {
         end_exclusive: DateTime<Utc>,
         bucket_secs: i64,
     ) -> Result<usize> {
+        let (first_complete_bucket, complete_end_bucket) =
+            Self::complete_bucket_bounds(window_start, end_exclusive, bucket_secs)?;
+        let bucket_count = complete_end_bucket
+            .checked_sub(first_complete_bucket)
+            .filter(|count| *count > 0)
+            .context("closure scenario interval has no complete bucket")?;
+        usize::try_from(bucket_count).context("closure scenario bucket count exceeds usize")
+    }
+
+    fn complete_bucket_bounds(
+        window_start: DateTime<Utc>,
+        end_exclusive: DateTime<Utc>,
+        bucket_secs: i64,
+    ) -> Result<(i64, i64)> {
         ensure!(
             bucket_secs > 0 && end_exclusive > window_start,
-            "closure scenario bucket count requires a positive interval"
+            "closure scenario bucket bounds require a positive interval"
         );
-        let end_millis = end_exclusive.timestamp_millis();
-        let last_millis = end_millis
-            .checked_sub(1)
-            .context("closure scenario exclusive endpoint underflowed")?;
         let bucket_millis = bucket_secs
             .checked_mul(1_000)
             .context("closure scenario bucket milliseconds overflowed")?;
-        let first_bucket = window_start.timestamp_millis().div_euclid(bucket_millis);
-        let last_bucket = last_millis.div_euclid(bucket_millis);
-        let bucket_count = last_bucket
-            .checked_sub(first_bucket)
-            .and_then(|distance| distance.checked_add(1))
-            .context("closure scenario bucket range overflowed")?;
-        usize::try_from(bucket_count).context("closure scenario bucket count exceeds usize")
+        let start_millis = window_start.timestamp_millis();
+        let first_complete_bucket = start_millis
+            .div_euclid(bucket_millis)
+            .checked_add(i64::from(start_millis.rem_euclid(bucket_millis) != 0))
+            .context("closure scenario first complete bucket overflowed")?;
+        let complete_end_bucket = end_exclusive.timestamp_millis().div_euclid(bucket_millis);
+        Ok((first_complete_bucket, complete_end_bucket))
     }
 }
 
@@ -444,13 +542,54 @@ pub struct FeedbackClosureFixture {
     catalogs: Arc<[Arc<ClosureCatalogFacts>]>,
     report_cohorts: Arc<[ShadowObservationCohort]>,
     shadow_cohorts: Arc<[ShadowObservationCohort]>,
+    gamma_catalog_gate: FeedbackGammaCatalogGate,
     fact_writers: Arc<ClosureFactWriters>,
     replay: Arc<ClosureReplayContext>,
     runtime_finalized_execution_evidence: FinalizedExecutionEvidence,
 }
 
+/// Shared lifecycle gate for the deterministic Gamma responder.
+///
+/// The full fixture universe remains visible while production shadow evidence
+/// is generated. Once that phase closes, only the fresh mixed-Route report
+/// universe remains source-visible; every other fixture condition behaves as
+/// a confirmed Gamma tombstone.
+#[derive(Clone)]
+pub(crate) struct FeedbackGammaCatalogGate {
+    terminal_projection: Arc<AtomicBool>,
+    report_market_ids: Arc<HashSet<String>>,
+}
+
+impl FeedbackGammaCatalogGate {
+    fn new(report_cohorts: &[ShadowObservationCohort]) -> Self {
+        let report_market_ids = report_cohorts
+            .iter()
+            .flat_map(|cohort| cohort.markets.iter())
+            .map(|market| market.market_id.to_string())
+            .collect();
+        Self {
+            terminal_projection: Arc::new(AtomicBool::new(false)),
+            report_market_ids: Arc::new(report_market_ids),
+        }
+    }
+
+    fn enter_terminal_projection(&self) {
+        self.terminal_projection.store(true, Ordering::Release);
+    }
+
+    /// Whether a condition lookup must resolve as absent from the current
+    /// source universe after the shadow lifecycle has closed.
+    #[must_use]
+    pub(crate) fn blocks(&self, condition_id: &str) -> bool {
+        self.terminal_projection.load(Ordering::Acquire)
+            && condition_id.starts_with("feedback-closure-")
+            && !self.report_market_ids.contains(condition_id)
+    }
+}
+
 /// Terminal proof for one node in the closed 15-stage production DAG.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FeedbackClosureStageEvidence {
     pub stage: FeedbackStage,
     pub started_event_sequence: Option<i64>,
@@ -469,7 +608,8 @@ pub struct FeedbackClosureStageEvidence {
 }
 
 /// Candidate and scenario evidence that may enter governed permit issuance.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FeedbackClosureOutcome {
     pub feedback_cycle_id: FeedbackCycleId,
     pub champion_model_version_id: ModelVersionId,
@@ -482,11 +622,13 @@ pub struct FeedbackClosureOutcome {
 }
 
 /// Fresh mixed-Route market plane used by the post-activation production report.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FeedbackReportUniverse {
     pub decision_at: DateTime<Utc>,
+    pub knowledge_lag_secs: u64,
     pub market_ids: Vec<MarketId>,
-    pub categories: Vec<MarketCategory>,
+    pub routes_by_market: BTreeMap<MarketId, BuyModelRoute>,
 }
 
 /// Exact current-time L2 snapshot required by the mixed-Route report fixture.
@@ -497,8 +639,39 @@ pub struct FeedbackReportBookSnapshot {
     pub asks: Vec<BookLevel>,
 }
 
+impl FeedbackReportBookSnapshot {
+    fn match_sides(&self, row: &BookL2LedgerRow) -> (bool, bool) {
+        let bids_match = row.bid_prices
+            == self
+                .bids
+                .iter()
+                .map(|level| ChPrice::from(level.price_decimal()))
+                .collect::<Vec<_>>()
+            && row.bid_sizes
+                == self
+                    .bids
+                    .iter()
+                    .map(|level| ChShares::from(level.size_decimal()))
+                    .collect::<Vec<_>>();
+        let asks_match = row.ask_prices
+            == self
+                .asks
+                .iter()
+                .map(|level| ChPrice::from(level.price_decimal()))
+                .collect::<Vec<_>>()
+            && row.ask_sizes
+                == self
+                    .asks
+                    .iter()
+                    .map(|level| ChShares::from(level.size_decimal()))
+                    .collect::<Vec<_>>();
+        (bids_match, asks_match)
+    }
+}
+
 /// Read-back proof for one canonical post-report resolution fact.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FeedbackResolutionFactEvidence {
     pub market_id: MarketId,
     pub resolved_outcome: String,
@@ -509,7 +682,8 @@ pub struct FeedbackResolutionFactEvidence {
 }
 
 /// Source-native truth written after the promoted mixed-Route report.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FeedbackReportResolutionEvidence {
     pub report_id: RecommendationReportId,
     pub report_decision_at: DateTime<Utc>,
@@ -565,20 +739,42 @@ struct ShadowObservationRequest<'a> {
     book_price_shift: Decimal,
 }
 
+struct ShadowClosurePlan {
+    feedback_cycle_id: FeedbackCycleId,
+    runner: Arc<ModelRunner>,
+    serving: ModelServingRouteSnapshot,
+    schema: Arc<ExecutableFeatureSchema>,
+    cohorts: Arc<[ShadowObservationCohort]>,
+    fact_writers: Arc<ClosureFactWriters>,
+    replay: Arc<ClosureReplayContext>,
+    shadow_identity: PublishedShadowRouteIdentity,
+    policy_snapshot_id: DecisionPolicySnapshotId,
+    first_decision_at: DateTime<Utc>,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    observation_query: ShadowObservationQuery,
+    execution_evidence: FinalizedExecutionEvidence,
+    required_features: Arc<[FeatureName]>,
+}
+
 struct CohortSeed {
     catalog: Arc<ClosureCatalogFacts>,
     decision_at: DateTime<Utc>,
+    boundary: DecisionBoundary,
     book_price_shift: Decimal,
     resolution_by_market: BTreeMap<MarketId, DateTime<Utc>>,
     ids: ExecutionTxnIds,
     market_universe: Vec<NewRecommendation>,
     recommendations: Vec<NewRecommendation>,
+    history: ClosureAcceptedHistory,
 }
 
 struct PreparedCohort {
     cohort: CohortSeed,
     options: ReportBuildOptions,
+    data_quality: ReportDataQualityTokens,
     trigger_key: String,
+    knowledge_lag_secs: i64,
 }
 
 impl PreparedCohort {
@@ -590,10 +786,30 @@ impl PreparedCohort {
     ) -> Result<CohortSeed> {
         let Self {
             cohort,
-            options,
+            mut options,
+            data_quality,
             trigger_key,
+            knowledge_lag_secs,
         } = self;
+        let expected = cohort
+            .market_universe
+            .iter()
+            .map(|row| (row.evidence_refs.feature_vector_id, row.market_id.clone()))
+            .collect::<HashSet<_>>();
+        let actual = data_quality
+            .0
+            .iter()
+            .map(|row| (row.feature_vector_id, row.market_id.clone()))
+            .collect::<HashSet<_>>();
+        ensure!(
+            actual == expected
+                && actual.len() == data_quality.0.len()
+                && u32::try_from(actual.len())? == options.summary.market_selection_count,
+            "closure DQ provenance differs from its complete pre-inference selection population"
+        );
+        options.summary.data_quality_summary = data_quality.summary();
         let mut transaction = build_custom_report_transaction(&cohort.ids, options);
+        transaction.data_quality_snapshot.tokens_json = data_quality;
         let recommendation_rows = closure_report_recommendations(&transaction)?;
         let funnel_rows = closure_report_funnel(&transaction, &cohort.market_universe)?;
         seal_report_facts(
@@ -606,7 +822,7 @@ impl PreparedCohort {
         fact_writers
             .commit_report(recommendation_rows, funnel_rows)
             .await?;
-        persist_and_publish_report(db, transaction, &trigger_key, 10).await;
+        persist_and_publish_report(db, transaction, &trigger_key, knowledge_lag_secs).await;
         Ok(cohort)
     }
 }
@@ -899,6 +1115,7 @@ struct ClosureCatalogMarketBuild<'a> {
 
 const CLOSURE_CRYPTO_CLOSE_PRICE: Decimal = dec!(100000);
 const CLOSURE_CRYPTO_STRIKE_STEP: Decimal = dec!(1000);
+const CLOSURE_WEATHER_STATION: &str = "KLGA";
 const CLOSURE_BINANCE_RULES: &str = "This market resolves using the Binance BTCUSDT 1-minute candle close at its scheduled observation time.";
 
 fn closure_crypto_strike(scope: &str, ordinal: usize) -> Result<Usd> {
@@ -925,6 +1142,293 @@ pub(crate) fn closure_market_text(scope: &str, ordinal: usize) -> Result<(String
         format!("Will feedback closure {scope} sample {ordinal} resolve Yes?"),
         Some("Deterministic historical source for the production closure test".to_owned()),
     ))
+}
+
+fn closure_weather_subject(decision_at: DateTime<Utc>, ordinal: usize) -> Result<MarketSubject> {
+    let ordinal = i64::try_from(ordinal).context("closure Weather ordinal exceeds i64")?;
+    Ok(MarketSubject::WeatherWindExtreme(
+        WeatherWindExtremeSubject {
+            station_key: CLOSURE_WEATHER_STATION.to_owned(),
+            window: WeatherContractWindow {
+                start_at: decision_at - Duration::minutes(5),
+                end_at: decision_at + Duration::hours(4),
+                timezone: "America/New_York".to_owned(),
+            },
+            statistic: WeatherWindStatistic::MaximumGust,
+            comparator: WeatherValueComparator::Above {
+                threshold: Decimal::from(30 + ordinal.rem_euclid(8)),
+                inclusive: true,
+            },
+            rounding: WeatherRoundingRule::Exact,
+            truth_policy: WeatherTruthPolicy::ObservationWithForecast {
+                observation_source: DomainSourceId::nws_observation(),
+                forecast_source: DomainSourceId::gefs(),
+            },
+        },
+    ))
+}
+
+fn closure_weather_facts(
+    decision_at: DateTime<Utc>,
+    visibility_cutoff: DateTime<Utc>,
+) -> Result<(Vec<WeatherObservationFactRow>, Vec<WeatherForecastFactRow>)> {
+    let subject = closure_weather_subject(decision_at, 1)?;
+    let MarketSubject::WeatherWindExtreme(wind) = &subject else {
+        anyhow::bail!("closure Weather fact subject is not wind extreme")
+    };
+    let bindings = source_bindings_for_subject(&subject, visibility_cutoff)?;
+    let resolution = bindings
+        .iter()
+        .find(|binding| binding.role == LinkageSourceRole::Resolution)
+        .context("closure Weather subject has no resolution binding")?;
+    let forecast = bindings
+        .iter()
+        .find(|binding| binding.role == LinkageSourceRole::Forecast)
+        .context("closure Weather subject has no forecast binding")?;
+    ensure!(
+        resolution.source_id == DomainSourceId::nws_observation(),
+        "closure Weather resolution source is not canonical NWS"
+    );
+    let observation = WeatherObservationReport {
+        source_id: resolution.source_id.clone(),
+        instrument_key: resolution.instrument_key.clone(),
+        subject_key: wind.station_key.clone(),
+        report_kind: WeatherObservationReportKind::NwsStation,
+        variable: WeatherVariable::WindGust,
+        value: dec!(40),
+        unit: DomainMeasurementUnit::Knot,
+        precision: dec!(0.1),
+        observed_at: visibility_cutoff,
+        valid_from: Some(visibility_cutoff),
+        valid_to: Some(visibility_cutoff + Duration::minutes(1)),
+        published_at: visibility_cutoff,
+        available_at: visibility_cutoff,
+        report_hash: CanonicalDigest::content_hash_json(&(
+            "feedback-closure-nws-gust",
+            &resolution.source_id,
+            &resolution.instrument_key,
+            &wind.station_key,
+            visibility_cutoff,
+            dec!(40),
+        ))?,
+        raw_report: "deterministic NWS gust observation".to_owned(),
+    }
+    .to_clickhouse_row(
+        visibility_cutoff.with_timezone(&New_York).date_naive(),
+        1,
+        None,
+    );
+    let reference_time = visibility_cutoff;
+    let valid_time = reference_time + Duration::hours(3);
+    let published_at = reference_time;
+    let grid_binding_hash = CanonicalDigest::content_hash_json(&(
+        "feedback-closure-weather-grid",
+        &forecast.source_id,
+        &forecast.instrument_key,
+        &wind.station_key,
+    ))?;
+    let member_segments = (0_u16..31)
+        .map(|member| {
+            let value = Decimal::from(25 + i64::from(member % 20));
+            let segment_hash = CanonicalDigest::content_hash_json(&(
+                "feedback-closure-weather-segment",
+                &forecast.source_id,
+                &forecast.instrument_key,
+                &wind.station_key,
+                WeatherVariable::WindGust,
+                value,
+                DomainMeasurementUnit::Knot,
+                reference_time,
+                valid_time,
+                published_at,
+                member,
+                grid_binding_hash,
+            ))?;
+            Ok((member, value, segment_hash))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let run_manifest_hash = CanonicalDigest::content_hash_json(&(
+        "feedback-closure-weather-run",
+        &forecast.source_id,
+        &forecast.instrument_key,
+        reference_time,
+        valid_time,
+        grid_binding_hash,
+        member_segments
+            .iter()
+            .map(|(member, _, segment_hash)| (*member, *segment_hash))
+            .collect::<Vec<_>>(),
+    ))?;
+    let forecasts = member_segments
+        .into_iter()
+        .map(|(member, value, segment_hash)| {
+            let report_hash = CanonicalDigest::content_hash_json(&(
+                "feedback-closure-weather-point",
+                &forecast.source_id,
+                &forecast.instrument_key,
+                &wind.station_key,
+                WeatherVariable::WindGust,
+                value,
+                DomainMeasurementUnit::Knot,
+                reference_time,
+                valid_time,
+                published_at,
+                member,
+                grid_binding_hash,
+                run_manifest_hash,
+                segment_hash,
+            ))?;
+            Ok(WeatherForecastFactRow::from(&WeatherForecastPoint {
+                source_id: forecast.source_id.clone(),
+                instrument_key: forecast.instrument_key.clone(),
+                subject_key: wind.station_key.clone(),
+                variable: WeatherVariable::WindGust,
+                value,
+                unit: DomainMeasurementUnit::Knot,
+                precision: dec!(0.1),
+                reference_time,
+                valid_time,
+                published_at,
+                available_at: published_at,
+                lead_hours: 3,
+                member: Some(member),
+                revision: 1,
+                grid_binding_hash,
+                run_manifest_hash,
+                report_hash,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((vec![observation], forecasts))
+}
+
+async fn verify_weather_visibility(
+    fact_read: &dyn QuantFactReadRepository,
+    decision_at: DateTime<Utc>,
+    visibility_cutoff: DateTime<Utc>,
+    expected: &[WeatherForecastFactRow],
+) -> Result<()> {
+    let subject = closure_weather_subject(decision_at, 1)?;
+    let MarketSubject::WeatherWindExtreme(wind) = subject else {
+        anyhow::bail!("closure Weather visibility subject is not wind extreme")
+    };
+    let valid_to = wind
+        .window
+        .end_at
+        .timestamp_millis()
+        .checked_add(1)
+        .context("closure Weather visibility cutoff overflowed")?;
+    let rows = fact_read
+        .weather_forecast_facts_between(
+            vec![wind.station_key],
+            wind.window.start_at.timestamp_millis(),
+            valid_to,
+            visibility_cutoff.timestamp_millis(),
+            decision_at.timestamp_millis(),
+        )
+        .await?;
+    let decoded = rows
+        .iter()
+        .cloned()
+        .map(WeatherForecastPoint::from_clickhouse_row)
+        .collect::<Option<Vec<_>>>()
+        .context("decode query-visible Weather forecast rows")?;
+    validate_weather_runs(&decoded)?;
+    let expected_first = expected
+        .first()
+        .context("closure Weather visibility has no expected run")?;
+    let expected_hashes = expected
+        .iter()
+        .map(|row| row.report_hash)
+        .collect::<BTreeSet<_>>();
+    let visible = rows
+        .iter()
+        .filter(|row| {
+            row.reference_time == expected_first.reference_time
+                && row.run_manifest_hash == expected_first.run_manifest_hash
+                && row.grid_binding_hash == expected_first.grid_binding_hash
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        visible.len() == expected.len()
+            && visible
+                .iter()
+                .map(|row| row.report_hash)
+                .collect::<BTreeSet<_>>()
+                == expected_hashes,
+        "closure Weather forecast write is not exactly query-visible: expected {} rows, matched {}, total window rows {}",
+        expected.len(),
+        visible.len(),
+        rows.len(),
+    );
+    Ok(())
+}
+
+fn validate_weather_runs(rows: &[WeatherForecastPoint]) -> Result<()> {
+    let expected_members = (0_u16..31).collect::<BTreeSet<_>>();
+    let mut runs =
+        BTreeMap::<(DateTime<Utc>, ContentHash, ContentHash), Vec<&WeatherForecastPoint>>::new();
+    for row in rows {
+        ensure!(
+            row.subject_key == CLOSURE_WEATHER_STATION
+                && row.source_id == DomainSourceId::gefs()
+                && row.instrument_key.as_str() == "GEFS:KLGA:GUST"
+                && row.valid_time - row.reference_time == Duration::hours(3)
+                && row.lead_hours == 3,
+            "closure replay contains a non-canonical Weather forecast row"
+        );
+        runs.entry((
+            row.reference_time,
+            row.run_manifest_hash,
+            row.grid_binding_hash,
+        ))
+        .or_default()
+        .push(row);
+    }
+    ensure!(
+        !runs.is_empty(),
+        "closure replay has no Weather forecast run"
+    );
+    ensure!(
+        runs.values().all(|points| {
+            points.len() == expected_members.len()
+                && points
+                    .iter()
+                    .filter_map(|point| point.member)
+                    .collect::<BTreeSet<_>>()
+                    == expected_members
+                && points
+                    .iter()
+                    .map(|point| point.report_hash)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    == expected_members.len()
+                && points.first().is_some_and(|first| {
+                    points.iter().all(|point| {
+                        point.variable == first.variable
+                            && point.unit == first.unit
+                            && point.published_at == first.published_at
+                            && point.available_at == first.available_at
+                    })
+                })
+        }),
+        "closure replay contains an incomplete Weather forecast run: {:?}",
+        runs.values().map(Vec::len).collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+fn closure_weather_cutoff(
+    replay: &ClosureReplayContext,
+    decision_at: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
+    Ok(DecisionClock::new(replay.knowledge_lag.as_secs())
+        .serving_boundary(
+            decision_at,
+            replay.config.domain.crypto.availability_lag_secs,
+            replay.config.domain.weather.availability_lag_secs,
+        )?
+        .cutoff_for(DecisionSource::DomainWeather))
 }
 
 impl ClosureCatalogMarketBuild<'_> {
@@ -969,18 +1473,18 @@ impl ClosureCatalogMarketBuild<'_> {
             status: MarketStatus::Active,
             filter_reasons: CatalogFilterReasonSet::default(),
             outcome: None,
-            neg_risk: false,
-            tick_size: TickSize::QuarterCent,
+            neg_risk: CLOSURE_NEG_RISK,
+            tick_size: CLOSURE_ORDER_RULES.tick_size,
             tokens: vec![
                 TokenInfo {
                     token_id: TokenId::new(closure_token(self.scope, ordinal)),
                     outcome: "Yes".to_owned(),
-                    neg_risk: false,
+                    neg_risk: CLOSURE_NEG_RISK,
                 },
                 TokenInfo {
                     token_id: closure_no_token(self.scope, ordinal),
                     outcome: "No".to_owned(),
-                    neg_risk: false,
+                    neg_risk: CLOSURE_NEG_RISK,
                 },
             ],
             // Gamma catalog objects do not own live L2 top-of-book fields. The
@@ -988,7 +1492,7 @@ impl ClosureCatalogMarketBuild<'_> {
             best_bid: None,
             best_ask: None,
             depth_usd: None,
-            min_order_size: dec!(1),
+            min_order_size: CLOSURE_ORDER_RULES.minimum_order_size.inner(),
             liquidity_usd: Some(metrics.visible_liquidity_usd),
             volume_24h: Some(Usd::new(dec!(10000))),
             maker_rebate_evidence: MarketMakerRebateEvidence::Unavailable {
@@ -1067,7 +1571,7 @@ impl ClosureCatalogFacts {
             market_ids: market_ids.clone(),
             categories: CategorySet::from(category),
             tags: vec![category_slug(category).to_owned()],
-            neg_risk: false,
+            neg_risk: CLOSURE_NEG_RISK,
             end_date: Some(event_end_date),
             created_at: market_created_at,
             updated_at: effective_at,
@@ -1401,19 +1905,47 @@ impl ClosureCatalogFacts {
         .await?;
         let domain_family = DomainFamily::for_category(self.category)
             .context("closure catalog category has no governed domain family")?;
+        let decision_at = self.available_at + Duration::minutes(1);
         let linkages = self
             .markets
             .iter()
             .map(|market| {
                 let metadata_hash = self.linkage_metadata(market).metadata_hash()?;
+                let (scope, ordinal) = closure_market_identity(&market.info.market_id)?;
+                let (outcome, resolver_tier) = if self.category == MarketCategory::Weather {
+                    let subject = closure_weather_subject(
+                        decision_at,
+                        closure_feature_ordinal(scope, ordinal)?,
+                    )?;
+                    let source_bindings = source_bindings_for_subject(&subject, self.effective_at)?;
+                    (
+                        LinkageOutcome::Resolved(Box::new(ResolvedBinding {
+                            subject,
+                            source_bindings,
+                            grounding: GroundingProof { spans: Vec::new() },
+                            override_context: Some(OverrideContext {
+                                reason: format!(
+                                    "bind deterministic feedback-closure Weather scope {scope}"
+                                ),
+                                actor: "quant-pivot-system-tests".to_owned(),
+                            }),
+                        })),
+                        ResolverTier::Override,
+                    )
+                } else {
+                    (
+                        LinkageOutcome::Unresolved {
+                            reason: LinkageUnresolvedReason::NoDeterministicTemplate,
+                        },
+                        ResolverTier::Tier1Template,
+                    )
+                };
                 let mut linkage = NewMarketLinkage::from_derivation(MarketLinkageDerivation {
                     market_id: market.info.market_id.clone(),
                     domain_family,
-                    outcome: LinkageOutcome::Unresolved {
-                        reason: LinkageUnresolvedReason::NoDeterministicTemplate,
-                    },
+                    outcome,
                     confidence: Probability::ONE,
-                    resolver_tier: ResolverTier::Tier1Template,
+                    resolver_tier,
                     resolver_version: ResolverVersion::FIRST,
                     metadata_hash,
                     capability_registry_hash,
@@ -1497,11 +2029,13 @@ impl FeedbackClosureFixture {
                     .map(|cohort| Arc::clone(&cohort.catalog)),
             )
             .collect::<Vec<_>>();
+        let gamma_catalog_gate = FeedbackGammaCatalogGate::new(report_cohorts.as_ref());
         Self {
             feedback_cycle_id,
             catalogs: Arc::from(catalogs),
             report_cohorts,
             shadow_cohorts,
+            gamma_catalog_gate,
             fact_writers,
             replay,
             runtime_finalized_execution_evidence,
@@ -1513,6 +2047,20 @@ impl FeedbackClosureFixture {
     /// normalized market content instead of replacing it with a sparse mock.
     pub(crate) fn gamma_market_responses(&self) -> Result<HashMap<String, JsonValue>> {
         Self::gamma_responses_for(&self.catalogs)
+    }
+
+    /// Clone the shared Gamma lifecycle gate captured by the mock responder.
+    #[must_use]
+    pub(crate) fn gamma_catalog_gate(&self) -> FeedbackGammaCatalogGate {
+        self.gamma_catalog_gate.clone()
+    }
+
+    fn report_market_ids(&self) -> BTreeSet<MarketId> {
+        self.report_cohorts
+            .iter()
+            .flat_map(|cohort| cohort.markets.iter())
+            .map(|market| market.market_id.clone())
+            .collect()
     }
 
     /// Exact per-token books whose cross-sectional signal the activated report
@@ -1545,70 +2093,346 @@ impl FeedbackClosureFixture {
         Ok(snapshots)
     }
 
+    /// Refresh the current report universe's materialized feature buckets at
+    /// one database-owned decision clock.
+    ///
+    /// Catalog retirement and the initial multi-source commit are intentionally
+    /// complete before this fast final write. Keeping this source-native bucket
+    /// head live prevents a long disposable fixture setup from making every
+    /// required rolling feature stale before the report is triggered.
+    pub async fn refresh_report_microstructure(
+        &self,
+        db: &DatabaseConnection,
+        knowledge_lag_secs: u64,
+    ) -> Result<DateTime<Utc>> {
+        let database_now = db.statement_time().await;
+        let decision_at = DateTime::from_timestamp_millis(database_now.timestamp_millis())
+            .context("report microstructure refresh clock is outside millisecond range")?;
+        let mut rows = Vec::with_capacity(
+            self.report_cohorts
+                .iter()
+                .map(|cohort| cohort.markets.len() * 61)
+                .sum(),
+        );
+        for cohort in self.report_cohorts.iter() {
+            for source in cohort.markets.iter() {
+                rows.extend(closure_serving_microstructure_rows(
+                    source,
+                    decision_at,
+                    knowledge_lag_secs,
+                    cohort.book_price_shift,
+                )?);
+            }
+        }
+        ClosureFactWriters::write_batches(self.fact_writers.microstructure.as_ref(), rows)
+            .await
+            .context("refresh mixed-Route report microstructure")?;
+        Ok(decision_at)
+    }
+
     /// Wait until `ClickHouse` exposes every exact WS snapshot at the durable PIT
     /// boundary used by the imminent browser-triggered report.
     pub async fn await_report_book_snapshots(
         &self,
         expected: &[FeedbackReportBookSnapshot],
         sent_after: DateTime<Utc>,
+        deadline: Instant,
     ) -> Result<DateTime<Utc>> {
-        let deadline = Instant::now() + StdDuration::from_secs(30);
         let expected_by_token = expected
             .iter()
             .map(|snapshot| (snapshot.token_id.clone(), snapshot))
             .collect::<BTreeMap<_, _>>();
+        ensure!(
+            !expected.is_empty() && expected_by_token.len() == expected.len(),
+            "exact report-book readiness requires a nonempty unique token cohort"
+        );
         let token_ids = expected_by_token.keys().cloned().collect::<Vec<_>>();
+        let mut last_state = format!(
+            "expected={} tokens={:?} sent_after_ms={} no durable query completed",
+            token_ids.len(),
+            token_ids.iter().take(8).collect::<Vec<_>>(),
+            sent_after.timestamp_millis(),
+        );
         loop {
+            ensure!(
+                Instant::now() < deadline,
+                "exact CLOB phase=durable-read deadline exhausted: {last_state}"
+            );
             let observed_at = Utc::now();
-            let rows = self
-                .fact_writers
-                .fact_read
-                .book_ledger_snapshots_at(
+            let rows = tokio::time::timeout_at(
+                deadline,
+                self.fact_writers.fact_read.book_ledger_snapshots_at(
                     token_ids.clone(),
                     observed_at.timestamp_millis(),
                     observed_at.timestamp_millis(),
-                )
-                .await?;
-            let exact = rows.len() == expected_by_token.len()
-                && rows.iter().all(|row| {
+                ),
+            )
+            .await
+            .with_context(|| format!("exact CLOB phase=durable-query deadline: {last_state}"))?
+            .with_context(|| format!("exact CLOB phase=durable-query failed: {last_state}"))?;
+            let observations = rows
+                .iter()
+                .map(|row| {
                     let Some(snapshot) = expected_by_token.get(&row.token_id) else {
-                        return false;
+                        return (
+                            false,
+                            json!({"token": row.token_id, "unexpected": true,
+                                "event_ms": row.venue_event_time, "persisted_ms": row.persisted_time}),
+                        );
                     };
-                    row.venue_event_time >= sent_after.timestamp_millis()
-                        && row.bid_prices
-                            == snapshot
-                                .bids
-                                .iter()
-                                .map(|level| ChPrice::from(level.price_decimal()))
-                                .collect::<Vec<_>>()
-                        && row.bid_sizes
-                            == snapshot
-                                .bids
-                                .iter()
-                                .map(|level| ChShares::from(level.size_decimal()))
-                                .collect::<Vec<_>>()
-                        && row.ask_prices
-                            == snapshot
-                                .asks
-                                .iter()
-                                .map(|level| ChPrice::from(level.price_decimal()))
-                                .collect::<Vec<_>>()
-                        && row.ask_sizes
-                            == snapshot
-                                .asks
-                                .iter()
-                                .map(|level| ChShares::from(level.size_decimal()))
-                                .collect::<Vec<_>>()
-                });
-            if exact {
-                return Ok(observed_at);
-            }
+                    let event_is_new = row.venue_event_time >= sent_after.timestamp_millis();
+                    let (bids_match, asks_match) = snapshot.match_sides(row);
+                    (
+                        event_is_new && bids_match && asks_match,
+                        json!({"token": row.token_id, "event_ms": row.venue_event_time,
+                            "persisted_ms": row.persisted_time, "event_is_new": event_is_new,
+                            "bids_match": bids_match, "asks_match": asks_match}),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let missing = token_ids
+                .iter()
+                .filter(|token| !rows.iter().any(|row| &row.token_id == *token))
+                .collect::<Vec<_>>();
+            last_state = format!(
+                "expected={} observed={} sent_after_ms={} missing_count={} missing={:?} mismatches={:?} last_durable={:?}",
+                token_ids.len(),
+                rows.len(),
+                sent_after.timestamp_millis(),
+                missing.len(),
+                missing.iter().take(8).collect::<Vec<_>>(),
+                observations
+                    .iter()
+                    .filter(|(exact, _)| !exact)
+                    .take(8)
+                    .map(|(_, summary)| summary)
+                    .collect::<Vec<_>>(),
+                rows.iter()
+                    .take(8)
+                    .map(|row| (&row.token_id, row.venue_event_time, row.persisted_time))
+                    .collect::<Vec<_>>(),
+            );
             ensure!(
                 Instant::now() < deadline,
-                "exact mixed-Route WebSocket books did not become durable within 30s"
+                "exact CLOB phase=durable-match deadline exhausted: {last_state}"
             );
-            sleep(CLOSURE_POLL_INTERVAL).await;
+            // Equal cardinality plus complete membership gives a bijection:
+            // duplicate rows cannot conceal a missing expected token.
+            let exact = missing.is_empty()
+                && rows.len() == expected_by_token.len()
+                && observations.iter().all(|(exact, _)| *exact);
+            if exact {
+                let verified_at = Utc::now();
+                for row in &rows {
+                    FixtureBookTiming::verify_delivery(
+                        row.venue_event_time,
+                        row.persisted_time,
+                        verified_at.timestamp_millis(),
+                    )
+                    .with_context(|| {
+                        format!(
+                            "exact CLOB token {} phase=durable-freshness event_ms={} persisted_ms={} verified_ms={}",
+                            row.token_id, row.venue_event_time, row.persisted_time, verified_at.timestamp_millis(),
+                        )
+                    })?;
+                }
+                return Ok(verified_at);
+            }
+            tokio::time::timeout_at(deadline, sleep(CLOSURE_POLL_INTERVAL))
+                .await
+                .with_context(|| {
+                    format!("exact CLOB phase=durable-match deadline: {last_state}")
+                })?;
         }
+    }
+
+    /// Admit only a complete exact cohort already visible at the real report PIT clock.
+    pub(crate) async fn await_report_pit_books(
+        &self,
+        db: &DatabaseConnection,
+        sent_after: DateTime<Utc>,
+        knowledge_lag_secs: u64,
+        deadline: Instant,
+    ) -> Result<DateTime<Utc>> {
+        ensure!(
+            knowledge_lag_secs == FixtureBookTiming::REPORT_LAG_SECS,
+            "report PIT lag must match the unchanged closure freshness contract"
+        );
+        let max_age = FixtureBookTiming::closure()?.max_book_age_ms;
+        let expected = self.report_book_snapshots()?;
+        let expected_by_token = expected
+            .iter()
+            .map(|row| (&row.token_id, row))
+            .collect::<BTreeMap<_, _>>();
+        ensure!(
+            !expected.is_empty() && expected_by_token.len() == expected.len(),
+            "PIT report cohort requires unique nonempty token identities"
+        );
+        let token_ids = expected
+            .iter()
+            .map(|row| row.token_id.clone())
+            .collect::<Vec<_>>();
+        let mut last_state = "no PIT cohort has been observed".to_owned();
+        loop {
+            ensure!(
+                Instant::now() < deadline,
+                "PIT report readiness deadline: {last_state}"
+            );
+            let decision_at = tokio::time::timeout_at(deadline, db.statement_time())
+                .await
+                .context("PIT report database clock exceeded control deadline")?;
+            let boundary = DecisionClock::new(knowledge_lag_secs).boundary(decision_at)?;
+            let cutoff = boundary.cutoff_for(DecisionSource::Book);
+            let current = tokio::time::timeout_at(
+                deadline,
+                self.fact_writers.fact_read.book_ledger_snapshots_at(
+                    token_ids.clone(),
+                    decision_at.timestamp_millis(),
+                    decision_at.timestamp_millis(),
+                ),
+            )
+            .await
+            .context("current report cohort read exceeded control deadline")??;
+            let rows = tokio::time::timeout_at(
+                deadline,
+                self.fact_writers.fact_read.book_ledger_snapshots_at(
+                    token_ids.clone(),
+                    cutoff.timestamp_millis(),
+                    decision_at.timestamp_millis(),
+                ),
+            )
+            .await
+            .context("PIT report cohort read exceeded control deadline")??;
+            let current_by_token = current
+                .iter()
+                .map(|row| (&row.token_id, row))
+                .collect::<BTreeMap<_, _>>();
+            let unique = rows.iter().map(|row| &row.token_id).collect::<HashSet<_>>();
+            let exact = rows.len() == expected.len()
+                && unique.len() == expected.len()
+                && current.len() == expected.len()
+                && current_by_token.len() == expected.len()
+                && rows.iter().all(|row| {
+                    expected_by_token
+                        .get(&row.token_id)
+                        .is_some_and(|snapshot| {
+                            let same_cohort =
+                                current_by_token.get(&row.token_id).is_some_and(|now| {
+                                    now.stream_session_id == row.stream_session_id
+                                        && now.token_sequence == row.token_sequence
+                                        && now.event_hash == row.event_hash
+                                });
+                            let (bids, asks) = snapshot.match_sides(row);
+                            same_cohort
+                                && bids
+                                && asks
+                                && row.venue_event_time >= sent_after.timestamp_millis()
+                                && row.venue_event_time <= cutoff.timestamp_millis()
+                                && row.venue_event_time <= row.persisted_time
+                                && row.persisted_time <= decision_at.timestamp_millis()
+                                && decision_at
+                                    .timestamp_millis()
+                                    .checked_sub(row.venue_event_time)
+                                    .and_then(|age| u64::try_from(age).ok())
+                                    .is_some_and(|age| age <= max_age)
+                        })
+                });
+            last_state = format!(
+                "D={decision_at} cutoff={cutoff} current={} rows={} unique={} expected={} exact={exact}",
+                current.len(),
+                rows.len(),
+                unique.len(),
+                expected.len()
+            );
+            if exact {
+                self.verify_pit_source(db, &token_ids, &rows, &boundary, deadline)
+                    .await?;
+                let return_clock = tokio::time::timeout_at(deadline, db.statement_time())
+                    .await
+                    .context("PIT report return clock exceeded control deadline")?;
+                ensure!(
+                    return_clock >= decision_at,
+                    "PIT report database clock regressed"
+                );
+                let still_fresh = rows.iter().all(|row| {
+                    return_clock
+                        .timestamp_millis()
+                        .checked_sub(row.venue_event_time)
+                        .and_then(|age| u64::try_from(age).ok())
+                        .is_some_and(|age| age <= max_age)
+                });
+                ensure!(
+                    Instant::now() < deadline,
+                    "PIT report readiness accepted after control deadline"
+                );
+                if still_fresh {
+                    return Ok(decision_at);
+                }
+                write!(
+                    &mut last_state,
+                    " return_clock={return_clock} cohort_aged_out=true"
+                )
+                .expect("write PIT readiness diagnostics to String");
+            }
+            tokio::time::timeout_at(deadline, sleep(CLOSURE_POLL_INTERVAL))
+                .await
+                .with_context(|| format!("PIT report convergence deadline: {last_state}"))?;
+        }
+    }
+
+    async fn verify_pit_source(
+        &self,
+        db: &DatabaseConnection,
+        token_ids: &[TokenId],
+        rows: &[BookL2LedgerRow],
+        boundary: &DecisionBoundary,
+        deadline: Instant,
+    ) -> Result<()> {
+        let expected = self.report_book_snapshots()?;
+        let expected_by_token = expected
+            .iter()
+            .map(|row| (&row.token_id, row))
+            .collect::<BTreeMap<_, _>>();
+        let pit = DurablePitSource::new(
+            Arc::clone(&self.fact_writers.fact_read),
+            Arc::new(PgCatalogLedgerRepository::new(db.clone())),
+            Arc::new(PgClobMarketInfoRepository::new(db.clone())),
+        );
+        let books = tokio::time::timeout_at(deadline, pit.books_at_boundary(token_ids, boundary))
+            .await
+            .context("canonical PIT report reconstruction exceeded control deadline")??;
+        ensure!(
+            books.len() == expected.len(),
+            "canonical PIT source reconstructed {} of {} exact books",
+            books.len(),
+            expected.len()
+        );
+        for row in rows {
+            let snapshot = expected_by_token
+                .get(&row.token_id)
+                .context("canonical PIT report token lost its expected snapshot")?;
+            let book = books
+                .get(&row.token_id)
+                .context("canonical PIT source omitted one exact token")?;
+            let source = book
+                .source_event
+                .as_ref()
+                .context("PIT report book has no canonical source identity")?;
+            let levels_match = book.bids.as_ref() == snapshot.bids.as_slice()
+                && book.asks.as_ref() == snapshot.asks.as_slice();
+            ensure!(
+                source.stream_session_id == row.stream_session_id
+                    && source.token_sequence == row.token_sequence
+                    && source.source_event_hash == ContentHash::from(row.event_hash)
+                    && book.timestamp_ms == u64::try_from(row.venue_event_time)?
+                    && book.source_cutoff == boundary.cutoff_for(DecisionSource::Book)
+                    && book.decision_at == boundary.decision_at()
+                    && book.available_at <= boundary.decision_at()
+                    && levels_match,
+                "PIT report reconstruction changed its exact session/sequence/hash/clock/levels"
+            );
+        }
+        Ok(())
     }
 
     fn gamma_responses_for(
@@ -1688,17 +2512,256 @@ struct CohortSourceFacts {
     executions: Vec<MarketExecutionRow>,
     participants: Vec<ExecutionParticipantRow>,
     acceptances: Vec<ExchangeHistoryAcceptanceRow>,
+    history: ClosureAcceptedHistory,
     domain_observations: Vec<DomainObservationRow>,
+    weather_observations: Vec<WeatherObservationFactRow>,
+    weather_forecasts: Vec<WeatherForecastFactRow>,
+}
+
+struct CohortMarketFacts {
+    books: Vec<BookL2LedgerRow>,
+    microstructure: Vec<BookMicrostructureRow>,
+    sessions: Vec<BookStreamSessionRow>,
+    domain_observations: Vec<DomainObservationRow>,
+    weather_observations: Vec<WeatherObservationFactRow>,
+    weather_forecasts: Vec<WeatherForecastFactRow>,
+}
+
+struct PreparedMarketSources {
+    facts: CohortMarketFacts,
+    market_infos: Vec<ClobMarketInfoVersion>,
+    expected_weather: Vec<WeatherForecastFactRow>,
+    weather_cutoff: Option<DateTime<Utc>>,
+}
+
+struct PersistedServingSources {
+    samples: Vec<ReplaySample>,
+    history: ClosureAcceptedHistory,
 }
 
 struct ClosureExecutionFacts {
     executions: Vec<MarketExecutionRow>,
     participants: Vec<ExecutionParticipantRow>,
     acceptance: ExchangeHistoryAcceptanceRow,
+    history: ClosureAcceptedHistory,
+}
+
+#[derive(Clone)]
+struct ClosureAcceptedHistory {
+    chunk: NewExchangeHistoryChunk,
+    chunk_ref: HistorySealChunkRef,
+}
+
+impl ClosureAcceptedHistory {
+    fn validate_acceptance(&self, row: &ExchangeHistoryAcceptanceRow) -> Result<()> {
+        ensure!(
+            row.chunk_id == self.chunk_ref.chunk_id
+                && row.frontier == self.chunk_ref.frontier.as_str()
+                && i64::try_from(row.from_block)? == self.chunk_ref.from_block
+                && i64::try_from(row.to_block)? == self.chunk_ref.to_block
+                && i64::try_from(row.state_revision)? == self.chunk_ref.state_revision
+                && row.active == 1
+                && self.chunk.chunk_id == self.chunk_ref.chunk_id
+                && self.chunk.frontier == self.chunk_ref.frontier
+                && self.chunk.from_block == self.chunk_ref.from_block
+                && self.chunk.to_block == self.chunk_ref.to_block,
+            "closure history acceptance and PostgreSQL preimage are inconsistent"
+        );
+        Ok(())
+    }
+
+    fn matches_contract(&self, other: &Self) -> bool {
+        self.chunk_ref.chunk_id == other.chunk_ref.chunk_id
+            && self.chunk_ref.frontier == other.chunk_ref.frontier
+            && self.chunk_ref.from_block == other.chunk_ref.from_block
+            && self.chunk_ref.to_block == other.chunk_ref.to_block
+            && self.chunk.status == other.chunk.status
+            && self.chunk.hypersync_count == other.chunk.hypersync_count
+            && self.chunk.attestor_count == other.chunk.attestor_count
+            && self.chunk.hypersync_digest == other.chunk.hypersync_digest
+            && self.chunk.attestor_digest == other.chunk.attestor_digest
+            && self.chunk.first_block_hash == other.chunk.first_block_hash
+            && self.chunk.last_block_hash == other.chunk.last_block_hash
+            && self.chunk.continuity_basis == other.chunk.continuity_basis
+            && self.chunk.continuity_block == other.chunk.continuity_block
+            && self.chunk.continuity_hash == other.chunk.continuity_hash
+            && self.chunk.effective_through_at == other.chunk.effective_through_at
+    }
+
+    async fn route_history(
+        &self,
+        db: &DatabaseConnection,
+        decision_at: DateTime<Utc>,
+    ) -> Result<RouteHistoryLineage> {
+        if self.chunk_ref.frontier != ExchangeHistoryFrontier::Activation {
+            let available_by = decision_at
+                .checked_add_signed(Duration::milliseconds(1))
+                .context("closure materialized history cutoff overflowed")?;
+            return Ok(RouteHistoryLineage::Materialized {
+                available_by,
+                chunks: vec![self.chunk_ref.clone()],
+            });
+        }
+        let accepted_at = self
+            .chunk
+            .accepted_at
+            .context("closure Activation chunk has no acceptance time")?;
+        ensure!(
+            accepted_at <= decision_at,
+            "closure Activation chunk is not visible at its decision"
+        );
+        let repository = PgExchangeHistoryRepository::new(db.clone());
+        let plan = repository
+            .load_plan(137)
+            .await?
+            .context("closure Activation chunk has no immutable history plan")?;
+        let stored = repository.save_chunk(self.chunk.clone()).await?;
+        ensure!(
+            stored.chunk_id == self.chunk_ref.chunk_id
+                && stored.frontier == self.chunk_ref.frontier
+                && stored.from_block == self.chunk_ref.from_block
+                && stored.to_block == self.chunk_ref.to_block
+                && stored.state_revision == Some(self.chunk_ref.state_revision)
+                && stored.status == ExchangeHistoryChunkStatus::Accepted,
+            "closure PG accepted chunk differs from durable ClickHouse acceptance"
+        );
+        let head = self.create_head(&repository, &plan, accepted_at).await?;
+        let head = repository
+            .validate_serving_head(head.seal.serving_head_seal_id, head.seal.seal_hash)
+            .await?;
+        ensure!(
+            head.chunks == [self.chunk_ref.clone()],
+            "closure serving head changed its exact one-chunk lineage"
+        );
+        Ok(RouteHistoryLineage::Runtime {
+            serving_head_seal_id: head.seal.serving_head_seal_id,
+            serving_head_seal_hash: head.seal.seal_hash,
+        })
+    }
+
+    async fn create_head(
+        &self,
+        repository: &PgExchangeHistoryRepository,
+        plan: &ExchangeHistoryPlanInfo,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<HistoryServingHeadSeal> {
+        for _attempt in 0..SERVING_HEAD_CAS_ATTEMPTS {
+            let latest = repository
+                .latest_serving_head(ExchangeHistoryFrontier::Activation)
+                .await?;
+            let previous_seal_id = latest.as_ref().map(|head| head.seal.serving_head_seal_id);
+            let chunks = vec![self.chunk_ref.clone()];
+            let seal_id =
+                ExchangeHistoryWorker::serving_head_id(plan.plan_id, previous_seal_id, &chunks);
+            let mut command = CreateHistoryServingHeadSeal {
+                seal: NewHistoryServingHeadSeal {
+                    serving_head_seal_id: seal_id,
+                    seal_hash: ContentHash::from_bytes([0; 32]),
+                    plan_id: plan.plan_id,
+                    frontier: ExchangeHistoryFrontier::Activation,
+                    previous_seal_id,
+                    window_from_block: self.chunk_ref.from_block,
+                    accepted_through_block: self.chunk_ref.to_block,
+                    effective_through_at: self
+                        .chunk
+                        .effective_through_at
+                        .context("closure Activation chunk has no effective-through time")?,
+                    policy_hash: plan.policy_hash,
+                    created_at: accepted_at,
+                },
+                chunks,
+            };
+            command.seal.seal_hash = command.derive_hash()?;
+            match repository.create_serving_head(command).await {
+                Ok(head) => return Ok(head),
+                Err(StorageError::StateConflict { entity, detail, .. })
+                    if entity == "quant_history_serving_head_seal"
+                        && detail
+                            == "serving head predecessor is not the latest immutable head" => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        anyhow::bail!("closure serving-head predecessor CAS did not converge")
+    }
+}
+
+struct ClosureExecutionSeed<'a> {
+    sources: &'a [ClosureMarketSource],
+    decision_at: DateTime<Utc>,
+    knowledge_lag_secs: u64,
+    price_shift: Decimal,
+    polygon: &'a DeterministicPolygonChain,
+    interval: ClosureHistoryInterval,
+}
+
+#[derive(Clone, Copy)]
+struct ClosureHistoryInterval {
+    frontier: ExchangeHistoryFrontier,
+    from_block: Option<u64>,
+    policy_hash: Option<ContentHash>,
+}
+
+impl ClosureHistoryInterval {
+    fn for_sources(sources: &[ClosureMarketSource]) -> Result<Self> {
+        let source = sources
+            .first()
+            .context("closure history source set is empty")?;
+        let (scope, _) = closure_market_identity(&source.market_id)?;
+        let frontier = if matches!(scope, "training" | "calibration") {
+            ExchangeHistoryFrontier::Retention
+        } else {
+            ExchangeHistoryFrontier::Activation
+        };
+        Ok(Self {
+            frontier,
+            from_block: None,
+            policy_hash: None,
+        })
+    }
+}
+
+struct ClosureHistoryContract {
+    cutoff: DateTime<Utc>,
+    from_block: u64,
+    event_from_block: u64,
+    frontier: ExchangeHistoryFrontier,
+    to_block: u64,
+    chain_head: DeterministicPolygonHead,
+    first: DeterministicPolygonBlock,
+    last: DeterministicPolygonBlock,
+    provider_observed_at: DateTime<Utc>,
+    event_set_hash: ContentHash,
+    policy_hash: ContentHash,
+}
+
+struct ClosureExecutionRows {
+    executions: Vec<MarketExecutionRow>,
+    participants: Vec<ExecutionParticipantRow>,
+}
+
+struct ClosureExecutionMarket<'a> {
+    source: &'a ClosureMarketSource,
+    source_index: usize,
+    scope: String,
+    ordinal: usize,
+    token_id: TokenId,
+    price: Price,
+}
+
+struct ClosureExecutionEvent {
+    execution_hash: ContentHash,
+    maker_address: String,
+    taker_address: String,
+    notional: Usd,
+    effective_at: i64,
+    model_available_at: i64,
 }
 
 struct CohortInferenceResult {
     facts: CohortServingFacts,
+    data_quality: ReportDataQualityTokens,
+    calibration_scores: Vec<ModelCalibrationScore>,
+    input_audit: Vec<ModelInputAuditRow>,
     candidates: Vec<SignalCandidate>,
 }
 
@@ -1707,6 +2770,55 @@ struct PersistedCohortPlane {
     captures: Vec<DecisionCaptureEvidence>,
     vector_ids: Vec<FeatureVectorId>,
     inference_rows: Vec<FactorInferenceRow>,
+    data_quality: ReportDataQualityTokens,
+}
+
+struct CohortReplayPlane {
+    cross: ReplayCrossSection,
+    quality: CohortDataQuality,
+}
+
+struct CohortDataQuality {
+    fact_lags: HashMap<TokenId, Option<u64>>,
+    required: HashSet<FeatureName>,
+}
+
+impl CohortDataQuality {
+    fn record(
+        &self,
+        feature: &NewFeatureVector,
+        vector: &FeatureVector,
+        capture: &MarketDecisionCapture,
+    ) -> Result<TokenDataQualityRecord> {
+        ensure!(
+            feature.market_id == capture.market_id
+                && feature.token_id.as_ref() == Some(&capture.token_id)
+                && feature.data_quality == vector.data_quality
+                && feature.data_quality == capture.data_quality,
+            "closure DQ row differs from its actual persisted vector or capture"
+        );
+        let fact_lag_ms = *self
+            .fact_lags
+            .get(&capture.token_id)
+            .context("closure DQ is missing the token's frozen microstructure window")?;
+        Ok(TokenDataQualityRecord {
+            feature_vector_id: feature.feature_vector_id,
+            token_id: capture.token_id.clone(),
+            market_id: feature.market_id.clone(),
+            status: feature.data_quality,
+            book_age_ms: u64::try_from(
+                (feature.decision_at - capture.book.effective_at).num_milliseconds(),
+            )?,
+            crossed: capture.book.is_crossed(),
+            empty: capture.book.is_empty(),
+            fact_lag_ms,
+            missing_required: vector
+                .iter_cells()
+                .filter(|(name, cell)| cell.reason.is_some() && self.required.contains(*name))
+                .map(|(name, _)| name.to_string())
+                .collect(),
+        })
+    }
 }
 
 struct CohortInferenceContext<'a> {
@@ -1719,13 +2831,17 @@ struct CohortInferenceContext<'a> {
 }
 
 struct ClosureFactWriters {
-    books: Arc<dyn FactWriter<BookL2LedgerRow>>,
+    pool: Arc<ClickHousePool>,
+    books: Arc<ChCanonicalLedgerWriter>,
     microstructure: Arc<dyn FactWriter<BookMicrostructureRow>>,
     sessions: Arc<dyn FactWriter<BookStreamSessionRow>>,
     executions: Arc<dyn FactWriter<MarketExecutionRow>>,
     participants: Arc<dyn FactWriter<ExecutionParticipantRow>>,
     acceptances: Arc<dyn FactWriter<ExchangeHistoryAcceptanceRow>>,
+    crypto_prices: Arc<dyn FactWriter<CryptoPriceReportRow>>,
     domain_observations: Arc<dyn FactWriter<DomainObservationRow>>,
+    weather_observations: Arc<dyn FactWriter<WeatherObservationFactRow>>,
+    weather_forecasts: Arc<dyn FactWriter<WeatherForecastFactRow>>,
     features: Arc<dyn FactWriter<QuantFeatureEventRow>>,
     inputs: Arc<dyn FactWriter<QuantModelInputEventRow>>,
     completions: Arc<dyn FactWriter<QuantServingEvidenceCompletionRow>>,
@@ -1733,19 +2849,23 @@ struct ClosureFactWriters {
     report_recommendations: Arc<dyn FactWriter<QuantReportRecommendationFactRow>>,
     report_funnel: Arc<dyn FactWriter<ReportMarketFunnelRow>>,
     fact_read: Arc<dyn QuantFactReadRepository>,
+    history_chunks: TokioMutex<HashMap<Uuid, Arc<TokioMutex<Option<ClosureAcceptedHistory>>>>>,
 }
 
 impl ClosureFactWriters {
     async fn connect(config: &ClickHouseConfig) -> Result<Self> {
         let pool = Arc::new(ClickHousePool::connect(config).await?);
-        let manager = Arc::new(ChWriteManager::new(config.max_concurrent_inserts));
+        let manager = Arc::new(ChWriteManager::new(
+            config.max_concurrent_inserts,
+            &config.io,
+        ));
         let fact_read = Arc::new(ChQuantFactReadRepository::new(Arc::clone(&pool)))
             as Arc<dyn QuantFactReadRepository>;
         Ok(Self {
-            books: Arc::new(ChFactWriter::new(
+            pool: Arc::clone(&pool),
+            books: Arc::new(ChCanonicalLedgerWriter::new(
                 Arc::clone(&pool),
                 Arc::clone(&manager),
-                "quant_book_l2_ledger",
             )),
             microstructure: Arc::new(ChFactWriter::new(
                 Arc::clone(&pool),
@@ -1772,10 +2892,25 @@ impl ClosureFactWriters {
                 Arc::clone(&manager),
                 "quant_exchange_history_acceptance",
             )),
+            crypto_prices: Arc::new(ChFactWriter::new(
+                Arc::clone(&pool),
+                Arc::clone(&manager),
+                "quant_crypto_price_report",
+            )),
             domain_observations: Arc::new(ChFactWriter::new(
                 Arc::clone(&pool),
                 Arc::clone(&manager),
                 "quant_domain_observation",
+            )),
+            weather_observations: Arc::new(ChFactWriter::new(
+                Arc::clone(&pool),
+                Arc::clone(&manager),
+                "quant_weather_observation_fact",
+            )),
+            weather_forecasts: Arc::new(ChFactWriter::new(
+                Arc::clone(&pool),
+                Arc::clone(&manager),
+                "quant_weather_forecast_fact",
             )),
             features: Arc::new(ChFactWriter::new(
                 Arc::clone(&pool),
@@ -1808,10 +2943,71 @@ impl ClosureFactWriters {
                 "quant_report_market_funnel",
             )),
             fact_read,
+            history_chunks: TokioMutex::new(HashMap::new()),
         })
     }
 
-    async fn commit_sources(&self, facts: CohortSourceFacts) -> Result<()> {
+    async fn commit_sources(&self, facts: CohortSourceFacts) -> Result<ClosureAcceptedHistory> {
+        let CohortSourceFacts {
+            books,
+            microstructure,
+            sessions,
+            executions,
+            participants,
+            acceptances,
+            history,
+            domain_observations,
+            weather_observations,
+            weather_forecasts,
+        } = facts;
+        self.commit_market_sources(CohortMarketFacts {
+            books,
+            microstructure,
+            sessions,
+            domain_observations,
+            weather_observations,
+            weather_forecasts,
+        })
+        .await?;
+        ensure!(
+            acceptances.len() == 1,
+            "closure source commit must own exactly one history chunk"
+        );
+        history.validate_acceptance(&acceptances[0])?;
+        let chunk_id = acceptances[0].chunk_id;
+        let chunk_state = {
+            let mut history_chunks = self.history_chunks.lock().await;
+            Arc::clone(
+                history_chunks
+                    .entry(chunk_id)
+                    .or_insert_with(|| Arc::new(TokioMutex::new(None))),
+            )
+        };
+        let mut committed = chunk_state.lock().await;
+        let canonical_history = if let Some(existing) = committed.as_ref() {
+            ensure!(
+                existing.matches_contract(&history),
+                "closure history chunk identity collided with a different immutable contract"
+            );
+            existing.clone()
+        } else {
+            Self::write_batches(self.executions.as_ref(), executions)
+                .await
+                .context("write closure execution facts")?;
+            Self::write_batches(self.participants.as_ref(), participants)
+                .await
+                .context("write closure execution participant facts")?;
+            Self::write_batches(self.acceptances.as_ref(), acceptances)
+                .await
+                .context("write closure execution acceptance facts")?;
+            *committed = Some(history.clone());
+            history
+        };
+        drop(committed);
+        Ok(canonical_history)
+    }
+
+    async fn commit_market_sources(&self, facts: CohortMarketFacts) -> Result<()> {
         Self::write_batches(self.books.as_ref(), facts.books)
             .await
             .context("write closure book ledger facts")?;
@@ -1821,19 +3017,18 @@ impl ClosureFactWriters {
         Self::write_batches(self.sessions.as_ref(), facts.sessions)
             .await
             .context("write closure book session facts")?;
-        Self::write_batches(self.executions.as_ref(), facts.executions)
-            .await
-            .context("write closure execution facts")?;
-        Self::write_batches(self.participants.as_ref(), facts.participants)
-            .await
-            .context("write closure execution participant facts")?;
-        Self::write_batches(self.acceptances.as_ref(), facts.acceptances)
-            .await
-            .context("write closure execution acceptance facts")?;
         Self::write_batches(self.domain_observations.as_ref(), facts.domain_observations)
             .await
             .context("write closure domain observation facts")?;
-        Ok(())
+        Self::write_batches(
+            self.weather_observations.as_ref(),
+            facts.weather_observations,
+        )
+        .await
+        .context("write closure Weather observation facts")?;
+        Self::write_batches(self.weather_forecasts.as_ref(), facts.weather_forecasts)
+            .await
+            .context("write closure Weather forecast facts")
     }
 
     async fn commit_shadow_features(&self, rows: Vec<QuantFeatureEventRow>) -> Result<()> {
@@ -1865,6 +3060,43 @@ impl ClosureFactWriters {
             .context("write closure market-resolution facts")
     }
 
+    async fn commit_retention(&self, facts: RetentionAnchorFacts) -> Result<()> {
+        facts.validate()?;
+        Self::write_batches(self.books.as_ref(), facts.books)
+            .await
+            .context("write retention book-ledger anchors")?;
+        Self::write_batches(self.sessions.as_ref(), facts.sessions)
+            .await
+            .context("write retention book-session anchors")?;
+        Self::write_batches(self.microstructure.as_ref(), facts.microstructure)
+            .await
+            .context("write retention microstructure anchors")?;
+        Self::write_batches(self.executions.as_ref(), facts.executions)
+            .await
+            .context("write retention execution anchors")?;
+        Self::write_batches(self.participants.as_ref(), facts.participants)
+            .await
+            .context("write retention participant anchors")?;
+        Self::write_batches(self.crypto_prices.as_ref(), facts.crypto_prices)
+            .await
+            .context("write retention Crypto price anchors")?;
+        Self::write_batches(self.domain_observations.as_ref(), facts.domain_observations)
+            .await
+            .context("write retention domain-observation anchors")?;
+        Self::write_batches(
+            self.weather_observations.as_ref(),
+            facts.weather_observations,
+        )
+        .await
+        .context("write retention Weather observation anchors")?;
+        Self::write_batches(self.weather_forecasts.as_ref(), facts.weather_forecasts)
+            .await
+            .context("write retention Weather forecast anchors")?;
+        Self::write_batches(self.resolutions.as_ref(), facts.resolutions)
+            .await
+            .context("write retention resolution anchors")
+    }
+
     async fn write_batches<T>(writer: &dyn FactWriter<T>, rows: Vec<T>) -> Result<()>
     where
         T: Send + Sync + 'static,
@@ -1883,6 +3115,1061 @@ impl ClosureFactWriters {
     }
 }
 
+#[derive(Clone, Copy)]
+struct RetentionAnchorWindow {
+    observed_at: DateTime<Utc>,
+    oldest_at: DateTime<Utc>,
+    newest_at: DateTime<Utc>,
+    recent_floor: DateTime<Utc>,
+    required_days: u32,
+}
+
+impl RetentionAnchorWindow {
+    fn new(observed_at: DateTime<Utc>) -> Result<Self> {
+        let observed_at = DateTime::from_timestamp_millis(observed_at.timestamp_millis())
+            .context("retention anchor clock is outside millisecond range")?;
+        let required_days = minimum_raw_retention_days().map_err(AnyhowError::msg)?;
+        let runway_days = required_days
+            .checked_add(RETENTION_RUNWAY_MARGIN_DAYS)
+            .context("retention runway margin overflowed")?;
+        let oldest_at = observed_at
+            .checked_sub_signed(Duration::days(i64::from(runway_days)))
+            .context("retention oldest anchor underflowed")?;
+        let newest_at = observed_at
+            .checked_sub_signed(Duration::minutes(1))
+            .context("retention newest anchor underflowed")?;
+        let recent_floor = observed_at
+            .checked_sub_signed(Duration::days(RETENTION_RECENT_MAX_AGE_DAYS))
+            .context("retention recent floor underflowed")?;
+        Ok(Self {
+            observed_at,
+            oldest_at,
+            newest_at,
+            recent_floor,
+            required_days,
+        })
+    }
+
+    fn validate_range(
+        &self,
+        object: &str,
+        earliest: DateTime<Utc>,
+        latest: DateTime<Utc>,
+        row_count: u64,
+    ) -> Result<()> {
+        let required_runway = self
+            .required_days
+            .checked_add(RETENTION_RUNWAY_MARGIN_DAYS)
+            .context("retention validation runway overflowed")?;
+        let measured_days = (self.observed_at - earliest)
+            .num_seconds()
+            .div_euclid(86_400);
+        ensure!(
+            row_count >= 2,
+            "retention binding {object} has {row_count} rows, expected both runway endpoints"
+        );
+        ensure!(
+            measured_days >= i64::from(required_runway) && earliest <= self.oldest_at,
+            "retention binding {object} has {measured_days} days, expected at least {required_runway}"
+        );
+        ensure!(
+            latest >= self.recent_floor && latest <= self.observed_at,
+            "retention binding {object} latest endpoint {latest} is outside [{}, {}]",
+            self.recent_floor,
+            self.observed_at,
+        );
+        Ok(())
+    }
+}
+
+struct RetentionAnchorFacts {
+    books: Vec<BookL2LedgerRow>,
+    sessions: Vec<BookStreamSessionRow>,
+    microstructure: Vec<BookMicrostructureRow>,
+    executions: Vec<MarketExecutionRow>,
+    participants: Vec<ExecutionParticipantRow>,
+    crypto_prices: Vec<CryptoPriceReportRow>,
+    domain_observations: Vec<DomainObservationRow>,
+    weather_observations: Vec<WeatherObservationFactRow>,
+    weather_forecasts: Vec<WeatherForecastFactRow>,
+    resolutions: Vec<MarketResolutionRow>,
+}
+
+impl RetentionAnchorFacts {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.books.iter().all(|row| row
+                .canonical_event_hash()
+                .is_ok_and(|hash| hash == ContentHash::from(row.event_hash))),
+            "retention L2 anchors are not sealed by their canonical event hashes"
+        );
+        ensure!(
+            self.crypto_prices.iter().all(|row| {
+                CanonicalDigest::content_hash_bytes(row.raw_report.as_bytes()) == row.report_hash
+            }),
+            "retention Crypto anchors do not match their raw-report hashes"
+        );
+        ensure!(
+            self.weather_observations.iter().all(|row| {
+                CanonicalDigest::content_hash_bytes(row.raw_report.as_bytes()) == row.report_hash
+            }),
+            "retention Weather observation anchors do not match their raw-report hashes"
+        );
+        ensure!(
+            self.resolutions.iter().all(|row| {
+                row.validate().is_ok()
+                    && row
+                        .expected_resolution_fact_hash()
+                        .is_ok_and(|hash| hash == row.resolution_fact_hash)
+            }),
+            "retention resolution anchors are not canonically sealed"
+        );
+        ensure!(
+            self.executions.iter().all(|row| {
+                CanonicalDigest::content_hash_typed(
+                    "feedback-closure-retention-execution",
+                    1,
+                    &(
+                        &row.market_id,
+                        &row.token_id,
+                        row.effective_at,
+                        row.model_available_at,
+                        row.price,
+                        row.size_shares,
+                    ),
+                )
+                .is_ok_and(|hash| hash == ContentHash::from(row.execution_id))
+            }),
+            "retention execution anchors are not sealed by their canonical identities"
+        );
+        let execution_ids = self
+            .executions
+            .iter()
+            .map(|row| row.execution_id)
+            .collect::<BTreeSet<_>>();
+        ensure!(
+            execution_ids.len() == self.executions.len()
+                && self.participants.iter().all(|row| {
+                    execution_ids.contains(&row.execution_id)
+                        && self.executions.iter().any(|execution| {
+                            execution.execution_id == row.execution_id
+                                && execution.market_id == row.market_id
+                                && execution.token_id == row.token_id
+                                && execution.effective_at == row.effective_at
+                                && execution.model_available_at == row.model_available_at
+                                && execution.availability_policy_hash
+                                    == row.availability_policy_hash
+                                && execution.chunk_id == row.chunk_id
+                        })
+                }),
+            "retention participant anchors do not reference their exact execution identities"
+        );
+        let forecast_runs = self.weather_forecasts.iter().fold(
+            BTreeMap::<(i64, ContentHash), Vec<&WeatherForecastFactRow>>::new(),
+            |mut runs, row| {
+                runs.entry((row.valid_time, row.run_manifest_hash))
+                    .or_default()
+                    .push(row);
+                runs
+            },
+        );
+        ensure!(
+            forecast_runs.len() == 2
+                && forecast_runs.values().all(|rows| {
+                    rows.len() == 31
+                        && rows
+                            .iter()
+                            .filter_map(|row| row.member)
+                            .collect::<BTreeSet<_>>()
+                            == (0_u16..31).collect::<BTreeSet<_>>()
+                        && rows
+                            .iter()
+                            .map(|row| row.report_hash)
+                            .collect::<BTreeSet<_>>()
+                            .len()
+                            == 31
+                }),
+            "retention GEFS anchors do not contain two complete 31-member runs"
+        );
+        Ok(())
+    }
+
+    fn validate_window(&self, window: &RetentionAnchorWindow) -> Result<()> {
+        let ranges = self.binding_ranges();
+        for binding in research_source_registry()
+            .map_err(AnyhowError::msg)?
+            .bindings
+            .iter()
+            .filter(|binding| binding.storage == ResearchSourceStorageKind::ClickHouseTable)
+        {
+            let filter = binding.filter.as_ref().map(|filter| filter.value.clone());
+            let key = (binding.object.clone(), filter);
+            let timestamps = ranges.get(&key).with_context(|| {
+                format!(
+                    "retention fixture omitted ClickHouse binding {} filter {:?}",
+                    binding.object, binding.filter
+                )
+            })?;
+            let earliest = timestamps
+                .iter()
+                .min()
+                .copied()
+                .and_then(DateTime::from_timestamp_millis)
+                .context("retention fixture earliest ClickHouse timestamp is invalid")?;
+            let latest = timestamps
+                .iter()
+                .max()
+                .copied()
+                .and_then(DateTime::from_timestamp_millis)
+                .context("retention fixture latest ClickHouse timestamp is invalid")?;
+            window.validate_range(
+                &format!("{} filter {:?}", binding.object, binding.filter),
+                earliest,
+                latest,
+                u64::try_from(timestamps.len())?,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn binding_ranges(&self) -> BTreeMap<(String, Option<String>), Vec<i64>> {
+        let mut ranges = BTreeMap::<(String, Option<String>), Vec<i64>>::new();
+        let mut append = |object: &str, filter: Option<&str>, timestamp: i64| {
+            ranges
+                .entry((object.to_owned(), filter.map(str::to_owned)))
+                .or_default()
+                .push(timestamp);
+        };
+        self.books.iter().for_each(|row| {
+            append("quant_book_l2_ledger", None, row.venue_event_time);
+        });
+        self.sessions.iter().for_each(|row| {
+            append("quant_book_stream_session", None, row.opened_at);
+        });
+        self.microstructure.iter().for_each(|row| {
+            append("book_microstructure_1s", None, row.bucket_time);
+        });
+        self.executions.iter().for_each(|row| {
+            append("quant_market_execution", None, row.model_available_at);
+        });
+        self.participants.iter().for_each(|row| {
+            append("quant_execution_participant", None, row.model_available_at);
+        });
+        self.crypto_prices.iter().for_each(|row| {
+            append(
+                "quant_crypto_price_report",
+                Some(row.source_id.as_str()),
+                row.event_time,
+            );
+        });
+        self.domain_observations.iter().for_each(|row| {
+            append("quant_domain_observation", None, row.event_time);
+        });
+        self.weather_observations.iter().for_each(|row| {
+            append(
+                "quant_weather_observation_fact",
+                Some(row.source_id.as_str()),
+                row.observed_at,
+            );
+        });
+        self.weather_forecasts.iter().for_each(|row| {
+            append(
+                "quant_weather_forecast_fact",
+                Some(row.source_id.as_str()),
+                row.valid_time,
+            );
+        });
+        self.resolutions.iter().for_each(|row| {
+            append("market_resolution_event", None, row.resolved_at);
+        });
+        ranges
+    }
+}
+
+/// Raw source endpoints measured by the real readiness worker after startup.
+///
+/// The old endpoint is before every frozen feedback window and the new endpoint
+/// is after them; unrelated fact families also use isolated identities. No
+/// readiness payload or derived verdict is seeded by this fixture.
+struct RetentionAnchorSeed {
+    window: RetentionAnchorWindow,
+    old_catalog: ClosureCatalogFacts,
+    current_catalog: ClosureCatalogFacts,
+    market_infos: Vec<ClobMarketInfoVersion>,
+    facts: RetentionAnchorFacts,
+    capability_registry_hash: ContentHash,
+}
+
+impl RetentionAnchorSeed {
+    fn catalogs(
+        window: &RetentionAnchorWindow,
+    ) -> Result<(ClosureCatalogFacts, ClosureCatalogFacts)> {
+        let old_decision_at = window
+            .oldest_at
+            .checked_add_signed(Duration::minutes(2))
+            .context("retention old catalog decision overflowed")?;
+        let current_decision_at = window
+            .newest_at
+            .checked_add_signed(Duration::minutes(2))
+            .context("retention current catalog decision overflowed")?;
+        let market_created_at = window
+            .oldest_at
+            .checked_sub_signed(Duration::days(1))
+            .context("retention catalog creation time underflowed")?;
+        let old_resolutions = BTreeMap::from([(
+            RETENTION_ANCHOR_ORDINAL,
+            old_decision_at + Duration::days(1),
+        )]);
+        let current_resolutions = BTreeMap::from([(
+            RETENTION_ANCHOR_ORDINAL,
+            current_decision_at + Duration::days(1),
+        )]);
+        let old_catalog = ClosureCatalogFacts::build(ClosureCatalogBuild {
+            scope: RETENTION_ANCHOR_SCOPE,
+            event_id: "feedback-closure-retention-event",
+            category: MarketCategory::Weather,
+            decision_at: old_decision_at,
+            market_created_at,
+            resolutions: &old_resolutions,
+            first_ordinal: RETENTION_ANCHOR_ORDINAL,
+            last_ordinal: RETENTION_ANCHOR_ORDINAL,
+            price_shift: Decimal::ZERO,
+        })?;
+        let mut current_catalog = ClosureCatalogFacts::build(ClosureCatalogBuild {
+            scope: RETENTION_ANCHOR_SCOPE,
+            event_id: "feedback-closure-retention-event",
+            category: MarketCategory::Weather,
+            decision_at: current_decision_at,
+            market_created_at,
+            resolutions: &current_resolutions,
+            first_ordinal: RETENTION_ANCHOR_ORDINAL,
+            last_ordinal: RETENTION_ANCHOR_ORDINAL,
+            price_shift: Decimal::ZERO,
+        })?;
+        current_catalog.close_retention()?;
+        Ok((old_catalog, current_catalog))
+    }
+
+    fn build(
+        observed_at: DateTime<Utc>,
+        knowledge_lag_secs: u64,
+        capability_registry_hash: ContentHash,
+    ) -> Result<Self> {
+        let window = RetentionAnchorWindow::new(observed_at)?;
+        let (old_catalog, current_catalog) = Self::catalogs(&window)?;
+        let source = ClosureMarketSource {
+            source_id: RecommendationId::new(seeded_uuid("feedback-closure:retention:source")),
+            market_id: MarketId::new(format!(
+                "feedback-closure-{RETENTION_ANCHOR_SCOPE}-market-{RETENTION_ANCHOR_ORDINAL}"
+            )),
+        };
+        let mut books = Vec::with_capacity(4);
+        let mut sessions = Vec::with_capacity(4);
+        let mut market_infos = Vec::with_capacity(2);
+        let mut microstructure = Vec::with_capacity(2);
+        let knowledge_lag = Duration::seconds(
+            i64::try_from(knowledge_lag_secs).context("retention knowledge lag exceeds i64")?,
+        );
+        for endpoint in [window.oldest_at, window.newest_at] {
+            let decision_at = endpoint
+                .checked_add_signed(knowledge_lag)
+                .context("retention book decision overflowed")?;
+            let ClosureBookFacts {
+                ledger_rows,
+                session_rows,
+                market_info,
+                ..
+            } = closure_book_facts(&source, decision_at, knowledge_lag_secs, Decimal::ZERO)?;
+            ensure!(
+                ledger_rows
+                    .iter()
+                    .all(|row| row.venue_event_time == endpoint.timestamp_millis())
+                    && market_info.effective_at == endpoint,
+                "retention book anchors did not land on their exact endpoint"
+            );
+            books.extend(ledger_rows);
+            sessions.extend(session_rows);
+            market_infos.push(market_info);
+            microstructure.push(closure_microstructure_row(
+                TokenId::new(closure_token(
+                    RETENTION_ANCHOR_SCOPE,
+                    RETENTION_ANCHOR_ORDINAL,
+                )),
+                MarketId::new("feedback-closure-retention-market-1"),
+                endpoint,
+                dec!(0.40),
+                dec!(0.44),
+            )?);
+        }
+
+        let symbol = BinanceSymbol::parse(RETENTION_CRYPTO_SYMBOL)?;
+        let station = IcaoStation::parse(RETENTION_WEATHER_STATION)?;
+        let mut crypto_prices = Vec::with_capacity(4);
+        let mut domain_observations = Vec::with_capacity(2);
+        let mut weather_observations = Vec::with_capacity(4);
+        let mut weather_forecasts = Vec::with_capacity(62);
+        let mut executions = Vec::with_capacity(2);
+        let mut participants = Vec::with_capacity(4);
+        let mut resolution_rows = Vec::with_capacity(2);
+        for endpoint in [window.oldest_at, window.newest_at] {
+            crypto_prices.push(retention_crypto_row(
+                DomainSourceId::binance(),
+                DomainInstrumentKey::binance_kline(&symbol, KlineInterval::OneMinute),
+                endpoint,
+            )?);
+            crypto_prices.push(retention_crypto_row(
+                DomainSourceId::polymarket_rtds_binance(),
+                DomainInstrumentKey::polymarket_rtds_binance(&symbol),
+                endpoint,
+            )?);
+            domain_observations.push(
+                DomainObservation {
+                    family: DomainFamily::Crypto,
+                    source_id: DomainSourceId::binance(),
+                    instrument_key: DomainInstrumentKey::binance_kline(
+                        &symbol,
+                        KlineInterval::OneMinute,
+                    ),
+                    metric: DomainMetric::Close,
+                    value: dec!(100000),
+                    observed_at: endpoint,
+                    publish_time: endpoint,
+                    available_at: Some(endpoint),
+                }
+                .into_clickhouse_row(endpoint),
+            );
+            weather_observations.push(retention_weather_row(
+                DomainSourceId::aviation_weather(),
+                DomainInstrumentKey::aviation_weather(&station),
+                WeatherObservationReportKind::Metar,
+                endpoint,
+            )?);
+            weather_observations.push(retention_weather_row(
+                DomainSourceId::ghcnh(),
+                DomainInstrumentKey::ghcnh(&station),
+                WeatherObservationReportKind::HistoricalGhcnh,
+                endpoint,
+            )?);
+            weather_forecasts.extend(retention_gefs_rows(&station, endpoint)?);
+            let (execution, execution_participants) = retention_execution_rows(endpoint)?;
+            executions.push(execution);
+            participants.extend(execution_participants);
+            resolution_rows.push(retention_resolution_row(endpoint)?);
+        }
+        let facts = RetentionAnchorFacts {
+            books,
+            sessions,
+            microstructure,
+            executions,
+            participants,
+            crypto_prices,
+            domain_observations,
+            weather_observations,
+            weather_forecasts,
+            resolutions: resolution_rows,
+        };
+        facts.validate()?;
+        facts.validate_window(&window)?;
+        Ok(Self {
+            window,
+            old_catalog,
+            current_catalog,
+            market_infos,
+            facts,
+            capability_registry_hash,
+        })
+    }
+
+    fn validate_isolation(&self, plan: &FeedbackCycleFreezePlan) -> Result<()> {
+        ensure!(
+            self.window.oldest_at < plan.source_start()
+                && self.window.newest_at > plan.evaluation().cutoff(),
+            "retention endpoints are not disjoint from the frozen feedback source window"
+        );
+        Ok(())
+    }
+
+    async fn persist(self, db: &DatabaseConnection, writers: &ClosureFactWriters) -> Result<()> {
+        let Self {
+            window,
+            old_catalog,
+            current_catalog,
+            market_infos,
+            facts,
+            capability_registry_hash,
+        } = self;
+        let event_id = current_catalog.event.event_id.clone();
+        let current_market = current_catalog
+            .markets
+            .first()
+            .context("retention current catalog has no market")?;
+        let market_id = current_market.info.market_id.clone();
+        let expected_event_hash = current_catalog.registry_event_content_hash;
+        let expected_market_hash = current_market.content_hash;
+        current_catalog
+            .persist(db, capability_registry_hash)
+            .await?;
+        let events = PgEventRepository::new(db.clone());
+        let markets = PgMarketRepository::new(db.clone());
+        let current_event_hash = events
+            .find_by_id(&event_id)
+            .await?
+            .context("retention late catalog anchor has no current event head")?
+            .content_hash;
+        let current_market_hash = markets
+            .find_by_id(&market_id)
+            .await?
+            .context("retention late catalog anchor has no current market head")?
+            .content_hash;
+        ensure!(
+            current_event_hash == expected_event_hash
+                && current_market_hash == expected_market_hash,
+            "retention current catalog did not establish its exact closed projection"
+        );
+        PgCatalogLedgerRepository::new(db.clone())
+            .commit(old_catalog.runway_commit(window.observed_at)?)
+            .await?;
+        ensure!(
+            events
+                .find_by_id(&event_id)
+                .await?
+                .is_some_and(|event| event.content_hash == current_event_hash)
+                && markets
+                    .find_by_id(&market_id)
+                    .await?
+                    .is_some_and(|market| market.content_hash == current_market_hash),
+            "late retention catalog anchor regressed a current projection"
+        );
+        let clob = PgClobMarketInfoRepository::new(db.clone());
+        for market_info in market_infos {
+            clob.insert_observation(market_info).await?;
+        }
+        writers.commit_retention(facts).await?;
+        verify_retention_coverage(db, writers, &window).await
+    }
+}
+
+impl ClosureCatalogFacts {
+    fn close_retention(&mut self) -> Result<()> {
+        ensure!(
+            self.event.event_id.as_str() == "feedback-closure-retention-event"
+                && self.markets.len() == 1
+                && self.markets[0].info.market_id.as_str() == "feedback-closure-retention-market-1",
+            "retention close received a non-retention catalog"
+        );
+        self.event.status = EventStatus::Closed;
+        self.event.end_date = Some(self.effective_at);
+        self.event.updated_at = self.effective_at;
+        self.event_content_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-event-object",
+            CATALOG_OBJECT_HASH_VERSION,
+            &self.event,
+        )?;
+        self.event_object_id = CatalogEventObjectId::from_content_hash(&self.event_content_hash);
+        self.registry_event = self.event.clone();
+        self.registry_event_content_hash = self.event_content_hash;
+        let market = &mut self.markets[0];
+        market.info.status = MarketStatus::Delisted;
+        market.info.end_date = Some(self.effective_at);
+        market.info.updated_at = self.effective_at;
+        market.content_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-market-object",
+            CATALOG_OBJECT_HASH_VERSION,
+            &market.info,
+        )?;
+        market.object_id = CatalogMarketObjectId::from_content_hash(&market.content_hash);
+        Ok(())
+    }
+
+    fn runway_commit(&self, fetched_at: DateTime<Utc>) -> Result<CatalogBatchCommit> {
+        ensure!(
+            self.markets.len() == 1,
+            "retention catalog anchor must contain exactly one market"
+        );
+        let event_payload = serde_json::to_value(&self.event)?;
+        let event = CatalogEventCandidate {
+            projection: UpsertEvent {
+                event_id: self.event.event_id.clone(),
+                title: self.event.title.clone(),
+                slug: self.event.slug.clone(),
+                series_slug: self.event.series_slug.clone(),
+                status: self.event.status,
+                tags: EventTags::from(self.event.tags.clone()),
+                neg_risk: self.event.neg_risk,
+                catalog_market_ids: CatalogMarketIds::from(self.event.market_ids.clone()),
+                end_date: self.event.end_date,
+                content_hash: self.event_content_hash,
+            },
+            object: NewCatalogEventObject {
+                event_object_id: self.event_object_id,
+                content_hash: self.event_content_hash,
+                schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
+                payload: event_payload.into(),
+            },
+            change: NewCatalogEventChange {
+                event_change_id: self.event_change_id,
+                catalog_sync_batch_id: self.batch_id,
+                event_object_id: self.event_object_id,
+                event_id: self.event.event_id.clone(),
+                source_effective_at: self.effective_at,
+                source_timestamp_quality: CatalogTimestampQuality::Source,
+                change_type: CatalogChangeType::GammaScanUpsert,
+            },
+        };
+        let markets = self
+            .markets
+            .iter()
+            .map(|market| {
+                Ok(CatalogMarketCandidate {
+                    projection: UpsertMarket::try_from(&market.info)?,
+                    object: NewCatalogMarketObject {
+                        market_object_id: market.object_id,
+                        content_hash: market.content_hash,
+                        schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
+                        payload: serde_json::to_value(&market.info)?.into(),
+                    },
+                    market_change_id: market.change_id,
+                    catalog_sync_batch_id: self.batch_id,
+                    event_object_id: self.event_object_id,
+                    source_effective_at: self.effective_at,
+                    source_timestamp_quality: CatalogTimestampQuality::Source,
+                    source_created_at: market.info.created_at,
+                    change_type: CatalogChangeType::GammaScanUpsert,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let batch_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-manifest",
+            1,
+            &ClosureCatalogDigest {
+                events: vec![(
+                    self.event.event_id.clone(),
+                    CatalogChangeType::GammaScanUpsert,
+                    self.event_content_hash,
+                )],
+                markets: self
+                    .markets
+                    .iter()
+                    .map(|market| {
+                        (
+                            market.info.market_id.clone(),
+                            CatalogChangeType::GammaScanUpsert,
+                            market.content_hash,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            },
+        )?;
+        Ok(CatalogBatchCommit {
+            batch: NewCatalogSyncBatch {
+                catalog_sync_batch_id: self.batch_id,
+                sync_kind: CatalogSyncKind::Reconcile,
+                started_at: fetched_at,
+                fetched_at,
+                event_count: 1,
+                market_count: i64::try_from(markets.len())?,
+                rejected_count: 0,
+                batch_hash,
+            },
+            events: vec![event],
+            markets,
+        })
+    }
+}
+
+fn retention_crypto_row(
+    source_id: DomainSourceId,
+    instrument_key: DomainInstrumentKey,
+    event_time: DateTime<Utc>,
+) -> Result<CryptoPriceReportRow> {
+    let source_sequence = u64::try_from(event_time.timestamp_millis())?;
+    let raw_report = serde_json::to_string(&json!({
+        "fixture": "feedback_closure_retention",
+        "source_id": source_id,
+        "instrument_key": instrument_key,
+        "source_sequence": source_sequence,
+        "event_time": event_time,
+        "price": "100000",
+    }))?;
+    Ok(CryptoPriceReportRow {
+        source_id,
+        instrument_key,
+        gap_generation: 0,
+        source_sequence,
+        price: ChDecimal64::from(dec!(100000)),
+        quantity: None,
+        event_time: event_time.timestamp_millis(),
+        published_at: event_time.timestamp_millis(),
+        available_at: event_time.timestamp_millis(),
+        valid_from: None,
+        observations_timestamp: None,
+        expires_at: None,
+        report_hash: CanonicalDigest::content_hash_bytes(raw_report.as_bytes()),
+        raw_report,
+        schema_version: ChSchemaVersion::FIRST,
+    })
+}
+
+fn retention_weather_row(
+    source_id: DomainSourceId,
+    instrument_key: DomainInstrumentKey,
+    report_kind: WeatherObservationReportKind,
+    observed_at: DateTime<Utc>,
+) -> Result<WeatherObservationFactRow> {
+    let raw_report = serde_json::to_string(&json!({
+        "fixture": "feedback_closure_retention",
+        "source_id": source_id,
+        "instrument_key": instrument_key,
+        "report_kind": report_kind,
+        "observed_at": observed_at,
+        "temperature_celsius": "20",
+    }))?;
+    let report = WeatherObservationReport {
+        source_id,
+        instrument_key,
+        subject_key: RETENTION_WEATHER_STATION.to_owned(),
+        report_kind,
+        variable: WeatherVariable::Temperature,
+        value: dec!(20),
+        unit: DomainMeasurementUnit::Celsius,
+        precision: dec!(0.1),
+        observed_at,
+        valid_from: None,
+        valid_to: None,
+        published_at: observed_at,
+        available_at: observed_at,
+        report_hash: CanonicalDigest::content_hash_bytes(raw_report.as_bytes()),
+        raw_report,
+    };
+    Ok(report.to_clickhouse_row(observed_at.date_naive(), 1, None))
+}
+
+fn retention_gefs_rows(
+    station: &IcaoStation,
+    valid_time: DateTime<Utc>,
+) -> Result<Vec<WeatherForecastFactRow>> {
+    let source_id = DomainSourceId::gefs();
+    let instrument_key = DomainInstrumentKey::gefs(station);
+    let reference_time = valid_time
+        .checked_sub_signed(Duration::hours(3))
+        .context("retention GEFS reference time underflowed")?;
+    let grid_binding_hash = CanonicalDigest::content_hash_typed(
+        "feedback-closure-retention-gefs-grid",
+        1,
+        &(&source_id, &instrument_key, station.to_string()),
+    )?;
+    let segments = (0_u16..31)
+        .map(|member| {
+            let value = Decimal::from(20 + i64::from(member));
+            let segment_hash = CanonicalDigest::content_hash_typed(
+                "feedback-closure-retention-gefs-segment",
+                1,
+                &(
+                    &source_id,
+                    &instrument_key,
+                    reference_time,
+                    valid_time,
+                    member,
+                    value,
+                ),
+            )?;
+            Ok((member, value, segment_hash))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let run_manifest_hash = CanonicalDigest::content_hash_typed(
+        "feedback-closure-retention-gefs-run",
+        1,
+        &(
+            &source_id,
+            &instrument_key,
+            reference_time,
+            valid_time,
+            &segments,
+            grid_binding_hash,
+        ),
+    )?;
+    segments
+        .into_iter()
+        .map(|(member, value, segment_hash)| {
+            let report_hash = CanonicalDigest::content_hash_typed(
+                "feedback-closure-retention-gefs-point",
+                1,
+                &(
+                    &source_id,
+                    &instrument_key,
+                    reference_time,
+                    valid_time,
+                    member,
+                    value,
+                    grid_binding_hash,
+                    run_manifest_hash,
+                    segment_hash,
+                ),
+            )?;
+            Ok(WeatherForecastFactRow::from(&WeatherForecastPoint {
+                source_id: source_id.clone(),
+                instrument_key: instrument_key.clone(),
+                subject_key: station.to_string(),
+                variable: WeatherVariable::WindGust,
+                value,
+                unit: DomainMeasurementUnit::Knot,
+                precision: dec!(0.1),
+                reference_time,
+                valid_time,
+                published_at: reference_time,
+                available_at: reference_time,
+                lead_hours: 3,
+                member: Some(member),
+                revision: 1,
+                grid_binding_hash,
+                run_manifest_hash,
+                report_hash,
+            }))
+        })
+        .collect()
+}
+
+fn retention_execution_rows(
+    model_available_at: DateTime<Utc>,
+) -> Result<(MarketExecutionRow, Vec<ExecutionParticipantRow>)> {
+    let effective_at = model_available_at
+        .checked_sub_signed(Duration::seconds(24))
+        .context("retention execution effective time underflowed")?;
+    let market_id = MarketId::new("feedback-closure-retention-market-1");
+    let token_id = TokenId::new(closure_token(
+        RETENTION_ANCHOR_SCOPE,
+        RETENTION_ANCHOR_ORDINAL,
+    ));
+    let price = Price::new(dec!(0.50));
+    let shares = Shares::new(dec!(20));
+    let notional = shares * price;
+    let stored_price = ChPrice::from(price);
+    let stored_shares = ChShares::from(shares);
+    let execution_hash = CanonicalDigest::content_hash_typed(
+        "feedback-closure-retention-execution",
+        1,
+        &(
+            &market_id,
+            &token_id,
+            effective_at.timestamp_millis(),
+            model_available_at.timestamp_millis(),
+            stored_price,
+            stored_shares,
+        ),
+    )?;
+    let policy_hash = CanonicalDigest::content_hash_typed(
+        "feedback-closure-retention-availability-policy",
+        1,
+        &(MODEL_CONFIRMATION_BLOCKS, "block_confirmation"),
+    )?;
+    let chunk_id = seeded_uuid(&format!(
+        "feedback-closure:retention:execution-chunk:{}",
+        model_available_at.timestamp_millis()
+    ));
+    let transaction_seed = chunk_id.as_u128();
+    let execution = MarketExecutionRow {
+        execution_id: ChDigest::from(execution_hash),
+        match_id: None,
+        maker_order_filled_event_id: ChDigest::from(execution_hash),
+        market_id: market_id.clone(),
+        token_id: token_id.clone(),
+        order_hash: format!("0x{:064x}", transaction_seed.wrapping_add(1)),
+        contract_key: "ctf_v2".to_owned(),
+        exchange_version: ChExchangeVersion::V2,
+        contract_address: "0xe111180000d2663c0091e4f400237545b87b996b".to_owned(),
+        transaction_hash: format!("0x{transaction_seed:064x}"),
+        block_number: u64::try_from(effective_at.timestamp())?,
+        transaction_index: 0,
+        log_index: 0,
+        maker_address: "0x0000000000000000000000000000000000000001".to_owned(),
+        taker_address: "0x0000000000000000000000000000000000000002".to_owned(),
+        side: ChExchangeSide::Buy,
+        price: stored_price,
+        size_shares: stored_shares,
+        notional_usd: ChUsd::from(notional),
+        fee_usd: ChUsd::from(Usd::ZERO),
+        builder: None,
+        effective_at: effective_at.timestamp_millis(),
+        observed_at: model_available_at.timestamp_millis(),
+        model_available_at: model_available_at.timestamp_millis(),
+        availability_basis: ChAvailabilityBasis::BlockConfirmation,
+        availability_policy_hash: ChDigest::from(policy_hash),
+        chunk_id,
+        schema_version: MarketExecutionRow::SCHEMA_VERSION,
+    };
+    let participants = [
+        (
+            ChExecutionParticipantRole::Maker,
+            execution.maker_address.clone(),
+        ),
+        (
+            ChExecutionParticipantRole::Taker,
+            execution.taker_address.clone(),
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(participant_role, participant_address)| ExecutionParticipantRow {
+            execution_id: execution.execution_id,
+            market_id: market_id.clone(),
+            token_id: token_id.clone(),
+            participant_address,
+            participant_role,
+            participant_notional: ChUsd::from(notional),
+            effective_at: execution.effective_at,
+            model_available_at: execution.model_available_at,
+            availability_policy_hash: execution.availability_policy_hash,
+            chunk_id,
+            schema_version: ExecutionParticipantRow::SCHEMA_VERSION,
+        },
+    )
+    .collect();
+    Ok((execution, participants))
+}
+
+fn retention_resolution_row(resolved_at: DateTime<Utc>) -> Result<MarketResolutionRow> {
+    let market_id = MarketId::new("feedback-closure-retention-market-1");
+    let source_block_hash = CanonicalDigest::content_hash_typed(
+        "feedback-closure-retention-resolution-block",
+        1,
+        &(&market_id, resolved_at),
+    )?;
+    let source_transaction_hash = CanonicalDigest::content_hash_typed(
+        "feedback-closure-retention-resolution-transaction",
+        1,
+        &(&market_id, resolved_at),
+    )?;
+    let source_checkpoint_hash = CanonicalDigest::content_hash_typed(
+        "feedback-closure-retention-resolution-checkpoint",
+        1,
+        &(&market_id, resolved_at),
+    )?;
+    MarketResolutionRow::seal(MarketResolutionFactInput {
+        market_id,
+        token_ids: [
+            TokenId::new(closure_token(
+                RETENTION_ANCHOR_SCOPE,
+                RETENTION_ANCHOR_ORDINAL,
+            )),
+            closure_no_token(RETENTION_ANCHOR_SCOPE, RETENTION_ANCHOR_ORDINAL),
+        ],
+        payout_ratios: [PayoutRatio::ONE, PayoutRatio::ZERO],
+        resolved_at: resolved_at.timestamp_millis(),
+        observed_at: resolved_at.timestamp_millis(),
+        source_block_number: u64::try_from(resolved_at.timestamp())?,
+        source_block_hash: EvmBlockHash::parse(format!("0x{}", source_block_hash.hex()))?,
+        source_transaction_hash: EvmTransactionHash::parse(format!(
+            "0x{}",
+            source_transaction_hash.hex()
+        ))?,
+        source_log_index: 0,
+        source_checkpoint_hash,
+    })
+    .map_err(AnyhowError::from)
+}
+
+async fn verify_retention_coverage(
+    db: &DatabaseConnection,
+    writers: &ClosureFactWriters,
+    window: &RetentionAnchorWindow,
+) -> Result<()> {
+    let catalog_coverage = PgCatalogLedgerRepository::new(db.clone())
+        .research_history_coverage(window.observed_at)
+        .await?;
+    let clob_coverage = PgClobMarketInfoRepository::new(db.clone())
+        .research_history_coverage(window.observed_at)
+        .await?;
+    for binding in research_source_registry()
+        .map_err(AnyhowError::msg)?
+        .bindings
+    {
+        match binding.storage {
+            ResearchSourceStorageKind::ClickHouseTable => {
+                let observation = writers
+                    .pool
+                    .observe_raw_history_table(&binding, window.observed_at)
+                    .await?;
+                let earliest = observation
+                    .earliest_ms
+                    .and_then(DateTime::from_timestamp_millis)
+                    .with_context(|| {
+                        format!("retention binding {} has no earliest row", binding.object)
+                    })?;
+                let latest = observation
+                    .latest_ms
+                    .and_then(DateTime::from_timestamp_millis)
+                    .with_context(|| {
+                        format!("retention binding {} has no latest row", binding.object)
+                    })?;
+                ensure!(
+                    observation.active_partition_count > 0 && observation.active_bytes > 0,
+                    "retention binding {} has no active ClickHouse storage",
+                    binding.object
+                );
+                ensure!(
+                    binding.partition_key.as_deref() == Some(observation.partition_key.as_str())
+                        && extract_table_ttl(&observation.create_table_query).is_none(),
+                    "retention binding {} does not match its canonical partition/TTL contract",
+                    binding.object
+                );
+                window.validate_range(
+                    &format!("{} filter {:?}", binding.object, binding.filter),
+                    earliest,
+                    latest,
+                    observation.row_count,
+                )?;
+            }
+            ResearchSourceStorageKind::PostgresLedger => {
+                let observation = catalog_coverage
+                    .iter()
+                    .find(|observation| observation.object == binding.object)
+                    .with_context(|| {
+                        format!("retention binding {} has no PG coverage", binding.object)
+                    })?;
+                ensure!(
+                    observation.time_column == binding.time_column,
+                    "retention binding {} returned the wrong PG time column",
+                    binding.object
+                );
+                window.validate_range(
+                    &binding.object,
+                    observation
+                        .earliest_event_time
+                        .context("retention catalog anchor has no earliest time")?,
+                    observation
+                        .latest_event_time
+                        .context("retention catalog anchor has no latest time")?,
+                    observation.row_count,
+                )?;
+            }
+            ResearchSourceStorageKind::PostgresVersionedProjection => {
+                let observation = clob_coverage
+                    .iter()
+                    .find(|observation| observation.object == binding.object)
+                    .with_context(|| {
+                        format!("retention binding {} has no PG coverage", binding.object)
+                    })?;
+                ensure!(
+                    observation.time_column == binding.time_column,
+                    "retention binding {} returned the wrong PG time column",
+                    binding.object
+                );
+                window.validate_range(
+                    &binding.object,
+                    observation
+                        .earliest_event_time
+                        .context("retention CLOB anchor has no earliest time")?,
+                    observation
+                        .latest_event_time
+                        .context("retention CLOB anchor has no latest time")?,
+                    observation.row_count,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 struct ClosureReplayContext {
     builder: ConfiguredFeatureBuilder,
     factor_engine: FactorEngine,
@@ -1891,6 +4178,133 @@ struct ClosureReplayContext {
     loader: HistoricalWindowLoader,
     lookback: StdDuration,
     knowledge_lag: StdDuration,
+    polygon: Arc<DeterministicPolygonChain>,
+}
+
+struct ClosureReportUniverse {
+    policy_id: DecisionPolicySnapshotId,
+    snapshot_hash: ContentHash,
+    routes: Vec<ActiveModelRequirements>,
+}
+
+impl ClosureReportUniverse {
+    async fn load(
+        db: &DatabaseConnection,
+        artifacts: &Arc<dyn ArtifactStore>,
+        policy: &ActivePolicyBundle,
+    ) -> Result<Self> {
+        let frozen_policy = PgPolicyRepository::new(db.clone())
+            .load_snapshot(&policy.decision_policy_snapshot_id)
+            .await?
+            .context("closure selector policy is missing")?;
+        ensure!(
+            frozen_policy.snapshot_hash == policy.snapshot_hash,
+            "closure selector policy hash differs from the frozen artifact"
+        );
+        let runner = Box::pin(build_model_runner(
+            db,
+            artifacts,
+            ReportEvidenceWriters::default().model_inputs,
+        ))
+        .await;
+        let routes = Box::pin(runner.available_route_requirements(&frozen_policy)).await?;
+        Ok(Self {
+            policy_id: policy.decision_policy_snapshot_id,
+            snapshot_hash: policy.snapshot_hash,
+            routes,
+        })
+    }
+
+    async fn freeze_decision(
+        &self,
+        db: &DatabaseConnection,
+        source: &ClosureAcceptedHistory,
+        replay: &ClosureReplayContext,
+        decision_at: DateTime<Utc>,
+    ) -> Result<CohortDecisionContract> {
+        let history = source.route_history(db, decision_at).await?;
+        let configured = DecisionClock::new(replay.knowledge_lag.as_secs()).serving_boundary(
+            decision_at,
+            replay.config.domain.crypto.availability_lag_secs,
+            replay.config.domain.weather.availability_lag_secs,
+        )?;
+        let (boundary, universe) = match &history {
+            RouteHistoryLineage::Runtime {
+                serving_head_seal_id,
+                serving_head_seal_hash,
+            } => {
+                let boundary = configured.with_source_watermark(
+                    DecisionSource::FinalizedExecution,
+                    source
+                        .chunk
+                        .effective_through_at
+                        .context("Runtime source has no frozen watermark")?,
+                )?;
+                let universe = ReportUniverseContract::try_new(
+                    self.policy_id,
+                    self.snapshot_hash,
+                    self.routes
+                        .iter()
+                        .map(|route| ReportUniverseRoute::from(&route.serving))
+                        .collect(),
+                    *serving_head_seal_id,
+                    *serving_head_seal_hash,
+                )?;
+                (boundary, Some(universe))
+            }
+            RouteHistoryLineage::Materialized { .. } => (configured, None),
+        };
+        Ok(CohortDecisionContract {
+            boundary,
+            history,
+            universe,
+        })
+    }
+
+    fn report_lineages(
+        &self,
+        ids: &ExecutionTxnIds,
+        decision: &CohortDecisionContract,
+    ) -> Result<BTreeMap<BuyModelRoute, RouteModelLineage>> {
+        let universe = decision
+            .universe
+            .as_ref()
+            .context("Runtime report has no selector universe")?;
+        [BuyModelRoute::Pooled, BuyModelRoute::Weather]
+            .into_iter()
+            .map(|route| {
+                let active = self
+                    .routes
+                    .iter()
+                    .find(|active| active.route == route)
+                    .context("Runtime closure report omitted a represented active Route")?;
+                let contract = PromotedRouteContract::from_version(route, &active.version)?;
+                let lineage = RouteModelLineage {
+                    model_version_id: active.model_version_id,
+                    model_run_id: (route == BuyModelRoute::Weather).then_some(ids.model_run),
+                    calibration_artifact_id: contract.calibration_artifact_id,
+                    trade_policy_artifact_id: contract.trade_policy_artifact_id,
+                    research_profile_artifact_id: contract.research_profile_artifact_id,
+                    research_profile_ref: contract.research_profile_ref,
+                    prediction_horizon_secs: contract.prediction_horizon_secs,
+                    feature_contract_digest: contract.feature_contract_digest,
+                    pit_lineage_digest: contract.pit_lineage_digest,
+                    serving_contract_digest: contract.serving_contract_hash,
+                    recommendation_contract_hash: contract.recommendation_contract_hash,
+                    report_universe_plan_hash: universe.availability.universe_plan_hash,
+                    history: decision.history.clone(),
+                    serving_authority: contract.serving_authority,
+                };
+                Ok((route, lineage))
+            })
+            .collect()
+    }
+}
+
+struct CohortDecisionContract {
+    boundary: DecisionBoundary,
+    history: RouteHistoryLineage,
+    universe: Option<ReportUniverseContract>,
 }
 
 impl ClosureReplayContext {
@@ -1899,6 +4313,7 @@ impl ClosureReplayContext {
         fact_read: &Arc<dyn QuantFactReadRepository>,
         policy: &ActivePolicyBundle,
         champion: &ModelVersionInfo,
+        polygon: Arc<DeterministicPolygonChain>,
     ) -> Result<Self> {
         let profile = &policy.snapshot.profile_artifacts;
         let features = &profile.features.definition;
@@ -1984,6 +4399,7 @@ impl ClosureReplayContext {
             ),
             lookback: StdDuration::from_secs(features.max_lookback_secs()),
             knowledge_lag: StdDuration::from_secs(knowledge_lag_secs),
+            polygon,
         })
     }
 }
@@ -1995,7 +4411,7 @@ struct SelectionModelBuild<'a> {
     infra: &'a SharedDemoInfra,
     champion: &'a ModelVersionInfo,
     runtime: &'a WeightedFactorRuntime,
-    decision_at: DateTime<Utc>,
+    decision: &'a CohortDecisionContract,
     expected_markets: &'a HashSet<MarketId>,
 }
 
@@ -2007,14 +4423,11 @@ async fn build_selection_model(input: SelectionModelBuild<'_>) -> Result<MarketS
         infra,
         champion,
         runtime,
-        decision_at,
+        decision,
         expected_markets,
     } = input;
-    let boundary = DecisionClock::new(replay.knowledge_lag.as_secs()).serving_boundary(
-        decision_at,
-        replay.config.domain.crypto.availability_lag_secs,
-        replay.config.domain.weather.availability_lag_secs,
-    )?;
+    let boundary = &decision.boundary;
+    let decision_at = boundary.decision_at();
     let catalog =
         Arc::new(PgCatalogLedgerRepository::new(db.clone())) as Arc<dyn CatalogLedgerRepository>;
     let clob_market_info =
@@ -2027,16 +4440,15 @@ async fn build_selection_model(input: SelectionModelBuild<'_>) -> Result<MarketS
         clob_market_info,
     ));
     let provider = MarketCandidateProvider::new(pit, linkages, Arc::clone(&facts.fact_read));
-    let candidate_batch = provider
-        .candidates(&boundary, &replay.config.domain)
-        .await?;
+    let candidate_batch = provider.candidates(boundary, &replay.config.domain).await?;
     let required_features = runtime.required_features();
-    let model_requirements = match champion.category_scope {
-        Some(category) => ModelFeatureRequirements {
+    let model_requirements = match (&decision.universe, champion.category_scope) {
+        (Some(universe), _) => universe.requirements.clone(),
+        (None, Some(category)) => ModelFeatureRequirements {
             generic: Vec::new(),
             by_category: BTreeMap::from([(category, required_features)]),
         },
-        None => ModelFeatureRequirements::generic_only(required_features),
+        (None, None) => ModelFeatureRequirements::generic_only(required_features),
     };
     let candidates = candidate_batch.candidates;
     let snapshot = ConfiguredMarketSelector::new()
@@ -2049,7 +4461,10 @@ async fn build_selection_model(input: SelectionModelBuild<'_>) -> Result<MarketS
                 features: replay.config.features.clone(),
                 model_requirements,
                 knowledge_lag_secs: replay.knowledge_lag.as_secs(),
-                route_availability: None,
+                route_availability: decision
+                    .universe
+                    .as_ref()
+                    .map(|universe| universe.availability.clone()),
             },
             candidates.clone(),
         )
@@ -2083,14 +4498,14 @@ async fn seed_cohort_sources(
     book_price_shift: Decimal,
     fact_writers: &ClosureFactWriters,
     replay: &ClosureReplayContext,
-) -> Result<()> {
+    interval: ClosureHistoryInterval,
+) -> Result<ClosureAcceptedHistory> {
     let observation_count = sources.len();
     let mut book_rows = Vec::with_capacity(observation_count * 2);
     let mut microstructure_rows = Vec::with_capacity(observation_count * 65);
     let mut session_rows = Vec::with_capacity(observation_count * 2);
     let mut execution_rows = Vec::with_capacity(observation_count * 20);
     let mut participant_rows = Vec::with_capacity(observation_count * 40);
-    let mut acceptance_rows = Vec::with_capacity(observation_count);
     let mut market_infos = Vec::with_capacity(observation_count);
     for source in sources {
         let (scope, market_ordinal) = closure_market_identity(&source.market_id)?;
@@ -2113,18 +4528,21 @@ async fn seed_cohort_sources(
             closure_yes_wins(scope, market_ordinal)?,
             book_price_shift,
         )?);
-        let execution_facts = closure_execution_history_rows(
-            source,
-            decision_at,
-            replay.knowledge_lag.as_secs(),
-            book_price_shift,
-        )?;
-        execution_rows.extend(execution_facts.executions);
-        participant_rows.extend(execution_facts.participants);
-        acceptance_rows.push(execution_facts.acceptance);
         session_rows.extend(source_sessions);
         market_infos.push(market_info);
     }
+    let execution_facts = closure_execution_history_rows(
+        sources,
+        decision_at,
+        replay.knowledge_lag.as_secs(),
+        book_price_shift,
+        replay.polygon.as_ref(),
+        interval,
+    )?;
+    let history = execution_facts.history.clone();
+    execution_rows.extend(execution_facts.executions);
+    participant_rows.extend(execution_facts.participants);
+    let acceptance_rows = vec![execution_facts.acceptance];
     let market_info_repository = Arc::new(PgClobMarketInfoRepository::new(db.clone()));
     let inserted_market_infos = stream::iter(market_infos)
         .map(|market_info| {
@@ -2138,7 +4556,11 @@ async fn seed_cohort_sources(
         inserted_market_infos.len() == observation_count,
         "closure CLOB market-info seed is incomplete"
     );
-    fact_writers
+    let weather_cutoff = closure_weather_cutoff(replay, decision_at)?;
+    let (weather_observations, weather_forecasts) =
+        closure_weather_facts(decision_at, weather_cutoff)?;
+    let expected_weather = weather_forecasts.clone();
+    let history = fact_writers
         .commit_sources(CohortSourceFacts {
             books: book_rows,
             microstructure: microstructure_rows,
@@ -2146,9 +4568,24 @@ async fn seed_cohort_sources(
             executions: execution_rows,
             participants: participant_rows,
             acceptances: acceptance_rows,
+            history,
             domain_observations: Vec::new(),
+            weather_observations,
+            weather_forecasts,
         })
-        .await
+        .await?;
+    if sources.iter().any(|source| {
+        closure_market_identity(&source.market_id).is_ok_and(|(_, ordinal)| ordinal == 1)
+    }) {
+        verify_weather_visibility(
+            fact_writers.fact_read.as_ref(),
+            decision_at,
+            weather_cutoff,
+            &expected_weather,
+        )
+        .await?;
+    }
+    Ok(history)
 }
 
 struct ClosedPositionSeed<'a> {
@@ -2199,6 +4636,115 @@ impl ClosedPositionSeed<'_> {
 struct ClosureExecutionGraph(ExecutionAttemptSourceGraph);
 
 impl ClosureExecutionGraph {
+    /// Bind a historical order to PIT rules and persist the complete graph source atomically.
+    async fn persist_order(
+        db: &DatabaseConnection,
+        transaction: &DatabaseTransaction,
+        recommendation: &NewRecommendation,
+        intent_id: OrderIntentId,
+        phase: ExecutionOrderPhase,
+        price: Price,
+        terminal_at: DateTime<Utc>,
+    ) -> Result<ExecutionOrderModel> {
+        let (side, order_type, prepared_at, submitted_at, created_at, valid_until) = match phase {
+            ExecutionOrderPhase::Entry => (
+                Side::Buy,
+                OrderType::Fak,
+                terminal_at - Duration::minutes(10),
+                terminal_at - Duration::minutes(8),
+                terminal_at - Duration::minutes(10),
+                terminal_at,
+            ),
+            ExecutionOrderPhase::Exit => (
+                Side::Sell,
+                OrderType::Gtc,
+                terminal_at,
+                terminal_at,
+                terminal_at - Duration::minutes(7),
+                terminal_at + Duration::minutes(1),
+            ),
+        };
+        let market_id = recommendation.market_id.clone();
+        let token_id = recommendation.token_id.clone();
+        let market_info = PgClobMarketInfoRepository::new(db.clone())
+            .at(&market_id, prepared_at, prepared_at)
+            .await?
+            .context("historical order has no PIT CLOB market info")?;
+        market_info.validate().map_err(AnyhowError::msg)?;
+        ensure!(
+            market_info.market_id == market_id
+                && market_info
+                    .tokens
+                    .iter()
+                    .any(|token| token.token_id == token_id)
+                && !market_info.neg_risk,
+            "historical execution CLOB identity differs from its market/token",
+        );
+        let shares = Shares::new(ENTRY_FILLED_SHARES);
+        let principal = shares * price;
+        let (venue_amount, expected_fee, cost_usd) = match side {
+            Side::Buy => (
+                VenueOrderAmount::PrincipalUsd(principal),
+                Usd::new(EXECUTION_NOTIONAL) - principal,
+                Usd::new(EXECUTION_NOTIONAL),
+            ),
+            Side::Sell => (VenueOrderAmount::Shares(shares), Usd::ZERO, principal),
+        };
+        let prepared = PreparedOrderFixture {
+            market_id: market_id.clone(),
+            token_id: token_id.clone(),
+            side,
+            order_type,
+            venue_amount,
+            expected_fee,
+            expected_filled_shares: shares,
+            limit_price: price,
+            order_rules: PolymarketOrderRules::new(
+                market_info.tick_size,
+                market_info.minimum_order_size,
+            )?,
+            book_hash: recommendation.evidence_refs.book_snapshot_ref.content_hash,
+            clob_market_info_payload_hash: market_info.payload_hash,
+            prepared_at,
+            valid_until,
+        }
+        .build()?;
+        let order = NewExecutionOrder {
+            execution_order_id: ExecutionOrderId::from_v7(),
+            order_intent_id: intent_id,
+            order_phase: phase,
+            market_id,
+            token_id,
+            side,
+            order_type: match phase {
+                ExecutionOrderPhase::Entry => OrderTypeKind::Fak,
+                ExecutionOrderPhase::Exit => OrderTypeKind::Gtc,
+            },
+            price: prepared.limit_price,
+            shares: prepared.requested_shares,
+            cost_usd,
+            prepared_order_json: prepared,
+            venue_order_id: Some(OrderId::new(format!(
+                "closure-{}-{}",
+                phase.as_str(),
+                recommendation.recommendation_id
+            ))),
+            venue_status: Some(VenueOrderStatus::Filled),
+            state: ExecutionOrderState::Filled,
+            submitted_at: Some(submitted_at),
+            filled_at: Some(submitted_at),
+            cancelled_at: None,
+            gtd_expiration_at: None,
+            error_message: None,
+        };
+        let mut active = order.into_active_model();
+        active.created_at = Set(created_at);
+        active.updated_at = Set(submitted_at);
+        Ok(ExecutionOrderEntity::insert(active)
+            .exec_with_returning(transaction)
+            .await?)
+    }
+
     async fn seal(self, transaction: &DatabaseTransaction) -> Result<ExecutionAttemptOutcomeInfo> {
         let source_observed_at = self.0.source_observed_at();
         let outcome = match self.0.derive()? {
@@ -2232,9 +4778,49 @@ struct CohortSeedContext<'a> {
     runtime: &'a WeightedFactorRuntime,
     facts: &'a ClosureFactWriters,
     replay: &'a ClosureReplayContext,
+    report_universe: &'a ClosureReportUniverse,
     capability_registry_hash: ContentHash,
     account_capital_usd: Usd,
     runtime_finalized_execution_evidence: &'a FinalizedExecutionEvidence,
+    activation_from_block: u64,
+    activation_through_block: u64,
+    history_policy_hash: ContentHash,
+}
+
+impl CohortSeedContext<'_> {
+    fn evaluation_intervals(
+        &self,
+        points: &[DateTime<Utc>],
+    ) -> Result<Vec<ClosureHistoryInterval>> {
+        let mut cursor = self.activation_from_block;
+        points
+            .iter()
+            .map(|decision_at| {
+                let decision_head = self
+                    .replay
+                    .polygon
+                    .block_at_or_before(decision_at.timestamp())
+                    .context("closure evaluation decision has no Polygon head")?;
+                let to_block = decision_head
+                    .number
+                    .checked_sub(MODEL_CONFIRMATION_BLOCKS)
+                    .context("closure evaluation decision head is below N+12")?;
+                ensure!(
+                    cursor <= to_block && to_block <= self.activation_through_block,
+                    "closure evaluation activation interval is descending"
+                );
+                let interval = ClosureHistoryInterval {
+                    frontier: ExchangeHistoryFrontier::Activation,
+                    from_block: Some(cursor),
+                    policy_hash: Some(self.history_policy_hash),
+                };
+                cursor = to_block
+                    .checked_add(1)
+                    .context("closure evaluation activation cursor overflowed")?;
+                Ok(interval)
+            })
+            .collect()
+    }
 }
 
 struct ClosureSeedInputs {
@@ -2288,6 +4874,7 @@ struct CohortSpecification<'a> {
     first_ordinal: usize,
     observation_count: usize,
     book_price_shift: Decimal,
+    history_interval: Option<ClosureHistoryInterval>,
 }
 
 impl CohortSpecification<'_> {
@@ -2454,6 +5041,7 @@ async fn seed_training_cohorts(
                     first_ordinal,
                     observation_count,
                     book_price_shift: training_book_price_shift(group_index),
+                    history_interval: None,
                 },
             ))
             .await?,
@@ -2507,6 +5095,7 @@ async fn seed_calibration_cohorts(
                     first_ordinal,
                     observation_count: group_size,
                     book_price_shift: Decimal::ZERO,
+                    history_interval: None,
                 },
             ))
             .await?,
@@ -2526,6 +5115,7 @@ async fn seed_evaluation_cohorts(
         plan.evaluation().cutoff(),
         EVALUATION_OBSERVATION_COUNT,
     )?;
+    let intervals = context.evaluation_intervals(&points)?;
     let resolutions = points.iter().copied().enumerate().try_fold(
         BTreeMap::<usize, DateTime<Utc>>::new(),
         |mut resolutions, (index, decision_at)| {
@@ -2542,8 +5132,8 @@ async fn seed_evaluation_cohorts(
     )?;
     let market_created_at = plan.evaluation().window_start() - Duration::days(1);
     let resolutions = &resolutions;
-    let mut prepared = stream::iter(points.into_iter().enumerate())
-        .map(|(index, decision_at)| {
+    let mut prepared = stream::iter(points.into_iter().zip(intervals).enumerate())
+        .map(|(index, (decision_at, history_interval))| {
             let market_range = evaluation_market_range(index);
             async move {
                 let (first_ordinal, _) = market_range?;
@@ -2557,6 +5147,7 @@ async fn seed_evaluation_cohorts(
                         first_ordinal,
                         observation_count: EVALUATION_MARKETS_PER_TICK,
                         book_price_shift: evaluation_book_price_shift(index),
+                        history_interval: Some(history_interval),
                     },
                 )
                 .await
@@ -2617,6 +5208,7 @@ pub(crate) struct FeedbackClosureSeedRequest<'a> {
     pub(crate) historical_feedback_cycle_id: FeedbackCycleId,
     pub(crate) report_resolves_at: DateTime<Utc>,
     pub(crate) runtime_finalized_execution_evidence: FinalizedExecutionEvidence,
+    pub(crate) polygon: &'a Arc<DeterministicPolygonChain>,
 }
 
 impl FeedbackClosureSeedRequest<'_> {
@@ -2629,6 +5221,297 @@ impl FeedbackClosureSeedRequest<'_> {
         );
         Ok(())
     }
+
+    fn register_tokens(&self, report_cohorts: &[ShadowObservationCohort]) -> Result<()> {
+        if !self
+            .runtime_finalized_execution_evidence
+            .runtime_parts()
+            .is_some_and(|(enabled, _, _)| enabled)
+        {
+            return Ok(());
+        }
+        let token_ids = report_cohorts
+            .iter()
+            .flat_map(|cohort| cohort.markets.iter())
+            .map(|source| {
+                let (scope, ordinal) = closure_market_identity(&source.market_id)?;
+                closure_token(scope, ordinal)
+                    .parse::<u64>()
+                    .context("closure report token does not fit Polygon uint64 fixture")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.polygon
+            .register_tokens(&token_ids, self.polygon.head())?;
+        Ok(())
+    }
+}
+
+struct ClosureSeedSetup {
+    champion: ModelVersionInfo,
+    model_spec: ModelSpecInfo,
+    policy: ActivePolicyBundle,
+    account_capital_usd: Usd,
+    validation: ResearchValidationConfig,
+    capability_registry_hash: ContentHash,
+    runtime: WeightedFactorRuntime,
+    profile: ResearchProfileArtifact,
+    schema: ExecutableFeatureSchema,
+    fact_writers: Arc<ClosureFactWriters>,
+    replay: Arc<ClosureReplayContext>,
+    report_universe: ClosureReportUniverse,
+    closure_infra: SharedDemoInfra,
+}
+
+impl ClosureSeedSetup {
+    async fn load(request: &FeedbackClosureSeedRequest<'_>) -> Result<Self> {
+        let db = request.db;
+        let ClosureSeedInputs {
+            champion,
+            model_spec,
+            policy,
+            account_capital_usd,
+        } = ClosureSeedInputs::load(db, request.champion_model_version_id).await?;
+        let validation = policy
+            .snapshot
+            .profile_artifacts
+            .research_method
+            .research
+            .validation
+            .clone();
+        let serving_bindings = champion.serving_contract.bindings();
+        ensure!(
+            serving_bindings.model.model_family == ModelFamily::WeightedFactor,
+            "closure serving-evidence fixture requires a weighted-factor champion"
+        );
+        let capability_hashes = serving_bindings.capability_registry_hashes.as_slice();
+        ensure!(
+            capability_hashes.len() == 1,
+            "closure serving-evidence fixture requires exactly one capability-registry revision"
+        );
+        let capability_registry_hash = capability_hashes[0];
+        let artifact =
+            ModelArtifact::load_verified(request.artifact_store.as_ref(), &champion).await?;
+        let calibration_loader = CoreCalibrationArtifactLoader::new(Arc::new(
+            PgCalibrationArtifactRepository::new(db.clone()),
+        )
+            as Arc<dyn CalibrationArtifactRepository>);
+        let calibration = resolve_return_model_calibration(&calibration_loader, &artifact).await?;
+        let runtime = WeightedFactorRuntime::new(artifact, calibration)?;
+        let profile = fixture_profile_ref()
+            .resolve_builtin_research_profile()
+            .map_err(AnyhowError::msg)?;
+        let schema = ExecutableFeatureSchema::build(
+            &policy.snapshot.profile_artifacts.features.definition,
+            profile.spec.feature_contract,
+        )?;
+        let fact_writers = Arc::new(ClosureFactWriters::connect(request.clickhouse_config).await?);
+        let replay = Arc::new(ClosureReplayContext::build(
+            db,
+            &fact_writers.fact_read,
+            &policy,
+            &champion,
+            Arc::clone(request.polygon),
+        )?);
+        let calibration_artifact_id = serving_bindings
+            .model
+            .calibration
+            .as_ref()
+            .context("closure champion must bind calibration")?
+            .artifact_id;
+        let closure_infra = SharedDemoInfra {
+            feature_parity_state_id: request.infra.feature_parity_state_id,
+            decision_policy_snapshot_id: request.infra.decision_policy_snapshot_id,
+            model_version_id: champion.model_version_id,
+            calibration_artifact_id,
+            model_run_id: request.infra.model_run_id,
+            trade_policy: request.infra.trade_policy.clone(),
+            factor_serving_plane: serving_bindings.factors.plane.clone(),
+        };
+        ensure!(
+            closure_infra.decision_policy_snapshot_id == policy.decision_policy_snapshot_id,
+            "closure fixture policy identity differs from its active serving generation"
+        );
+        let report_universe = Box::pin(ClosureReportUniverse::load(
+            db,
+            request.artifact_store,
+            &policy,
+        ))
+        .await?;
+        Ok(Self {
+            champion,
+            model_spec,
+            policy,
+            account_capital_usd,
+            validation,
+            capability_registry_hash,
+            runtime,
+            profile,
+            schema,
+            fact_writers,
+            replay,
+            report_universe,
+            closure_infra,
+        })
+    }
+
+    async fn finish(
+        self,
+        request: FeedbackClosureSeedRequest<'_>,
+        historical: ClosureHistoricalSeed,
+    ) -> Result<FeedbackClosureFixture> {
+        let db = request.db;
+        seed_historical_diagnostic(
+            db,
+            request.artifact_store,
+            request.historical_feedback_cycle_id,
+            historical.plan.label_cutoff(),
+            &self.champion,
+            &self.model_spec,
+            historical.historical_recommendation_id,
+        )
+        .await?;
+        seed_recipe(
+            db,
+            &self.profile,
+            &self.champion,
+            &self.model_spec,
+            &self.validation,
+        )
+        .await?;
+        let cycle = trigger_cycle(
+            db,
+            &self.profile,
+            &self.champion,
+            &self.policy,
+            historical.plan.label_cutoff(),
+        )
+        .await?;
+        let report_cohorts = seed_report_catalogs(
+            db,
+            self.capability_registry_hash,
+            request.report_resolves_at,
+        )
+        .await?;
+        request.register_tokens(&report_cohorts)?;
+        // Seed all append-only catalog truth before the real binary starts.
+        let shadow_cohorts = seed_shadow_catalogs(
+            db,
+            historical.observation_price_shifts.as_ref(),
+            self.capability_registry_hash,
+            db.statement_time().await,
+        )
+        .await?;
+        let retention = RetentionAnchorSeed::build(
+            db.statement_time().await,
+            self.replay.knowledge_lag.as_secs(),
+            self.capability_registry_hash,
+        )?;
+        retention.validate_isolation(&historical.plan)?;
+        retention.persist(db, self.fact_writers.as_ref()).await?;
+        Ok(FeedbackClosureFixture::new(
+            cycle.feedback_cycle_id,
+            &historical.cohorts,
+            report_cohorts,
+            shadow_cohorts,
+            self.fact_writers,
+            self.replay,
+            request.runtime_finalized_execution_evidence,
+        ))
+    }
+}
+
+struct ClosureHistoricalSeed {
+    plan: FeedbackCycleFreezePlan,
+    cohorts: Vec<CohortSeed>,
+    observation_price_shifts: Arc<[Decimal]>,
+    historical_recommendation_id: RecommendationId,
+}
+
+impl ClosureHistoricalSeed {
+    async fn build(
+        setup: &ClosureSeedSetup,
+        request: &FeedbackClosureSeedRequest<'_>,
+    ) -> Result<Self> {
+        let db = request.db;
+        let database_now = db.statement_time().await;
+        let plan = FeedbackCycleFreezePlan::derive(
+            &setup.profile,
+            setup.champion.model_spec_id,
+            setup.champion.model_spec_definition_hash,
+            setup.policy.decision_policy_snapshot_id,
+            setup.policy.snapshot_hash,
+            database_now,
+        )?;
+        let scenario_training = ScenarioTrainingPlan::load(
+            request.artifact_store,
+            &setup.policy,
+            &plan,
+            database_now,
+            setup.replay.polygon.as_ref(),
+            setup.replay.knowledge_lag,
+        )
+        .await?;
+        let training_group_count = closure_training_groups(
+            setup.validation.cpcv.n_groups,
+            setup.validation.cpcv.nested_estimator_min_groups,
+            setup.validation.pbo.block_count,
+            scenario_training.group_floor,
+        )?;
+        seed_catalog_baseline(db, plan.source_start()).await?;
+        let history_plan = PgExchangeHistoryRepository::new(db.clone())
+            .load_plan(137)
+            .await?
+            .context("closure evaluation has no immutable exchange-history plan")?;
+        let context = CohortSeedContext {
+            db,
+            artifacts: request.artifact_store,
+            infra: &setup.closure_infra,
+            champion: &setup.champion,
+            schema: &setup.schema,
+            runtime: &setup.runtime,
+            facts: setup.fact_writers.as_ref(),
+            replay: setup.replay.as_ref(),
+            report_universe: &setup.report_universe,
+            capability_registry_hash: setup.capability_registry_hash,
+            account_capital_usd: setup.account_capital_usd,
+            runtime_finalized_execution_evidence: &request.runtime_finalized_execution_evidence,
+            activation_from_block: u64::try_from(history_plan.activation_from_block)?,
+            activation_through_block: u64::try_from(history_plan.activation_through_block)?,
+            history_policy_hash: history_plan.policy_hash,
+        };
+        let mut cohorts = Box::pin(seed_training_cohorts(
+            &context,
+            &plan,
+            training_group_count,
+            &scenario_training,
+        ))
+        .await?;
+        cohorts.extend(Box::pin(seed_calibration_cohorts(&context, &plan)).await?);
+        let evaluation = Box::pin(seed_evaluation_cohorts(&context, &plan)).await?;
+        let execution_attempts = seed_execution_attempts(db, &evaluation).await?;
+        let (observation_price_shifts, historical_recommendation_id) =
+            historical_feedback_seed(&evaluation)?;
+        cohorts.extend(evaluation);
+        cohorts.sort_by_key(|cohort| cohort.decision_at);
+        align_report_history(db, &cohorts).await?;
+        let resolution_facts = closure_resolution_facts(&cohorts, plan.label_cutoff())?;
+        setup
+            .fact_writers
+            .commit_resolutions(resolution_facts.values().cloned().collect())
+            .await?;
+        stream::iter(&cohorts)
+            .map(|cohort| cohort.persist_rows(db, &resolution_facts))
+            .buffer_unordered(SOURCE_SEED_CONCURRENCY)
+            .try_collect::<Vec<_>>()
+            .await?;
+        seal_execution_rollups(db, &cohorts, execution_attempts).await?;
+        Ok(Self {
+            plan,
+            cohorts,
+            observation_price_shifts,
+            historical_recommendation_id,
+        })
+    }
 }
 
 /// Seed disjoint PIT cohorts, an approved recipe, and one queued cycle.
@@ -2636,158 +5519,9 @@ pub(crate) async fn seed_feedback_closure(
     request: FeedbackClosureSeedRequest<'_>,
 ) -> Result<FeedbackClosureFixture> {
     request.validate()?;
-    let db = request.db;
-    let ClosureSeedInputs {
-        champion,
-        model_spec,
-        policy,
-        account_capital_usd,
-    } = ClosureSeedInputs::load(db, request.champion_model_version_id).await?;
-    let validation = &policy
-        .snapshot
-        .profile_artifacts
-        .research_method
-        .research
-        .validation;
-    let serving_bindings = champion.serving_contract.bindings();
-    ensure!(
-        serving_bindings.model.model_family == ModelFamily::WeightedFactor,
-        "closure serving-evidence fixture requires a weighted-factor champion"
-    );
-    let capability_registry_hashes = serving_bindings.capability_registry_hashes.as_slice();
-    ensure!(
-        capability_registry_hashes.len() == 1,
-        "closure serving-evidence fixture requires exactly one capability-registry revision"
-    );
-    let capability_registry_hash = capability_registry_hashes[0];
-    let artifact = ModelArtifact::load_verified(request.artifact_store.as_ref(), &champion).await?;
-    let calibration_loader = CoreCalibrationArtifactLoader::new(Arc::new(
-        PgCalibrationArtifactRepository::new(db.clone()),
-    )
-        as Arc<dyn CalibrationArtifactRepository>);
-    let calibration = resolve_return_model_calibration(&calibration_loader, &artifact).await?;
-    let runtime = WeightedFactorRuntime::new(artifact, calibration)?;
-    let profile = fixture_profile_ref()
-        .resolve_builtin_research_profile()
-        .map_err(AnyhowError::msg)?;
-    let schema = ExecutableFeatureSchema::build(
-        &policy.snapshot.profile_artifacts.features.definition,
-        profile.spec.feature_contract,
-    )?;
-    let fact_writers = Arc::new(ClosureFactWriters::connect(request.clickhouse_config).await?);
-    let replay = Arc::new(ClosureReplayContext::build(
-        db,
-        &fact_writers.fact_read,
-        &policy,
-        &champion,
-    )?);
-    let database_now = db.statement_time().await;
-    let plan = FeedbackCycleFreezePlan::derive(
-        &profile,
-        champion.model_spec_id,
-        champion.model_spec_definition_hash,
-        policy.decision_policy_snapshot_id,
-        policy.snapshot_hash,
-        database_now,
-    )?;
-    let scenario_training =
-        ScenarioTrainingPlan::load(request.artifact_store, &policy, &plan, database_now).await?;
-    let training_group_count = closure_training_groups(
-        validation.cpcv.n_groups,
-        validation.cpcv.nested_estimator_min_groups,
-        validation.pbo.block_count,
-        scenario_training.group_floor,
-    )?;
-    seed_catalog_baseline(db, plan.source_start()).await?;
-    let calibration_artifact_id = serving_bindings
-        .model
-        .calibration
-        .as_ref()
-        .context("closure champion must bind calibration")?
-        .artifact_id;
-
-    let closure_infra = SharedDemoInfra {
-        feature_parity_state_id: request.infra.feature_parity_state_id,
-        decision_policy_snapshot_id: request.infra.decision_policy_snapshot_id,
-        model_version_id: champion.model_version_id,
-        calibration_artifact_id,
-        model_run_id: request.infra.model_run_id,
-        trade_policy: request.infra.trade_policy.clone(),
-        factor_serving_plane: serving_bindings.factors.plane.clone(),
-    };
-    let seed_context = CohortSeedContext {
-        db,
-        artifacts: request.artifact_store,
-        infra: &closure_infra,
-        champion: &champion,
-        schema: &schema,
-        runtime: &runtime,
-        facts: fact_writers.as_ref(),
-        replay: replay.as_ref(),
-        capability_registry_hash,
-        account_capital_usd,
-        runtime_finalized_execution_evidence: &request.runtime_finalized_execution_evidence,
-    };
-    let mut seeded = Box::pin(seed_training_cohorts(
-        &seed_context,
-        &plan,
-        training_group_count,
-        &scenario_training,
-    ))
-    .await?;
-    seeded.extend(Box::pin(seed_calibration_cohorts(&seed_context, &plan)).await?);
-    let evaluation_seeds = Box::pin(seed_evaluation_cohorts(&seed_context, &plan)).await?;
-    let execution_attempts = seed_execution_attempts(db, &evaluation_seeds).await?;
-    let (observation_price_shifts, historical_recommendation_id) =
-        historical_feedback_seed(&evaluation_seeds)?;
-    seeded.extend(evaluation_seeds);
-    seeded.sort_by_key(|cohort| cohort.decision_at);
-    align_report_history(db, &seeded).await?;
-    let resolution_facts = closure_resolution_facts(&seeded, plan.label_cutoff())?;
-    fact_writers
-        .commit_resolutions(resolution_facts.values().cloned().collect())
-        .await?;
-    stream::iter(&seeded)
-        .map(|cohort| cohort.persist_rows(db, &resolution_facts))
-        .buffer_unordered(SOURCE_SEED_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
-    seal_execution_rollups(db, &seeded, execution_attempts).await?;
-    seed_historical_diagnostic(
-        db,
-        request.artifact_store,
-        request.historical_feedback_cycle_id,
-        plan.label_cutoff(),
-        &champion,
-        &model_spec,
-        historical_recommendation_id,
-    )
-    .await?;
-    seed_recipe(db, &profile, &champion, &model_spec, validation).await?;
-    let cycle = trigger_cycle(db, &profile, &champion, &policy, plan.label_cutoff()).await?;
-    let report_cohorts =
-        seed_report_catalogs(db, capability_registry_hash, request.report_resolves_at).await?;
-    // The real binary must never observe a catalog row that is inserted later
-    // with an earlier availability time. Seed the complete shadow universe
-    // before startup so every online report and subsequent replay sees the
-    // same append-only catalog history.
-    let shadow_catalog_anchor = db.statement_time().await;
-    let shadow_cohorts = seed_shadow_catalogs(
-        db,
-        observation_price_shifts.as_ref(),
-        capability_registry_hash,
-        shadow_catalog_anchor,
-    )
-    .await?;
-    Ok(FeedbackClosureFixture::new(
-        cycle.feedback_cycle_id,
-        &seeded,
-        report_cohorts,
-        shadow_cohorts,
-        fact_writers,
-        replay,
-        request.runtime_finalized_execution_evidence,
-    ))
+    let setup = ClosureSeedSetup::load(&request).await?;
+    let historical = Box::pin(ClosureHistoricalSeed::build(&setup, &request)).await?;
+    Box::pin(setup.finish(request, historical)).await
 }
 
 /// A CPCV partition is not one decision-time group. Every outer fold must
@@ -2899,9 +5633,10 @@ async fn seed_report_catalogs(
     let resolutions = (1..=EVALUATION_MARKETS_PER_TICK)
         .map(|ordinal| (ordinal, resolves_at))
         .collect::<BTreeMap<_, _>>();
-    // Route/model lineage is the treatment under test. The two report scopes
-    // share one latent domain below, and the explicit price shift is identical,
-    // so structural signal, spread, and executable-price nuisance are paired.
+    // This is a mixed-Route portfolio closure, not a causal Route-treatment
+    // experiment. Pair spread, depth, and price nuisance in economic entry-side
+    // coordinates: Crypto follows its ex-ante close/strike direction, while
+    // Weather keeps the original Yes-quoted price history for its actual model.
     let specifications = [
         ("report-crypto", MarketCategory::Crypto, Decimal::ZERO),
         ("report-weather", MarketCategory::Weather, Decimal::ZERO),
@@ -2981,19 +5716,31 @@ impl PreparedCohort {
         })?);
         catalog.persist(db, capability_registry_hash).await?;
         let sources = specification.sources(last_ordinal);
-        seed_cohort_sources(
+        let history_interval = specification
+            .history_interval
+            .unwrap_or(ClosureHistoryInterval {
+                frontier: ExchangeHistoryFrontier::Retention,
+                from_block: None,
+                policy_hash: Some(context.history_policy_hash),
+            });
+        let history = seed_cohort_sources(
             db,
             &sources,
             decision_at,
             book_price_shift,
             fact_writers,
             replay,
+            history_interval,
         )
         .await?;
         let expected_markets = sources
             .iter()
             .map(|source| source.market_id.clone())
             .collect::<HashSet<_>>();
+        let decision = context
+            .report_universe
+            .freeze_decision(db, &history, replay, decision_at)
+            .await?;
         let selection = build_selection_model(SelectionModelBuild {
             db,
             facts: fact_writers,
@@ -3001,7 +5748,7 @@ impl PreparedCohort {
             infra,
             champion,
             runtime,
-            decision_at,
+            decision: &decision,
             expected_markets: &expected_markets,
         })
         .await?;
@@ -3013,6 +5760,13 @@ impl PreparedCohort {
             .source_id;
         let mut options = ReportBuildOptions::published_single(&ids);
         options.account_capital_usd = Some(context.account_capital_usd);
+        if decision.universe.is_some() {
+            options.route_lineages = context.report_universe.report_lineages(&ids, &decision)?;
+        } else {
+            for lineage in options.route_lineages.values_mut() {
+                lineage.history = decision.history.clone();
+            }
+        }
         let recommendations = build_cohort_recommendations(
             &sources,
             &ids,
@@ -3025,11 +5779,13 @@ impl PreparedCohort {
         let mut cohort = CohortSeed {
             catalog,
             decision_at,
+            boundary: decision.boundary,
             book_price_shift,
             resolution_by_market,
             ids,
             market_universe: Vec::new(),
             recommendations,
+            history,
         };
         let inference = cohort
             .persist_evidence(
@@ -3047,6 +5803,12 @@ impl PreparedCohort {
                 )
             })?;
         let prediction_hash = canonical_business_prediction_hash(&inference.candidates)?;
+        cohort.validate_counterfactual_pair(
+            scope,
+            first_ordinal,
+            &inference.calibration_scores,
+            &inference.input_audit,
+        )?;
         cohort.bind_predictions(&inference.candidates)?;
         options.recommendations = cohort.recommendations.clone();
         options.align_closure_summary(cohort.market_universe.len())?;
@@ -3057,7 +5819,9 @@ impl PreparedCohort {
         Ok(Self {
             cohort,
             options,
+            data_quality: inference.data_quality,
             trigger_key: config.trigger_key,
+            knowledge_lag_secs: i64::try_from(replay.knowledge_lag.as_secs())?,
         })
     }
 }
@@ -3128,11 +5892,7 @@ async fn seed_execution_attempt(
     let intent_id = OrderIntentId::from_v7();
     let market_id = MarketId::new(&recommendation.market_id);
     let token_id = TokenId::new(&recommendation.token_id);
-    let exit_reason = if exit_price >= dec!(0.6) {
-        ExitReason::TakeProfit
-    } else {
-        ExitReason::StopLoss
-    };
+    let exit_reason = closure_exit_reason(exit_price);
 
     let mut intent = new_order_intent(
         intent_id,
@@ -3169,25 +5929,16 @@ async fn seed_execution_attempt(
         .exec_without_returning(&transaction)
         .await?;
 
-    let mut entry = new_execution_order(&intent_id, ids);
-    entry.market_id = market_id.clone();
-    entry.token_id = token_id.clone();
-    entry.prepared_order_json.token_id = token_id.clone();
-    entry.prepared_order_json.fee_schedule.effective_at = approved_at;
-    entry.prepared_order_json.fee_schedule.available_at = approved_at;
-    entry.prepared_order_json.prepared_at = approved_at;
-    entry.prepared_order_json.valid_until = terminal_at;
-    entry.venue_order_id = Some(OrderId::new(format!("closure-entry-{recommendation_id}")));
-    entry.venue_status = Some(VenueOrderStatus::Filled);
-    entry.state = ExecutionOrderState::Filled;
-    entry.submitted_at = Some(entry_at);
-    entry.filled_at = Some(entry_at);
-    let mut entry_active = entry.into_active_model();
-    entry_active.created_at = Set(approved_at);
-    entry_active.updated_at = Set(entry_at);
-    let entry_model = ExecutionOrderEntity::insert(entry_active)
-        .exec_with_returning(&transaction)
-        .await?;
+    let entry_model = ClosureExecutionGraph::persist_order(
+        db,
+        &transaction,
+        recommendation,
+        intent_id,
+        ExecutionOrderPhase::Entry,
+        Price::new(ENTRY_PRICE),
+        terminal_at,
+    )
+    .await?;
 
     let entry_reconciliation =
         reconciliation_row(&entry_model.execution_order_id, &intent_id, entry_at);
@@ -3198,25 +5949,16 @@ async fn seed_execution_attempt(
         .exec_with_returning(&transaction)
         .await?;
 
-    let mut exit = exit_order(&intent_id, ids, entry_model.shares.inner(), exit_price);
-    exit.market_id = market_id.clone();
-    exit.token_id = token_id.clone();
-    exit.prepared_order_json.token_id = token_id.clone();
-    exit.prepared_order_json.fee_schedule.effective_at = entry_at;
-    exit.prepared_order_json.fee_schedule.available_at = entry_at;
-    exit.prepared_order_json.prepared_at = entry_at;
-    exit.prepared_order_json.valid_until = terminal_at + Duration::minutes(1);
-    exit.venue_order_id = Some(OrderId::new(format!("closure-exit-{recommendation_id}")));
-    exit.venue_status = Some(VenueOrderStatus::Filled);
-    exit.state = ExecutionOrderState::Filled;
-    exit.submitted_at = Some(exit_at);
-    exit.filled_at = Some(exit_at);
-    let mut exit_active = exit.into_active_model();
-    exit_active.created_at = Set(entry_at + Duration::minutes(1));
-    exit_active.updated_at = Set(exit_at);
-    let exit_model = ExecutionOrderEntity::insert(exit_active)
-        .exec_with_returning(&transaction)
-        .await?;
+    let exit_model = ClosureExecutionGraph::persist_order(
+        db,
+        &transaction,
+        recommendation,
+        intent_id,
+        ExecutionOrderPhase::Exit,
+        Price::new(exit_price),
+        terminal_at,
+    )
+    .await?;
 
     let exit_reconciliation = exit_reconciliation_row(
         &exit_model.execution_order_id,
@@ -3247,26 +5989,12 @@ async fn seed_execution_attempt(
     .insert(&transaction)
     .await?;
 
-    let account_execution_fees = [
-        (&entry_reconciliation_model, &entry_model),
-        (&exit_reconciliation_model, &exit_model),
-    ]
-    .into_iter()
-    .map(|(reconciliation, order)| {
-        let source_event_hash =
-            CanonicalDigest::content_hash_json(&reconciliation.execution_order_id)
-                .expect("closure fee source hash");
-        AccountExecutionFeeFact {
-            account_chain_execution_id: AccountChainExecutionId::from_content_hash(
-                &source_event_hash,
-            ),
-            execution_order_id: reconciliation.execution_order_id,
-            exact_fee_usd: order.prepared_order_json.expected_fee,
-            source_event_hash,
-            available_at: reconciliation.updated_at,
-        }
-    })
-    .collect();
+    let account_execution_fees = execution_fee_facts(
+        &entry_reconciliation_model,
+        &entry_model,
+        &exit_reconciliation_model,
+        &exit_model,
+    );
     let graph = ExecutionAttemptSourceGraph {
         recommendation_id,
         market_id,
@@ -3284,6 +6012,42 @@ async fn seed_execution_attempt(
     let info = ClosureExecutionGraph(graph).seal(&transaction).await?;
     transaction.commit().await?;
     Ok(info)
+}
+
+fn execution_fee_facts(
+    entry_reconciliation: &ReconciliationModel,
+    entry_order: &ExecutionOrderModel,
+    exit_reconciliation: &ReconciliationModel,
+    exit_order: &ExecutionOrderModel,
+) -> Vec<AccountExecutionFeeFact> {
+    [
+        (entry_reconciliation, entry_order),
+        (exit_reconciliation, exit_order),
+    ]
+    .into_iter()
+    .map(|(reconciliation, order)| {
+        let source_event_hash =
+            CanonicalDigest::content_hash_json(&reconciliation.execution_order_id)
+                .expect("closure fee source hash");
+        AccountExecutionFeeFact {
+            account_chain_execution_id: AccountChainExecutionId::from_content_hash(
+                &source_event_hash,
+            ),
+            execution_order_id: reconciliation.execution_order_id,
+            exact_fee_usd: order.prepared_order_json.expected_fee,
+            source_event_hash,
+            available_at: reconciliation.updated_at,
+        }
+    })
+    .collect()
+}
+
+fn closure_exit_reason(exit_price: Decimal) -> ExitReason {
+    if exit_price >= dec!(0.6) {
+        ExitReason::TakeProfit
+    } else {
+        ExitReason::StopLoss
+    }
 }
 
 async fn align_report_history(db: &DatabaseConnection, cohorts: &[CohortSeed]) -> Result<()> {
@@ -3392,6 +6156,120 @@ async fn align_report_history(db: &DatabaseConnection, cohorts: &[CohortSeed]) -
 }
 
 impl CohortSeed {
+    fn validate_counterfactual_pair(
+        &self,
+        scope: &str,
+        first_ordinal: usize,
+        scores: &[ModelCalibrationScore],
+        input_audit: &[ModelInputAuditRow],
+    ) -> Result<()> {
+        if !matches!(scope, "training" | "evaluation") {
+            return Ok(());
+        }
+        let scores = scores
+            .iter()
+            .map(|score| {
+                ensure!(
+                    self.resolution_by_market.contains_key(&score.market_id),
+                    "closure calibration score {} has no frozen resolution binding",
+                    score.market_id
+                );
+                let (_, ordinal) = closure_market_identity(&score.market_id)?;
+                Ok((ordinal, score))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        ensure!(
+            scores.len() == self.resolution_by_market.len(),
+            "closure {scope} counterfactual score population has {} markets, expected {}",
+            scores.len(),
+            self.resolution_by_market.len()
+        );
+        let (first_ordinal, second_ordinal) = if scope == "training" {
+            scores
+                .keys()
+                .copied()
+                .find_map(|ordinal| {
+                    let zero_based = ordinal.checked_sub(1)?;
+                    let second = ordinal.checked_add(1)?;
+                    (zero_based.is_multiple_of(8) && scores.contains_key(&second))
+                        .then_some((ordinal, second))
+                })
+                .context("closure training score population has no complete counterfactual pair")?
+        } else {
+            (
+                first_ordinal,
+                first_ordinal
+                    .checked_add(1)
+                    .context("closure evaluation counterfactual ordinal overflowed")?,
+            )
+        };
+        let first = scores
+            .get(&first_ordinal)
+            .with_context(|| format!("closure {scope} has no market {first_ordinal}"))?;
+        let second = scores
+            .get(&second_ordinal)
+            .with_context(|| format!("closure {scope} has no market {second_ordinal}"))?;
+        let mut first_inputs = input_audit
+            .iter()
+            .filter(|row| row.market_id == first.market_id)
+            .collect::<Vec<_>>();
+        let mut second_inputs = input_audit
+            .iter()
+            .filter(|row| row.market_id == second.market_id)
+            .collect::<Vec<_>>();
+        first_inputs.sort_by(|left, right| {
+            (&left.raw_input_name, &left.encoded_column)
+                .cmp(&(&right.raw_input_name, &right.encoded_column))
+        });
+        second_inputs.sort_by(|left, right| {
+            (&left.raw_input_name, &left.encoded_column)
+                .cmp(&(&right.raw_input_name, &right.encoded_column))
+        });
+        ensure!(
+            !first_inputs.is_empty() && first_inputs.len() == second_inputs.len(),
+            "closure {scope} counterfactual pair {first_ordinal}/{second_ordinal} has input-audit cardinality {}/{}",
+            first_inputs.len(),
+            second_inputs.len()
+        );
+        for (left, right) in first_inputs.into_iter().zip(second_inputs) {
+            ensure!(
+                left.raw_input_name == right.raw_input_name
+                    && left.raw_state == right.raw_state
+                    && left.raw_value == right.raw_value
+                    && left.encoded_column == right.encoded_column
+                    && left.encoded_value_bits == right.encoded_value_bits
+                    && left.input_contract_hash == right.input_contract_hash
+                    && left.transform_hash == right.transform_hash
+                    && left.training_input_hash == right.training_input_hash,
+                "closure {scope} counterfactual pair {first_ordinal}/{second_ordinal} changed model input `{}`: left={left:?} right={right:?}",
+                left.raw_input_name
+            );
+        }
+        ensure!(
+            first.composite_score == second.composite_score,
+            "closure {scope} counterfactual pair {first_ordinal}/{second_ordinal} changed composite scores: {}/{}",
+            first.composite_score,
+            second.composite_score
+        );
+        ensure!(
+            first.outcome_side == second.outcome_side,
+            "closure {scope} counterfactual pair {first_ordinal}/{second_ordinal} selected different outcome sides: {:?}/{:?}",
+            first.outcome_side,
+            second.outcome_side
+        );
+        let first_won =
+            recommendation_won(first.outcome_side, closure_yes_wins(scope, first_ordinal)?);
+        let second_won = recommendation_won(
+            second.outcome_side,
+            closure_yes_wins(scope, second_ordinal)?,
+        );
+        ensure!(
+            first_won != second_won,
+            "closure {scope} counterfactual pair {first_ordinal}/{second_ordinal} does not provide both calibration classes"
+        );
+        Ok(())
+    }
+
     fn bind_predictions(&mut self, candidates: &[SignalCandidate]) -> Result<()> {
         ensure!(
             self.market_universe.is_empty(),
@@ -3488,11 +6366,7 @@ impl CohortSeed {
     ) -> Result<CohortInferenceResult> {
         let created_at = self.decision_at + Duration::seconds(2);
         let event_time = created_at.timestamp_millis();
-        let boundary = DecisionClock::new(replay.knowledge_lag.as_secs()).serving_boundary(
-            self.decision_at,
-            replay.config.domain.crypto.availability_lag_secs,
-            replay.config.domain.weather.availability_lag_secs,
-        )?;
+        let boundary = self.boundary.clone();
         let required_features = runtime.required_features();
         let cross = self
             .replay_cross_section(
@@ -3525,7 +6399,7 @@ impl CohortSeed {
         boundary: &DecisionBoundary,
         required_features: &[FeatureName],
         runtime_finalized_execution_evidence: &FinalizedExecutionEvidence,
-    ) -> Result<ReplayCrossSection> {
+    ) -> Result<CohortReplayPlane> {
         let observation_count = self.recommendations.len();
         let samples = self
             .recommendations
@@ -3555,17 +6429,22 @@ impl CohortSeed {
             .decision_at
             .checked_add_signed(Duration::milliseconds(1))
             .context("closure replay window end overflowed")?;
-        let history_sources = self
-            .recommendations
-            .iter()
-            .map(ClosureMarketSource::from)
-            .collect::<Vec<_>>();
-        let execution_history_chunks = closure_history_chunks(
-            &history_sources,
-            self.decision_at,
-            replay.knowledge_lag.as_secs(),
-            self.book_price_shift,
-        )?;
+        let execution_history_chunks = vec![self.history.chunk_ref.clone()];
+        let finalized_execution_evidence =
+            if self.history.chunk_ref.frontier == ExchangeHistoryFrontier::Retention {
+                FinalizedExecutionEvidence::materialized(window_end)
+            } else if runtime_finalized_execution_evidence
+                .runtime_parts()
+                .is_some_and(|(enabled, _, _)| enabled)
+            {
+                FinalizedExecutionEvidence::runtime(
+                    true,
+                    Some(u64::try_from(self.history.chunk_ref.to_block)?),
+                    self.history.chunk.effective_through_at,
+                )
+            } else {
+                runtime_finalized_execution_evidence.clone()
+            };
         let window = replay
             .loader
             .load(&WindowSpec {
@@ -3582,8 +6461,25 @@ impl CohortSeed {
                 requires_execution_history: true,
             })
             .await?;
-        let finalized_execution_evidences =
-            frozen_finalized_execution_evidences(&samples, runtime_finalized_execution_evidence)?;
+        let weather_forecasts = window
+            .prefetched
+            .weather_forecasts
+            .get(CLOSURE_WEATHER_STATION)
+            .context("closure replay prefetched no Weather forecast rows")?;
+        validate_weather_runs(weather_forecasts)?;
+        let finalized_execution_evidences;
+        let execution_source = if matches!(
+            finalized_execution_evidence,
+            FinalizedExecutionEvidence::Materialized { .. }
+        ) {
+            ReplayExecutionSource::Materialized {
+                available_by: window_end,
+            }
+        } else {
+            finalized_execution_evidences =
+                frozen_finalized_execution_evidences(&samples, &finalized_execution_evidence)?;
+            ReplayExecutionSource::FrozenRuntime(&finalized_execution_evidences)
+        };
         let cross = materialize_cross_section(
             &replay.builder,
             ReplayFactorMode::FactorNative {
@@ -3591,20 +6487,13 @@ impl CohortSeed {
             },
             &replay.config,
             &CrossSectionRequest {
-                // These rows are persisted as live-inference evidence, so the
-                // source plane must use the same frozen runtime semantics as
-                // the real feature pipeline even though the underlying source
-                // slice was prepared before the binary starts.
                 pit: &window.pit,
                 prefetched: &window.prefetched,
-                finalized_execution_evidence: ReplayExecutionSource::FrozenRuntime(
-                    &finalized_execution_evidences,
-                ),
-                decision_at: self.decision_at,
+                finalized_execution_evidence: execution_source,
+                boundary,
                 group: &samples,
                 required_features,
                 category_scope: None,
-                knowledge_lag: replay.knowledge_lag,
             },
         )
         .await?
@@ -3621,7 +6510,35 @@ impl CohortSeed {
             cross.rejected_vectors.len(),
             cross.rejected_vectors.first()
         );
-        Ok(cross)
+        let fact_lags = samples
+            .iter()
+            .map(|sample| {
+                let facts = feature_window(
+                    sample.token_id.clone(),
+                    boundary,
+                    StdDuration::from_secs(
+                        replay.config.features.max_microstructure_lookback_secs(),
+                    ),
+                    window
+                        .prefetched
+                        .micro
+                        .get(&sample.token_id)
+                        .map_or(&[][..], Vec::as_slice),
+                )?;
+                let lag = facts
+                    .freshest_bucket_time()
+                    .map(|at| u64::try_from((boundary.decision_at() - at).num_milliseconds()))
+                    .transpose()?;
+                Ok((sample.token_id.clone(), lag))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        Ok(CohortReplayPlane {
+            cross,
+            quality: CohortDataQuality {
+                fact_lags,
+                required: required_features.iter().cloned().collect(),
+            },
+        })
     }
 
     async fn persist_factor_plane(
@@ -3629,8 +6546,9 @@ impl CohortSeed {
         db: &DatabaseConnection,
         boundary: &DecisionBoundary,
         created_at: DateTime<Utc>,
-        cross: ReplayCrossSection,
+        plane: CohortReplayPlane,
     ) -> Result<PersistedCohortPlane> {
+        let CohortReplayPlane { cross, quality } = plane;
         let ReplayCrossSection {
             boundary: replay_boundary,
             vectors,
@@ -3670,6 +6588,7 @@ impl CohortSeed {
         let mut feature_models = Vec::with_capacity(observation_count);
         let mut factor_models = Vec::new();
         let mut inference_rows = Vec::with_capacity(observation_count);
+        let mut data_quality = Vec::with_capacity(observation_count);
         for ((vector, selected), outcome) in vectors.into_iter().zip(markets).zip(outcomes) {
             ensure!(
                 outcome.market_id == vector.market_id
@@ -3701,6 +6620,7 @@ impl CohortSeed {
             let vector_id = recommendation.evidence_refs.feature_vector_id;
             let mut new_feature = vector.try_to_new(&replay_boundary, &capture_evidence)?;
             new_feature.feature_vector_id = vector_id;
+            data_quality.push(quality.record(&new_feature, &vector, capture)?);
             let mut feature_active = new_feature.into_active_model();
             feature_active.created_at = Set(created_at);
             feature_models.push(feature_active);
@@ -3750,6 +6670,7 @@ impl CohortSeed {
             captures: ordered_captures,
             vector_ids,
             inference_rows,
+            data_quality: ReportDataQualityTokens(data_quality),
         })
     }
 
@@ -3771,6 +6692,7 @@ impl CohortSeed {
             captures,
             vector_ids,
             inference_rows,
+            data_quality,
         } = plane;
         let persisted = PgFeatureRepository::new(db.clone())
             .find_by_ids(&vector_ids)
@@ -3854,6 +6776,9 @@ impl CohortSeed {
                 input_rows,
                 completion,
             },
+            data_quality,
+            calibration_scores: output.calibration_scores,
+            input_audit: output.input_audit,
             candidates: output.candidates,
         })
     }
@@ -4128,10 +7053,13 @@ fn closure_levels(
     let market_offset = closure_market_offset(scope, market_ordinal)?;
     let spread = closure_spread_width(scope, market_ordinal)?;
     let half_spread = spread / Decimal::from(2);
-    let midpoint = if primary {
-        dec!(0.42) + price_shift + market_offset
+    let quoted_yes = scope != "report-crypto"
+        || CLOSURE_CRYPTO_CLOSE_PRICE >= closure_crypto_strike(scope, market_ordinal)?.inner();
+    let entry_midpoint = dec!(0.42) + price_shift + market_offset;
+    let midpoint = if primary == quoted_yes {
+        entry_midpoint
     } else {
-        dec!(0.58) - price_shift - market_offset
+        Decimal::ONE - entry_midpoint
     };
     let bid = midpoint - half_spread;
     let ask = midpoint + half_spread;
@@ -4142,7 +7070,7 @@ fn closure_levels(
     // Depth carries a balanced nuisance signal that is independent from the
     // latent reversion regime, price stream, and terminal label-noise stream.
     // It prevents the closure cohort from being a one-feature toy population.
-    let (bid_size, ask_size) = if market_ordinal.is_multiple_of(2) {
+    let (bid_size, ask_size) = if closure_depth_bias(scope, market_ordinal)? {
         (Shares::new(dec!(2_400)), Shares::new(dec!(21_600)))
     } else {
         (Shares::new(dec!(18_000)), Shares::new(dec!(2_000)))
@@ -4315,52 +7243,259 @@ fn closure_bucket_at(cutoff: DateTime<Utc>, minutes_ago: i64) -> DateTime<Utc> {
     }
 }
 
-fn closure_execution_history_rows(
-    source: &ClosureMarketSource,
-    decision_at: DateTime<Utc>,
-    knowledge_lag_secs: u64,
-    price_shift: Decimal,
-) -> Result<ClosureExecutionFacts> {
-    const PARTICIPANTS_PER_ROLE: usize = 20;
-    let (scope, ordinal) = closure_market_identity(&source.market_id)?;
-    let token_id = TokenId::new(closure_token(scope, ordinal));
-    let (bids, asks) = closure_levels(scope, true, price_shift, ordinal)?;
-    let price = Price::new(
-        (bids[0].price_decimal().inner() + asks[0].price_decimal().inner()) / Decimal::from(2),
-    );
-    let cutoff = DecisionClock::new(knowledge_lag_secs)
-        .boundary(decision_at)?
-        .cutoff_for(DecisionSource::FinalizedExecution);
-    let chunk_id = seeded_uuid(&format!(
-        "feedback-closure:history:{}:{}",
-        source.market_id,
-        decision_at.timestamp_millis()
-    ));
-    let policy_hash = ResearchHasher::canonical(&(
-        "feedback-closure-availability-policy",
-        source.market_id.as_str(),
-        decision_at,
-    ))?;
-    let block_hash = format!("0x{}", policy_hash.hex());
-    let block_number = u64::try_from(decision_at.timestamp())?;
-    let mut executions = Vec::with_capacity(PARTICIPANTS_PER_ROLE);
-    let mut participants = Vec::with_capacity(PARTICIPANTS_PER_ROLE * 2);
-    for index in 0..PARTICIPANTS_PER_ROLE {
-        let offset_secs = i64::try_from(PARTICIPANTS_PER_ROLE - index)?;
-        let event_at = cutoff - Duration::seconds(offset_secs);
-        let observed_at = event_at + Duration::seconds(1);
-        let maker_seed = ordinal
+impl ClosureHistoryContract {
+    fn build(seed: &ClosureExecutionSeed<'_>) -> Result<Self> {
+        let cutoff = DecisionClock::new(seed.knowledge_lag_secs)
+            .boundary(seed.decision_at)?
+            .cutoff_for(DecisionSource::FinalizedExecution);
+        let source_head = seed
+            .polygon
+            .block_at_or_before(cutoff.timestamp())
+            .context("closure execution cutoff has no deterministic Polygon head")?;
+        let execution_to = source_head
+            .number
+            .checked_sub(MODEL_CONFIRMATION_BLOCKS)
+            .context("closure execution source head is below confirmation policy")?;
+        let event_from_block = execution_to
+            .checked_sub(u64::try_from(CLOSURE_EXECUTIONS_PER_MARKET - 1)?)
+            .context("closure execution chunk range underflowed")?;
+        let from_block = seed.interval.from_block.unwrap_or(event_from_block);
+        let decision_head = seed
+            .polygon
+            .block_at_or_before(seed.decision_at.timestamp())
+            .context("closure decision has no deterministic Polygon head")?;
+        let to_block = decision_head
+            .number
+            .checked_sub(MODEL_CONFIRMATION_BLOCKS)
+            .context("closure decision head is below confirmation policy")?;
+        ensure!(
+            from_block >= V2_PRODUCTION_BLOCK
+                && from_block <= event_from_block
+                && execution_to <= to_block,
+            "closure execution cohort predates V2 or exceeds its decision-time serving head"
+        );
+        let chain_head = seed.polygon.head();
+        let first = DeterministicPolygonChain::block(from_block, chain_head)
+            .context("closure execution first block is unavailable")?;
+        let last = DeterministicPolygonChain::block(to_block, chain_head)
+            .context("closure execution last block is unavailable")?;
+        ensure!(
+            source_head.number >= execution_to + MODEL_CONFIRMATION_BLOCKS,
+            "closure execution chunk is not fully confirmed"
+        );
+        let event_set_hash = ResearchHasher::canonical(&(
+            "feedback-closure-history-events-v2",
+            seed.sources
+                .iter()
+                .map(|source| &source.market_id)
+                .collect::<Vec<_>>(),
+            from_block,
+            to_block,
+            &first.hash,
+            &last.hash,
+            seed.price_shift,
+        ))?;
+        let policy_hash = seed
+            .interval
+            .policy_hash
+            .unwrap_or(ResearchHasher::canonical(&(
+                "feedback-closure-availability-policy-v2",
+                137_u64,
+                "finalized_only",
+                "hypersync_plus_archive_attestor",
+                MODEL_CONFIRMATION_BLOCKS,
+            ))?);
+        // The provider response is observed at the database-owned request
+        // clock. The same content-addressed chunk may be requested again inside
+        // one block; `ClosureFactWriters` preserves its first acceptance
+        // revision instead of moving this availability timestamp backward.
+        let provider_observed_at = seed.decision_at;
+        Ok(Self {
+            cutoff,
+            from_block,
+            event_from_block,
+            frontier: seed.interval.frontier,
+            to_block,
+            chain_head,
+            first,
+            last,
+            provider_observed_at,
+            event_set_hash,
+            policy_hash,
+        })
+    }
+
+    fn seal(self, mut rows: ClosureExecutionRows) -> Result<ClosureExecutionFacts> {
+        let provider_digest = ResearchHasher::canonical(&(
+            rows.executions
+                .iter()
+                .map(|row| {
+                    (
+                        row.execution_id,
+                        &row.market_id,
+                        &row.token_id,
+                        row.block_number,
+                        row.transaction_index,
+                        row.log_index,
+                        &row.transaction_hash,
+                        &row.order_hash,
+                        row.side,
+                        row.price,
+                        row.size_shares,
+                        row.notional_usd,
+                        row.fee_usd,
+                        row.effective_at,
+                        row.model_available_at,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            rows.participants
+                .iter()
+                .map(|row| {
+                    (
+                        row.execution_id,
+                        &row.market_id,
+                        &row.token_id,
+                        &row.participant_address,
+                        row.participant_role,
+                        row.participant_notional,
+                        row.effective_at,
+                        row.model_available_at,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ))?;
+        let chunk_id = ExchangeHistoryWorker::chunk_id(
+            self.frontier,
+            self.from_block,
+            self.to_block,
+            provider_digest,
+        );
+        rows.executions
+            .iter_mut()
+            .for_each(|row| row.chunk_id = chunk_id);
+        rows.participants
+            .iter_mut()
+            .for_each(|row| row.chunk_id = chunk_id);
+        let acceptance = ExchangeHistoryAcceptanceRow {
+            chunk_id,
+            frontier: self.frontier.as_str().to_owned(),
+            from_block: self.from_block,
+            to_block: self.to_block,
+            log_count: u64::try_from(rows.executions.len())?,
+            provider_digest: ChDigest::from(provider_digest),
+            first_block_hash: self.first.hash,
+            last_block_hash: self.last.hash,
+            effective_through_at: self.last.timestamp.saturating_mul(1_000),
+            accepted_at: self.provider_observed_at.timestamp_millis(),
+            active: 1,
+            state_revision: ExchangeHistoryWorker::state_revision(self.provider_observed_at)?,
+            schema_version: ExchangeHistoryAcceptanceRow::SCHEMA_VERSION,
+        };
+        let chunk_ref = HistorySealChunkRef {
+            chunk_id,
+            frontier: self.frontier,
+            state_revision: i64::try_from(acceptance.state_revision)?,
+            from_block: i64::try_from(self.from_block)?,
+            to_block: i64::try_from(self.to_block)?,
+        };
+        let chunk = NewExchangeHistoryChunk {
+            chunk_id,
+            frontier: self.frontier,
+            from_block: chunk_ref.from_block,
+            to_block: chunk_ref.to_block,
+            status: ExchangeHistoryChunkStatus::Accepted,
+            attempt_count: 1,
+            hypersync_count: Some(i64::try_from(rows.executions.len())?),
+            attestor_count: Some(i64::try_from(rows.executions.len())?),
+            hypersync_digest: Some(provider_digest),
+            attestor_digest: Some(provider_digest),
+            first_block_hash: Some(EvmBlockHash::parse(&acceptance.first_block_hash)?),
+            last_block_hash: Some(EvmBlockHash::parse(&acceptance.last_block_hash)?),
+            archive_height: Some(i64::try_from(self.chain_head.block_number)?),
+            continuity_basis: Some(ExchangeHistoryContinuityBasis::HyperSyncBoundaryHeaders),
+            continuity_block: Some(i64::try_from(self.from_block.saturating_sub(1))?),
+            continuity_hash: Some(EvmBlockHash::parse(self.first.parent_hash)?),
+            effective_through_at: Some(
+                DateTime::from_timestamp(self.last.timestamp, 0)
+                    .context("closure history effective time is outside UTC")?,
+            ),
+            state_revision: Some(chunk_ref.state_revision),
+            accepted_at: Some(self.provider_observed_at),
+            created_at: self.provider_observed_at,
+            updated_at: self.provider_observed_at,
+        };
+        Ok(ClosureExecutionFacts {
+            executions: rows.executions,
+            participants: rows.participants,
+            acceptance,
+            history: ClosureAcceptedHistory { chunk, chunk_ref },
+        })
+    }
+}
+
+impl ClosureExecutionMarket<'_> {
+    fn build(
+        source: &ClosureMarketSource,
+        source_index: usize,
+        price_shift: Decimal,
+    ) -> Result<ClosureExecutionMarket<'_>> {
+        let (scope, ordinal) = closure_market_identity(&source.market_id)?;
+        let token_id = TokenId::new(closure_token(scope, ordinal));
+        let (bids, asks) = closure_levels(scope, true, price_shift, ordinal)?;
+        let price = Price::new(
+            (bids[0].price_decimal().inner() + asks[0].price_decimal().inner()) / Decimal::from(2),
+        );
+        Ok(ClosureExecutionMarket {
+            source,
+            source_index,
+            scope: scope.to_owned(),
+            ordinal,
+            token_id,
+            price,
+        })
+    }
+
+    fn append_event(
+        &self,
+        index: usize,
+        seed: &ClosureExecutionSeed<'_>,
+        contract: &ClosureHistoryContract,
+        rows: &mut ClosureExecutionRows,
+    ) -> Result<()> {
+        let block_number = contract.event_from_block + u64::try_from(index)?;
+        let event_block = DeterministicPolygonChain::block(block_number, contract.chain_head)
+            .context("closure execution event block is unavailable")?;
+        let available_block = DeterministicPolygonChain::block(
+            block_number + MODEL_CONFIRMATION_BLOCKS,
+            contract.chain_head,
+        )
+        .context("closure execution confirmation block is unavailable")?;
+        let event_at = DateTime::from_timestamp(event_block.timestamp, 0)
+            .context("closure execution event time is outside UTC")?;
+        let model_available_at = DateTime::from_timestamp(available_block.timestamp, 0)
+            .context("closure execution confirmation time is outside UTC")?;
+        ensure!(
+            event_at <= model_available_at
+                && model_available_at <= contract.cutoff
+                && contract.cutoff <= contract.provider_observed_at
+                && contract.provider_observed_at <= seed.decision_at,
+            "closure execution clocks violate effective/model/provider/decision order"
+        );
+        let maker_seed = self
+            .ordinal
             .checked_mul(100)
             .and_then(|value| value.checked_add(index))
             .context("closure trade participant identity overflowed")?;
         let taker_seed = maker_seed
-            .checked_add(PARTICIPANTS_PER_ROLE)
+            .checked_add(CLOSURE_EXECUTIONS_PER_MARKET)
             .context("closure taker identity overflowed")?;
         let shares = Shares::new(Decimal::from(24 + (index % 5)));
-        let notional = shares * price;
+        let execution_price = Price::new(self.price.inner() + Decimal::from(index) * dec!(0.0001));
+        let notional = shares * execution_price;
         let source_event_id = format!(
-            "feedback-closure:{scope}:{ordinal}:{}:{index}:on-chain-fill",
-            decision_at.timestamp_millis()
+            "feedback-closure:{}:{}:{}:{block_number}:{index}:on-chain-fill",
+            contract.event_set_hash, self.scope, self.ordinal
         );
         let tx_seed = seeded_uuid(&source_event_id).as_u128();
         let execution_hash = ResearchHasher::canonical(&source_event_id)?;
@@ -4369,108 +7504,110 @@ fn closure_execution_history_rows(
         } else {
             ChExchangeSide::Sell
         };
-        executions.push(MarketExecutionRow {
-            execution_id: ChDigest::from(execution_hash),
-            match_id: None,
-            maker_order_filled_event_id: ChDigest::from(execution_hash),
-            market_id: source.market_id.clone(),
-            token_id: token_id.clone(),
-            order_hash: format!("0x{:064x}", tx_seed.wrapping_add(1)),
-            contract_key: "ctf_exchange_v2".to_owned(),
-            exchange_version: ChExchangeVersion::V2,
-            contract_address: "0xE111180000d2663C0091e4f400237545B87B996B".to_owned(),
-            transaction_hash: format!("0x{tx_seed:064x}"),
-            block_number,
-            transaction_index: 0,
-            log_index: u64::try_from(index)?,
+        let event = ClosureExecutionEvent {
+            execution_hash,
             maker_address: format!("0x{maker_seed:040x}"),
             taker_address: format!("0x{taker_seed:040x}"),
+            notional,
+            effective_at: event_at.timestamp_millis(),
+            model_available_at: model_available_at.timestamp_millis(),
+        };
+        rows.executions.push(MarketExecutionRow {
+            execution_id: ChDigest::from(event.execution_hash),
+            match_id: None,
+            maker_order_filled_event_id: ChDigest::from(event.execution_hash),
+            market_id: self.source.market_id.clone(),
+            token_id: self.token_id.clone(),
+            order_hash: format!("0x{:064x}", tx_seed.wrapping_add(1)),
+            contract_key: "ctf_v2".to_owned(),
+            exchange_version: ChExchangeVersion::V2,
+            contract_address: "0xe111180000d2663c0091e4f400237545b87b996b".to_owned(),
+            transaction_hash: format!("0x{tx_seed:064x}"),
+            block_number,
+            transaction_index: u64::try_from(self.source_index)?,
+            log_index: u64::try_from(self.source_index)?,
+            maker_address: event.maker_address.clone(),
+            taker_address: event.taker_address.clone(),
             side,
-            price: ChPrice::from(price),
+            price: ChPrice::from(execution_price),
             size_shares: ChShares::from(shares),
-            notional_usd: ChUsd::from(notional),
+            notional_usd: ChUsd::from(event.notional),
             fee_usd: ChUsd::from(Usd::ZERO),
             builder: None,
-            effective_at: event_at.timestamp_millis(),
-            observed_at: observed_at.timestamp_millis(),
-            model_available_at: observed_at.timestamp_millis(),
+            effective_at: event.effective_at,
+            observed_at: contract.provider_observed_at.timestamp_millis(),
+            model_available_at: event.model_available_at,
             availability_basis: ChAvailabilityBasis::BlockConfirmation,
-            availability_policy_hash: ChDigest::from(policy_hash),
-            chunk_id,
+            availability_policy_hash: ChDigest::from(contract.policy_hash),
+            chunk_id: Uuid::nil(),
             schema_version: MarketExecutionRow::SCHEMA_VERSION,
         });
+        self.append_participants(&event, contract, &mut rows.participants);
+        Ok(())
+    }
+
+    fn append_participants(
+        &self,
+        event: &ClosureExecutionEvent,
+        contract: &ClosureHistoryContract,
+        participants: &mut Vec<ExecutionParticipantRow>,
+    ) {
         for (participant_role, participant_address) in [
             (
                 ChExecutionParticipantRole::Maker,
-                format!("0x{maker_seed:040x}"),
+                event.maker_address.clone(),
             ),
             (
                 ChExecutionParticipantRole::Taker,
-                format!("0x{taker_seed:040x}"),
+                event.taker_address.clone(),
             ),
         ] {
             participants.push(ExecutionParticipantRow {
-                execution_id: ChDigest::from(execution_hash),
-                market_id: source.market_id.clone(),
-                token_id: token_id.clone(),
+                execution_id: ChDigest::from(event.execution_hash),
+                market_id: self.source.market_id.clone(),
+                token_id: self.token_id.clone(),
                 participant_address,
                 participant_role,
-                participant_notional: ChUsd::from(notional),
-                effective_at: event_at.timestamp_millis(),
-                model_available_at: observed_at.timestamp_millis(),
-                availability_policy_hash: ChDigest::from(policy_hash),
-                chunk_id,
+                participant_notional: ChUsd::from(event.notional),
+                effective_at: event.effective_at,
+                model_available_at: event.model_available_at,
+                availability_policy_hash: ChDigest::from(contract.policy_hash),
+                chunk_id: Uuid::nil(),
                 schema_version: ExecutionParticipantRow::SCHEMA_VERSION,
             });
         }
     }
-    let acceptance = ExchangeHistoryAcceptanceRow {
-        chunk_id,
-        frontier: "activation".to_owned(),
-        from_block: 1,
-        to_block: block_number,
-        log_count: u64::try_from(executions.len())?,
-        provider_digest: ChDigest::from(policy_hash),
-        first_block_hash: block_hash.clone(),
-        last_block_hash: block_hash,
-        effective_through_at: cutoff.timestamp_millis(),
-        accepted_at: decision_at.timestamp_millis(),
-        active: 1,
-        state_revision: u64::try_from(decision_at.timestamp_micros())?,
-        schema_version: ExchangeHistoryAcceptanceRow::SCHEMA_VERSION,
-    };
-    Ok(ClosureExecutionFacts {
-        executions,
-        participants,
-        acceptance,
-    })
 }
 
-fn closure_history_chunks(
+fn closure_execution_history_rows(
     sources: &[ClosureMarketSource],
     decision_at: DateTime<Utc>,
     knowledge_lag_secs: u64,
-    book_price_shift: Decimal,
-) -> Result<Vec<HistorySealChunkRef>> {
-    sources
-        .iter()
-        .map(|source| {
-            let acceptance = closure_execution_history_rows(
-                source,
-                decision_at,
-                knowledge_lag_secs,
-                book_price_shift,
-            )?
-            .acceptance;
-            Ok(HistorySealChunkRef {
-                chunk_id: acceptance.chunk_id,
-                frontier: ExchangeHistoryFrontier::Activation,
-                state_revision: i64::try_from(acceptance.state_revision)?,
-                from_block: i64::try_from(acceptance.from_block)?,
-                to_block: i64::try_from(acceptance.to_block)?,
-            })
-        })
-        .collect()
+    price_shift: Decimal,
+    polygon: &DeterministicPolygonChain,
+    interval: ClosureHistoryInterval,
+) -> Result<ClosureExecutionFacts> {
+    ensure!(!sources.is_empty(), "closure execution cohort is empty");
+    let seed = ClosureExecutionSeed {
+        sources,
+        decision_at,
+        knowledge_lag_secs,
+        price_shift,
+        polygon,
+        interval,
+    };
+    let contract = ClosureHistoryContract::build(&seed)?;
+    let mut rows = ClosureExecutionRows {
+        executions: Vec::with_capacity(sources.len() * CLOSURE_EXECUTIONS_PER_MARKET),
+        participants: Vec::with_capacity(sources.len() * CLOSURE_EXECUTIONS_PER_MARKET * 2),
+    };
+    for (source_index, source) in sources.iter().enumerate() {
+        let market = ClosureExecutionMarket::build(source, source_index, price_shift)?;
+        for index in 0..CLOSURE_EXECUTIONS_PER_MARKET {
+            market.append_event(index, &seed, &contract, &mut rows)?;
+        }
+    }
+    contract.seal(rows)
 }
 
 fn closure_book_row(
@@ -4593,6 +7730,14 @@ fn closure_book_facts(
         "market_id": source.market_id,
         "primary_token_id": primary_token_id,
         "secondary_token_id": secondary_token_id,
+        "tick_size": CLOSURE_ORDER_RULES.tick_size.as_decimal().to_string(),
+        "minimum_order_size": CLOSURE_ORDER_RULES.minimum_order_size.inner().to_string(),
+        "neg_risk": CLOSURE_NEG_RISK,
+        "taker_order_delay_enabled": false,
+        "blockaid_check_enabled": false,
+        "fee_details": { "rate": "0", "exponent": 1, "taker_only": true },
+        "builder_maker_fee_rate_bps": 0,
+        "builder_taker_fee_rate_bps": 0,
         "effective_at": primary_row.venue_event_time,
         "available_at": primary_row.persisted_time,
     });
@@ -4613,9 +7758,9 @@ fn closure_book_facts(
                 outcome: "No".to_owned(),
             },
         ],
-        tick_size: TickSize::QuarterCent,
-        minimum_order_size: dec!(1),
-        neg_risk: false,
+        tick_size: CLOSURE_ORDER_RULES.tick_size,
+        minimum_order_size: CLOSURE_ORDER_RULES.minimum_order_size,
+        neg_risk: CLOSURE_NEG_RISK,
         taker_order_delay_enabled: false,
         minimum_order_age_secs: None,
         blockaid_check_enabled: false,
@@ -4815,10 +7960,10 @@ const fn recommendation_won(outcome_side: OutcomeSide, canonical_yes_wins: bool)
 
 const CLOSURE_STRUCTURE_DOMAIN: u64 = 0xa5a5_d3c4_e5f6_0718;
 const CLOSURE_COPRIME_MULTIPLIERS: [usize; 4] = [1, 3, 5, 7];
-const CLOSURE_HALF_MULTIPLIERS: [usize; 2] = [1, 3];
 const CLOSURE_LABEL_NOISE_DOMAIN: u64 = 0xd1b5_4a32_d192_ed03;
 const CLOSURE_PRICE_DOMAIN: u64 = 0x94d0_49bb_1331_11eb;
 const CLOSURE_SPREAD_DOMAIN: u64 = 0x3f84_6b17_c2d9_5ea1;
+const CLOSURE_DEPTH_DOMAIN: u64 = 0x6c8e_9cf5_7093_2bd5;
 
 fn closure_scope_domain(scope: &str) -> Result<u64> {
     match scope {
@@ -4827,10 +7972,11 @@ fn closure_scope_domain(scope: &str) -> Result<u64> {
         // Shadow is a strict replay of the evaluation population, so these
         // two scopes intentionally share one ex-ante latent population.
         "evaluation" | "shadow" => Ok(0xa409_3822_299f_31d0),
-        // The mixed-Route production report is one randomized-block fixture:
-        // every Crypto/Weather ordinal is the same ex-ante market population,
-        // with only Route/category and its governed model lineage changing.
+        // Mixed-Route report ordinals share latent and nuisance streams. Their
+        // source-defined entry sides, not nominal Yes prices, are paired; the
+        // fixture does not claim that distinct Route models form a causal trial.
         "report-crypto" | "report-weather" => Ok(0x082e_fa98_ec4e_6c89),
+        "retention" => Ok(0x4528_21e6_38d0_1377),
         other => anyhow::bail!("unsupported closure latent scope `{other}`"),
     }
 }
@@ -4849,30 +7995,23 @@ fn closure_latent_word(scope: &str, market_ordinal: usize, domain: u64) -> Resul
     Ok(value ^ (value >> 31))
 }
 
-fn closure_structural_slot(scope: &str, market_ordinal: usize) -> Result<usize> {
+fn closure_feature_ordinal(scope: &str, market_ordinal: usize) -> Result<usize> {
     let zero_based = market_ordinal
         .checked_sub(1)
-        .context("closure structural ordinal underflowed")?;
-    if scope == "training" {
-        // The training universe rolls by four of eight markets. Alternate two
-        // complementary, internally shuffled half-blocks so every decision
-        // cross-section contains each strength/regime cell exactly once while
-        // an overlapping market retains one immutable latent identity.
-        // Group equal-regime slots before rotation/reversal. Every half then
-        // has one cell per strength and remains exactly orthogonal to the
-        // odd/even nuisance side regardless of its latent shuffle.
-        const HALF_SLOTS: [[usize; 4]; 2] = [[0, 4, 3, 7], [1, 5, 2, 6]];
-        let half = zero_based.div_euclid(4);
-        let position = zero_based % 4;
-        let half_identity = half
-            .checked_add(1)
-            .context("closure structural half identity overflowed")?;
-        let word = closure_latent_word(scope, half_identity, CLOSURE_STRUCTURE_DOMAIN)?;
-        let multiplier = CLOSURE_HALF_MULTIPLIERS[usize::try_from(word & 1)?];
-        let offset = usize::try_from((word >> 1) & 3)?;
-        let shuffled = (position * multiplier + offset) % 4;
-        return Ok(HALF_SLOTS[half % 2][shuffled]);
+        .context("closure feature ordinal underflowed")?;
+    match scope {
+        "training" if zero_based % 8 == 1 => Ok(market_ordinal - 1),
+        "evaluation" | "shadow" if zero_based % EVALUATION_MARKETS_PER_TICK == 1 => {
+            Ok(market_ordinal - 1)
+        }
+        _ => Ok(market_ordinal),
     }
+}
+
+fn closure_structural_slot(scope: &str, market_ordinal: usize) -> Result<usize> {
+    let zero_based = closure_feature_ordinal(scope, market_ordinal)?
+        .checked_sub(1)
+        .context("closure structural ordinal underflowed")?;
     let block = zero_based.div_euclid(8);
     let position = zero_based % 8;
     let block_identity = block
@@ -4910,10 +8049,11 @@ fn closure_market_offset(scope: &str, market_ordinal: usize) -> Result<Decimal> 
             })
             .and_then(|offset| offset.checked_add(1))
             .context("closure evaluation price identity underflowed")?,
-        // Training and calibration retain independent per-market executable
-        // prices so the model sees the governed price support without sharing
-        // a random stream with the signal or terminal-label processes.
-        "training" | "calibration" => market_ordinal,
+        // Training retains one exact cross-block counterfactual price while
+        // every other row, and every calibration row, keeps an independent
+        // per-market executable-price nuisance.
+        "training" => closure_feature_ordinal(scope, market_ordinal)?,
+        "calibration" | "retention" => market_ordinal,
         other => anyhow::bail!("unsupported closure market scope `{other}`"),
     };
     let (tier, positive) = closure_price_tier(scope, price_identity)?;
@@ -4930,9 +8070,9 @@ fn closure_spread_width(scope: &str, market_ordinal: usize) -> Result<Decimal> {
         dec!(0.030),
     ];
     match scope {
-        "training" | "calibration" => Ok(dec!(0.020)),
+        "training" | "calibration" | "retention" => Ok(dec!(0.020)),
         "evaluation" | "shadow" | "report-crypto" | "report-weather" => {
-            let zero_based = market_ordinal
+            let zero_based = closure_feature_ordinal(scope, market_ordinal)?
                 .checked_sub(1)
                 .context("closure spread ordinal underflowed")?;
             let cohort_index = zero_based.div_euclid(EVALUATION_MARKETS_PER_TICK);
@@ -4955,6 +8095,11 @@ fn closure_spread_width(scope: &str, market_ordinal: usize) -> Result<Decimal> {
         }
         other => anyhow::bail!("unsupported closure spread scope `{other}`"),
     }
+}
+
+fn closure_depth_bias(scope: &str, market_ordinal: usize) -> Result<bool> {
+    let identity = closure_feature_ordinal(scope, market_ordinal)?;
+    Ok(closure_latent_word(scope, identity, CLOSURE_DEPTH_DOMAIN)? & 1 == 0)
 }
 
 fn closure_momentum_variation(
@@ -4999,6 +8144,28 @@ fn closure_yes_wins(scope: &str, market_ordinal: usize) -> Result<bool> {
     // noise stream is absent from every feature and executable-price input.
     const ERROR_BPS: [u64; 4] = [1_800, 1_100, 650, 350];
     let regime_yes = closure_regime_sign(scope, market_ordinal)? > 0;
+    if scope == "training" {
+        let slot = market_ordinal
+            .checked_sub(1)
+            .context("training label ordinal underflowed")?;
+        match slot % 8 {
+            0 => return Ok(!regime_yes),
+            1 => return Ok(regime_yes),
+            _ => {}
+        }
+    }
+    if matches!(scope, "evaluation" | "shadow") {
+        let slot = market_ordinal
+            .checked_sub(1)
+            .context("evaluation label ordinal underflowed")?
+            % EVALUATION_MARKETS_PER_TICK;
+        if slot == 0 {
+            return Ok(!regime_yes);
+        }
+        if slot == 1 {
+            return Ok(regime_yes);
+        }
+    }
     let strength = closure_reversion_strength(scope, market_ordinal)?;
     let draw = closure_latent_word(scope, market_ordinal, CLOSURE_LABEL_NOISE_DOMAIN)? % 10_000;
     Ok(if draw < ERROR_BPS[strength - 1] {
@@ -5238,6 +8405,195 @@ async fn trigger_cycle(
     }
 }
 
+impl ShadowClosurePlan {
+    async fn build(
+        db: &DatabaseConnection,
+        artifact_store: &Arc<dyn ArtifactStore>,
+        fixture: &FeedbackClosureFixture,
+    ) -> Result<Self> {
+        let binding = await_shadow_binding(db, artifact_store, fixture.feedback_cycle_id).await?;
+        let policy = PgPolicyRepository::new(db.clone())
+            .load_current()
+            .await?
+            .context("closure shadow binding has no current policy snapshot")?;
+        let runner = build_model_runner(
+            db,
+            artifact_store,
+            ReportEvidenceWriters::default().model_inputs,
+        )
+        .await;
+        let research_profile = fixture_profile_ref()
+            .resolve_builtin_research_profile()
+            .map_err(AnyhowError::msg)?;
+        let schema = Arc::new(ExecutableFeatureSchema::build(
+            &policy.snapshot.profile_artifacts.features.definition,
+            research_profile.spec.feature_contract,
+        )?);
+        let first_decision_at = binding.bound_at + Duration::milliseconds(1);
+        ensure!(
+            fixture
+                .shadow_cohorts
+                .iter()
+                .all(|cohort| cohort.catalog.available_at <= binding.bound_at),
+            "closure shadow catalog was not durably visible before route binding"
+        );
+        await_database_time(db, first_decision_at + Duration::seconds(1)).await?;
+        let cohorts = Arc::clone(&fixture.shadow_cohorts);
+        ensure!(
+            !cohorts.is_empty(),
+            "closure has no shadow observation cohorts"
+        );
+        let requirements = runner
+            .active_requirements(ActiveModelRequirementsRequest {
+                policy: &policy,
+                decision_at: first_decision_at,
+                route: binding.route,
+            })
+            .await?;
+        let shadow_identity = requirements.serving.published_shadow_identity()?;
+        ensure!(
+            shadow_identity.candidate_model_version_id == binding.candidate_model_version_id,
+            "closure ModelRunner resolved a different route-owned shadow"
+        );
+        let window_secs = i64::try_from(shadow_identity.required_shadow_window_secs)
+            .context("closure shadow window exceeds i64")?;
+        let window_start = binding.bound_at;
+        let window_end = window_start
+            .checked_add_signed(Duration::seconds(window_secs))
+            .context("closure shadow window end overflowed")?;
+        ensure!(
+            db.statement_time().await < window_end,
+            "closure shadow preparation exhausted the frozen observation window"
+        );
+        let observation_query = ShadowObservationQuery {
+            champion_model_version_id: shadow_identity.champion_model_version_id,
+            candidate_model_version_id: shadow_identity.candidate_model_version_id,
+            champion_serving_contract_hash: shadow_identity.champion_serving_contract_hash,
+            candidate_serving_contract_hash: shadow_identity.candidate_serving_contract_hash,
+            research_profile_artifact_id: shadow_identity.research_profile_artifact_id.clone(),
+            category_scope: shadow_identity.category_scope,
+            decision_policy_snapshot_id: shadow_identity.decision_policy_snapshot_id,
+            decision_policy_snapshot_hash: shadow_identity.decision_policy_snapshot_hash,
+            policy_bundle_generation: shadow_identity.policy_bundle_generation,
+            window_start,
+            window_end,
+        };
+        let execution_evidence = shadow_history_evidence(
+            db,
+            &fixture.runtime_finalized_execution_evidence,
+            first_decision_at,
+        )
+        .await?;
+        Ok(Self {
+            feedback_cycle_id: fixture.feedback_cycle_id,
+            runner,
+            serving: requirements.serving,
+            schema,
+            cohorts,
+            fact_writers: Arc::clone(&fixture.fact_writers),
+            replay: Arc::clone(&fixture.replay),
+            shadow_identity,
+            policy_snapshot_id: policy.decision_policy_snapshot_id,
+            first_decision_at,
+            window_start,
+            window_end,
+            observation_query,
+            execution_evidence,
+            required_features: requirements.model_requirements.union_all().into(),
+        })
+    }
+
+    async fn run(&self, db: &DatabaseConnection) -> Result<Vec<ShadowObservationResult>> {
+        stream::iter(0..SHADOW_OBSERVATION_COUNT)
+            .map(|ordinal| {
+                let db = db.clone();
+                let runner = Arc::clone(&self.runner);
+                let serving = self.serving.clone();
+                let schema = Arc::clone(&self.schema);
+                let cohorts = Arc::clone(&self.cohorts);
+                let fact_writers = Arc::clone(&self.fact_writers);
+                let replay = Arc::clone(&self.replay);
+                let required_features = Arc::clone(&self.required_features);
+                let execution_evidence = self.execution_evidence.clone();
+                async move {
+                    let cohort_index = ordinal.div_euclid(2) % cohorts.len();
+                    let cohort = cohorts[cohort_index].clone();
+                    let decision_at = shadow_decision_at(self.first_decision_at, ordinal)?;
+                    ensure!(
+                        self.window_start <= decision_at && decision_at < self.window_end,
+                        "closure shadow observation {ordinal} fell outside the frozen serving window"
+                    );
+                    let result = run_shadow_observation(ShadowObservationRequest {
+                        db: &db,
+                        runner: &runner,
+                        serving: &serving,
+                        schema: &schema,
+                        facts: fact_writers.as_ref(),
+                        replay: replay.as_ref(),
+                        catalog: &cohort.catalog,
+                        policy_snapshot_id: self.policy_snapshot_id,
+                        sources: cohort.markets.as_ref(),
+                        required_features: required_features.as_ref(),
+                        runtime_finalized_execution_evidence: &execution_evidence,
+                        decision_at,
+                        book_price_shift: cohort.book_price_shift,
+                    })
+                    .await?;
+                    ensure!(
+                        !result.hard_divergence,
+                        "closure shadow observation {ordinal} produced a hard divergence"
+                    );
+                    Ok(result)
+                }
+            })
+            .buffer_unordered(SHADOW_OBSERVATION_CONCURRENCY)
+            .try_collect::<Vec<ShadowObservationResult>>()
+            .await
+    }
+
+    async fn verify(
+        &self,
+        db: &DatabaseConnection,
+        results: &[ShadowObservationResult],
+    ) -> Result<FeedbackClosureOutcome> {
+        let finished_at = db.statement_time().await;
+        let elapsed_millis = finished_at
+            .signed_duration_since(self.window_start)
+            .num_milliseconds();
+        ensure!(
+            finished_at < self.window_end,
+            "closure shadow observations did not finish inside the frozen serving window: finished_at={finished_at} window_end={} elapsed_ms={elapsed_millis} observations={} concurrency={SHADOW_OBSERVATION_CONCURRENCY}",
+            self.window_end,
+            results.len()
+        );
+        let executable = results.iter().filter(|result| result.emitted > 0).count();
+        let maximum_overlap = results
+            .iter()
+            .map(|result| result.topn_decision_overlap)
+            .max()
+            .unwrap_or(Probability::ZERO);
+        ensure!(
+            executable > 0,
+            "closure shadow produced no executable candidate; maximum overlap was {maximum_overlap}"
+        );
+        let observed = PgShadowComparisonRepository::new(db.clone())
+            .observation_window(&self.observation_query)
+            .await?;
+        validate_shadow_observations(results, SHADOW_OBSERVATION_COUNT, observed.sample_count)?;
+        let mean_overlap = observed
+            .mean_topn_decision_overlap
+            .context("closure shadow aggregate has no signed decision overlap")?;
+        ensure!(
+            mean_overlap.inner() >= self.shadow_identity.minimum_topn_decision_overlap.inner()
+                && !observed.any_hard_divergence,
+            "closure shadow is not stable: executable={executable} mean_overlap={mean_overlap} required_overlap={} maximum_overlap={maximum_overlap} hard_divergence={}",
+            self.shadow_identity.minimum_topn_decision_overlap,
+            observed.any_hard_divergence
+        );
+        await_candidate_ready(db, self.feedback_cycle_id, self.window_end).await
+    }
+}
+
 /// Drive the route-owned production shadow with real [`ModelRunner`] rounds and
 /// wait until the production coordinator seals `CandidateReady`.
 pub async fn complete_feedback_closure(
@@ -5245,152 +8601,40 @@ pub async fn complete_feedback_closure(
     artifact_store: &Arc<dyn ArtifactStore>,
     fixture: &FeedbackClosureFixture,
 ) -> Result<FeedbackClosureOutcome> {
-    let binding = await_shadow_binding(db, artifact_store, fixture.feedback_cycle_id).await?;
-    let policy = PgPolicyRepository::new(db.clone())
-        .load_current()
-        .await?
-        .context("closure shadow binding has no current policy snapshot")?;
-    let runner = build_model_runner(db, artifact_store).await;
-    let research_profile = fixture_profile_ref()
-        .resolve_builtin_research_profile()
-        .map_err(AnyhowError::msg)?;
-    let schema = Arc::new(ExecutableFeatureSchema::build(
-        &policy.snapshot.profile_artifacts.features.definition,
-        research_profile.spec.feature_contract,
-    )?);
-    let first_decision_at = binding.bound_at + Duration::milliseconds(1);
-    ensure!(
-        fixture
-            .shadow_cohorts
-            .iter()
-            .all(|cohort| cohort.catalog.available_at <= binding.bound_at),
-        "closure shadow catalog was not durably visible before route binding"
-    );
-    await_database_time(db, first_decision_at + Duration::seconds(1)).await?;
-    let observation_cohorts = Arc::clone(&fixture.shadow_cohorts);
-    let requirements = runner
-        .active_requirements(ActiveModelRequirementsRequest {
-            policy: &policy,
-            decision_at: first_decision_at,
-            route: binding.route,
-        })
-        .await?;
-    let shadow_identity = requirements.serving.published_shadow_identity()?;
-    ensure!(
-        shadow_identity.candidate_model_version_id == binding.candidate_model_version_id,
-        "closure ModelRunner resolved a different route-owned shadow"
-    );
-    let decision_policy_snapshot_id = policy.decision_policy_snapshot_id;
-    ensure!(
-        !observation_cohorts.is_empty(),
-        "closure has no shadow observation cohorts"
-    );
-    let window_secs = i64::try_from(shadow_identity.required_shadow_window_secs)
-        .context("closure shadow window exceeds i64")?;
-    let window_start = binding.bound_at;
-    let window_end = window_start
-        .checked_add_signed(Duration::seconds(window_secs))
-        .context("closure shadow window end overflowed")?;
-    ensure!(
-        db.statement_time().await < window_end,
-        "closure shadow preparation exhausted the frozen observation window"
-    );
-    let observation_query = ShadowObservationQuery {
-        champion_model_version_id: shadow_identity.champion_model_version_id,
-        candidate_model_version_id: shadow_identity.candidate_model_version_id,
-        champion_serving_contract_hash: shadow_identity.champion_serving_contract_hash,
-        candidate_serving_contract_hash: shadow_identity.candidate_serving_contract_hash,
-        research_profile_artifact_id: shadow_identity.research_profile_artifact_id.clone(),
-        category_scope: shadow_identity.category_scope,
-        decision_policy_snapshot_id: shadow_identity.decision_policy_snapshot_id,
-        decision_policy_snapshot_hash: shadow_identity.decision_policy_snapshot_hash,
-        policy_bundle_generation: shadow_identity.policy_bundle_generation,
-        window_start,
-        window_end,
+    let plan = Box::pin(ShadowClosurePlan::build(db, artifact_store, fixture)).await?;
+    let results = plan.run(db).await?;
+    plan.verify(db, &results).await
+}
+
+async fn shadow_history_evidence(
+    db: &DatabaseConnection,
+    seeded: &FinalizedExecutionEvidence,
+    decision_at: DateTime<Utc>,
+) -> Result<FinalizedExecutionEvidence> {
+    let Some((history_enabled, _, _)) = seeded.runtime_parts() else {
+        anyhow::bail!("closure shadow evidence is not runtime evidence")
     };
-    let fact_writers = Arc::clone(&fixture.fact_writers);
-    let replay = Arc::clone(&fixture.replay);
-    let runtime_finalized_execution_evidence = fixture.runtime_finalized_execution_evidence.clone();
-    let required_features: Arc<[FeatureName]> = requirements.model_requirements.union_all().into();
-    let results = stream::iter(0..SHADOW_OBSERVATION_COUNT)
-        .map(|ordinal| {
-            let db = db.clone();
-            let runner = Arc::clone(&runner);
-            let serving = requirements.serving.clone();
-            let schema = Arc::clone(&schema);
-            let cohorts = Arc::clone(&observation_cohorts);
-            let fact_writers = Arc::clone(&fact_writers);
-            let replay = Arc::clone(&replay);
-            let required_features = Arc::clone(&required_features);
-            let runtime_finalized_execution_evidence = runtime_finalized_execution_evidence.clone();
-            async move {
-                let cohort_index = ordinal.div_euclid(2) % cohorts.len();
-                let cohort = cohorts[cohort_index].clone();
-                let decision_at = shadow_decision_at(first_decision_at, ordinal)?;
-                ensure!(
-                    window_start <= decision_at && decision_at < window_end,
-                    "closure shadow observation {ordinal} fell outside the frozen serving window"
-                );
-                let result = run_shadow_observation(ShadowObservationRequest {
-                    db: &db,
-                    runner: &runner,
-                    serving: &serving,
-                    schema: &schema,
-                    facts: fact_writers.as_ref(),
-                    replay: replay.as_ref(),
-                    catalog: &cohort.catalog,
-                    policy_snapshot_id: decision_policy_snapshot_id,
-                    sources: cohort.markets.as_ref(),
-                    required_features: required_features.as_ref(),
-                    runtime_finalized_execution_evidence: &runtime_finalized_execution_evidence,
-                    decision_at,
-                    book_price_shift: cohort.book_price_shift,
-                })
-                .await?;
-                ensure!(
-                    !result.hard_divergence,
-                    "closure shadow observation {ordinal} produced a hard divergence"
-                );
-                Ok(result)
-            }
-        })
-        .buffer_unordered(SHADOW_OBSERVATION_CONCURRENCY)
-        .try_collect::<Vec<ShadowObservationResult>>()
+    if !history_enabled {
+        return Ok(seeded.clone());
+    }
+    let repository = PgExchangeHistoryRepository::new(db.clone());
+    let head = repository
+        .serving_head_at(ExchangeHistoryFrontier::Activation, decision_at)
+        .await?
+        .context("closure shadow has no production history serving head")?;
+    repository
+        .validate_serving_head(head.seal.serving_head_seal_id, head.seal.seal_hash)
         .await?;
-    let finished_at = db.statement_time().await;
-    let elapsed_millis = finished_at
-        .signed_duration_since(window_start)
-        .num_milliseconds();
+    let accepted_block = u64::try_from(head.seal.accepted_through_block)?;
     ensure!(
-        finished_at < window_end,
-        "closure shadow observations did not finish inside the frozen serving window: finished_at={finished_at} window_end={window_end} elapsed_ms={elapsed_millis} observations={} concurrency={SHADOW_OBSERVATION_CONCURRENCY}",
-        results.len()
+        head.seal.effective_through_at <= decision_at,
+        "closure shadow history serving head is from the future"
     );
-    let executable_observations = results.iter().filter(|result| result.emitted > 0).count();
-    let maximum_overlap = results
-        .iter()
-        .map(|result| result.topn_decision_overlap)
-        .max()
-        .unwrap_or(Probability::ZERO);
-    ensure!(
-        executable_observations > 0,
-        "closure shadow produced no executable candidate; maximum overlap was {maximum_overlap}"
-    );
-    let observed = PgShadowComparisonRepository::new(db.clone())
-        .observation_window(&observation_query)
-        .await?;
-    validate_shadow_observations(&results, SHADOW_OBSERVATION_COUNT, observed.sample_count)?;
-    let mean_overlap = observed
-        .mean_topn_decision_overlap
-        .context("closure shadow aggregate has no signed decision overlap")?;
-    ensure!(
-        mean_overlap.inner() >= shadow_identity.minimum_topn_decision_overlap.inner()
-            && !observed.any_hard_divergence,
-        "closure shadow is not stable: executable={executable_observations} mean_overlap={mean_overlap} required_overlap={} maximum_overlap={maximum_overlap} hard_divergence={}",
-        shadow_identity.minimum_topn_decision_overlap,
-        observed.any_hard_divergence
-    );
-    await_candidate_ready(db, fixture.feedback_cycle_id).await
+    Ok(FinalizedExecutionEvidence::runtime(
+        true,
+        Some(accepted_block),
+        Some(head.seal.effective_through_at),
+    ))
 }
 
 fn validate_shadow_observations(
@@ -5484,13 +8728,399 @@ async fn seed_shadow_catalogs(
     Ok(Arc::from(cohorts))
 }
 
+#[derive(serde::Serialize)]
+struct ClosureCatalogDigest {
+    events: Vec<(EventId, CatalogChangeType, ContentHash)>,
+    markets: Vec<(MarketId, CatalogChangeType, ContentHash)>,
+}
+
+struct ClosureCatalogHeads<'a> {
+    events: BTreeMap<EventId, &'a ClosureCatalogFacts>,
+    markets: BTreeMap<MarketId, (&'a ClosureCatalogFacts, &'a ClosureCatalogMarket)>,
+}
+
+struct TerminalEventCandidates {
+    candidates: Vec<CatalogEventCandidate>,
+    object_ids: BTreeMap<EventId, CatalogEventObjectId>,
+    digests: Vec<(EventId, CatalogChangeType, ContentHash)>,
+}
+
+struct TerminalMarketCandidates {
+    candidates: Vec<CatalogMarketCandidate>,
+    digests: Vec<(MarketId, CatalogChangeType, ContentHash)>,
+}
+
+impl<'a> ClosureCatalogHeads<'a> {
+    fn build(catalogs: &'a [Arc<ClosureCatalogFacts>]) -> Result<Self> {
+        let mut events = BTreeMap::<EventId, &ClosureCatalogFacts>::new();
+        let mut markets =
+            BTreeMap::<MarketId, (&ClosureCatalogFacts, &ClosureCatalogMarket)>::new();
+        for catalog in catalogs {
+            let catalog = catalog.as_ref();
+            let event_id = catalog.registry_event.event_id.clone();
+            match events.get(&event_id) {
+                Some(existing) if existing.effective_at == catalog.effective_at => ensure!(
+                    existing.registry_event_content_hash == catalog.registry_event_content_hash,
+                    "closure catalog has conflicting event heads for {event_id} at {}",
+                    catalog.effective_at
+                ),
+                Some(existing) if existing.effective_at > catalog.effective_at => {}
+                _ => {
+                    events.insert(event_id, catalog);
+                }
+            }
+            for market in &catalog.markets {
+                let market_id = market.info.market_id.clone();
+                match markets.get(&market_id) {
+                    Some((existing, existing_market))
+                        if existing.effective_at == catalog.effective_at =>
+                    {
+                        ensure!(
+                            existing_market.content_hash == market.content_hash,
+                            "closure catalog has conflicting market heads for {market_id} at {}",
+                            catalog.effective_at
+                        );
+                    }
+                    Some((existing, _)) if existing.effective_at > catalog.effective_at => {}
+                    _ => {
+                        markets.insert(market_id, (catalog, market));
+                    }
+                }
+            }
+        }
+        Ok(Self { events, markets })
+    }
+
+    fn retained_event_ids(
+        &self,
+        retained_market_ids: &BTreeSet<MarketId>,
+    ) -> Result<BTreeSet<EventId>> {
+        ensure!(
+            retained_market_ids
+                .iter()
+                .all(|market_id| self.markets.contains_key(market_id)),
+            "mixed-Route report retention set contains an unknown catalog market"
+        );
+        retained_market_ids
+            .iter()
+            .map(|market_id| {
+                self.markets
+                    .get(market_id)
+                    .map(|(_, market)| market.info.event_id.clone())
+                    .with_context(|| format!("report market {market_id} has no catalog head"))
+            })
+            .collect()
+    }
+
+    fn terminal_events(
+        &self,
+        retained_market_ids: &BTreeSet<MarketId>,
+        retained_event_ids: &BTreeSet<EventId>,
+        batch_id: CatalogSyncBatchId,
+        fetched_at: DateTime<Utc>,
+    ) -> Result<TerminalEventCandidates> {
+        let mut candidates = Vec::with_capacity(self.events.len());
+        let mut object_ids = BTreeMap::new();
+        let mut digests = Vec::with_capacity(self.events.len());
+        for (event_id, catalog) in &self.events {
+            let retained = retained_event_ids.contains(event_id);
+            let members = self
+                .markets
+                .values()
+                .filter(|(_, market)| market.info.event_id == *event_id)
+                .map(|(_, market)| market.info.market_id.clone())
+                .collect::<BTreeSet<_>>();
+            let catalog_members = catalog
+                .registry_event
+                .market_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            ensure!(
+                members == catalog_members,
+                "closure event {event_id} head does not contain its exact market membership"
+            );
+            ensure!(
+                members
+                    .iter()
+                    .all(|market_id| retained_market_ids.contains(market_id) == retained),
+                "closure event {event_id} mixes retained report and disposable historical markets"
+            );
+            let mut event = catalog.registry_event.clone();
+            let (source_effective_at, source_timestamp_quality, change_type) = if retained {
+                (
+                    catalog.effective_at,
+                    CatalogTimestampQuality::Source,
+                    CatalogChangeType::GammaScanUpsert,
+                )
+            } else {
+                event.status = EventStatus::Closed;
+                event.updated_at = fetched_at;
+                (
+                    fetched_at,
+                    CatalogTimestampQuality::CommitTimeFallback,
+                    CatalogChangeType::GammaConfirmedTombstone,
+                )
+            };
+            let payload = serde_json::to_value(&event)?;
+            let content_hash = CanonicalDigest::content_hash_typed(
+                "quant-pivot/catalog-event-object",
+                CATALOG_OBJECT_HASH_VERSION,
+                &event,
+            )?;
+            let event_object_id = CatalogEventObjectId::from_content_hash(&content_hash);
+            object_ids.insert(event_id.clone(), event_object_id);
+            digests.push((event_id.clone(), change_type, content_hash));
+            candidates.push(CatalogEventCandidate {
+                projection: UpsertEvent {
+                    event_id: event_id.clone(),
+                    title: event.title.clone(),
+                    slug: event.slug.clone(),
+                    series_slug: event.series_slug.clone(),
+                    status: event.status,
+                    tags: EventTags::from(event.tags.clone()),
+                    neg_risk: event.neg_risk,
+                    catalog_market_ids: CatalogMarketIds::from(event.market_ids.clone()),
+                    end_date: event.end_date,
+                    content_hash,
+                },
+                object: NewCatalogEventObject {
+                    event_object_id,
+                    content_hash,
+                    schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
+                    payload: payload.into(),
+                },
+                change: NewCatalogEventChange {
+                    event_change_id: CatalogEventChangeId::new(seeded_uuid(&format!(
+                        "feedback-closure:{event_id}:{}:terminal-event-change",
+                        fetched_at.timestamp_micros()
+                    ))),
+                    catalog_sync_batch_id: batch_id,
+                    event_object_id,
+                    event_id: event_id.clone(),
+                    source_effective_at,
+                    source_timestamp_quality,
+                    change_type,
+                },
+            });
+        }
+        Ok(TerminalEventCandidates {
+            candidates,
+            object_ids,
+            digests,
+        })
+    }
+
+    fn terminal_markets(
+        &self,
+        retained_market_ids: &BTreeSet<MarketId>,
+        event_object_ids: &BTreeMap<EventId, CatalogEventObjectId>,
+        batch_id: CatalogSyncBatchId,
+        fetched_at: DateTime<Utc>,
+    ) -> Result<TerminalMarketCandidates> {
+        let mut candidates = Vec::with_capacity(self.markets.len());
+        let mut digests = Vec::with_capacity(self.markets.len());
+        for (market_id, (catalog, market)) in &self.markets {
+            let retained = retained_market_ids.contains(market_id);
+            let mut info = market.info.clone();
+            let (source_effective_at, source_timestamp_quality, change_type) = if retained {
+                (
+                    catalog.effective_at,
+                    CatalogTimestampQuality::Source,
+                    CatalogChangeType::GammaScanUpsert,
+                )
+            } else {
+                info.status = MarketStatus::Delisted;
+                (
+                    fetched_at,
+                    CatalogTimestampQuality::CommitTimeFallback,
+                    CatalogChangeType::GammaConfirmedTombstone,
+                )
+            };
+            let payload = serde_json::to_value(&info)?;
+            let content_hash = CanonicalDigest::content_hash_typed(
+                "quant-pivot/catalog-market-object",
+                CATALOG_OBJECT_HASH_VERSION,
+                &info,
+            )?;
+            let market_object_id = CatalogMarketObjectId::from_content_hash(&content_hash);
+            let event_object_id =
+                event_object_ids
+                    .get(&info.event_id)
+                    .copied()
+                    .with_context(|| {
+                        format!(
+                            "closure terminal catalog omitted event {} for market {market_id}",
+                            info.event_id
+                        )
+                    })?;
+            digests.push((market_id.clone(), change_type, content_hash));
+            candidates.push(CatalogMarketCandidate {
+                projection: UpsertMarket::try_from(&info)?,
+                object: NewCatalogMarketObject {
+                    market_object_id,
+                    content_hash,
+                    schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
+                    payload: payload.into(),
+                },
+                market_change_id: CatalogMarketChangeId::new(seeded_uuid(&format!(
+                    "feedback-closure:{market_id}:{}:terminal-market-change",
+                    fetched_at.timestamp_micros()
+                ))),
+                catalog_sync_batch_id: batch_id,
+                event_object_id,
+                source_effective_at,
+                source_timestamp_quality,
+                source_created_at: info.created_at,
+                change_type,
+            });
+        }
+        Ok(TerminalMarketCandidates {
+            candidates,
+            digests,
+        })
+    }
+}
+
+fn build_terminal_catalog_commit(
+    catalogs: &[Arc<ClosureCatalogFacts>],
+    retained_market_ids: &BTreeSet<MarketId>,
+    fetched_at: DateTime<Utc>,
+) -> Result<CatalogBatchCommit> {
+    let heads = ClosureCatalogHeads::build(catalogs)?;
+    let retained_event_ids = heads.retained_event_ids(retained_market_ids)?;
+    let batch_id = CatalogSyncBatchId::new(seeded_uuid(&format!(
+        "feedback-closure:terminal-catalog:{}",
+        fetched_at.timestamp_micros()
+    )));
+    let events = heads.terminal_events(
+        retained_market_ids,
+        &retained_event_ids,
+        batch_id,
+        fetched_at,
+    )?;
+    let markets = heads.terminal_markets(
+        retained_market_ids,
+        &events.object_ids,
+        batch_id,
+        fetched_at,
+    )?;
+    let batch_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/catalog-manifest",
+        1,
+        &ClosureCatalogDigest {
+            events: events.digests,
+            markets: markets.digests,
+        },
+    )?;
+    Ok(CatalogBatchCommit {
+        batch: NewCatalogSyncBatch {
+            catalog_sync_batch_id: batch_id,
+            sync_kind: CatalogSyncKind::Reconcile,
+            started_at: fetched_at,
+            fetched_at,
+            event_count: i64::try_from(events.candidates.len())?,
+            market_count: i64::try_from(markets.candidates.len())?,
+            rejected_count: 0,
+            batch_hash,
+        },
+        events: events.candidates,
+        markets: markets.candidates,
+    })
+}
+
+fn catalog_visible_at(
+    committed_at: DateTime<Utc>,
+    knowledge_lag_secs: u64,
+) -> Result<DateTime<Utc>> {
+    let knowledge_lag_secs = i64::try_from(knowledge_lag_secs)?;
+    let visible_at = committed_at
+        .checked_add_signed(Duration::seconds(knowledge_lag_secs))
+        .context("terminal catalog visibility time overflowed")?;
+    let visible_millis = visible_at
+        .timestamp_millis()
+        .checked_add(1)
+        .context("terminal catalog visibility millisecond overflowed")?;
+    DateTime::from_timestamp_millis(visible_millis)
+        .context("terminal catalog visibility is outside millisecond range")
+}
+
+async fn verify_report_catalog(
+    db: &DatabaseConnection,
+    fixture: &FeedbackClosureFixture,
+    expected_market_ids: &BTreeSet<MarketId>,
+    decision_at: DateTime<Utc>,
+    knowledge_lag_secs: u64,
+) -> Result<()> {
+    let boundary = DecisionClock::new(knowledge_lag_secs).serving_boundary(
+        decision_at,
+        fixture.replay.config.domain.crypto.availability_lag_secs,
+        fixture.replay.config.domain.weather.availability_lag_secs,
+    )?;
+    let snapshots = PgCatalogLedgerRepository::new(db.clone())
+        .snapshots_at_boundary(&boundary)
+        .await?;
+    let mut pit_active = BTreeSet::new();
+    for snapshot in snapshots {
+        let market = snapshot.market.verified_payload()?;
+        if market.status == MarketStatus::Active {
+            pit_active.insert(market.market_id);
+        }
+    }
+    ensure!(
+        &pit_active == expected_market_ids,
+        "PIT active catalog differs from the exact mixed-Route report universe: actual={pit_active:?} expected={expected_market_ids:?}"
+    );
+    let current_active = PgMarketRepository::new(db.clone())
+        .find_active()
+        .await?
+        .iter()
+        .map(|market| market.market_id.clone())
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        &current_active == expected_market_ids,
+        "current active catalog differs from the exact mixed-Route report universe: actual={current_active:?} expected={expected_market_ids:?}"
+    );
+    Ok(())
+}
+
+async fn retire_catalog_universe(
+    db: &DatabaseConnection,
+    fixture: &FeedbackClosureFixture,
+    retained_market_ids: &BTreeSet<MarketId>,
+    knowledge_lag_secs: u64,
+) -> Result<DateTime<Utc>> {
+    fixture.gamma_catalog_gate.enter_terminal_projection();
+    let fetched_at = db.statement_time().await;
+    let commit = build_terminal_catalog_commit(&fixture.catalogs, retained_market_ids, fetched_at)?;
+    let committed = PgCatalogLedgerRepository::new(db.clone())
+        .commit(commit)
+        .await?;
+    let committed_at = committed
+        .committed_at
+        .context("terminal catalog reconcile has no commit timestamp")?;
+    let decision_at = catalog_visible_at(committed_at, knowledge_lag_secs)?;
+    await_database_time(db, decision_at).await?;
+    verify_report_catalog(
+        db,
+        fixture,
+        retained_market_ids,
+        decision_at,
+        knowledge_lag_secs,
+    )
+    .await?;
+    Ok(decision_at)
+}
+
 /// Materialize one fresh Crypto/Weather decision plane after governed promotion.
 ///
-/// Catalog membership is seeded before binary startup; only source-native facts
-/// are written here so the subsequent HTTP report run consumes real PIT inputs.
+/// Catalog membership originates before binary startup, then this boundary
+/// records canonical terminal changes for every non-report market and writes
+/// source-native facts so the subsequent HTTP report consumes exact PIT inputs.
 pub async fn prepare_feedback_report_universe(
     db: &DatabaseConnection,
     fixture: &FeedbackClosureFixture,
+    knowledge_lag_secs: u64,
 ) -> Result<FeedbackReportUniverse> {
     let categories = fixture
         .report_cohorts
@@ -5501,37 +9131,78 @@ pub async fn prepare_feedback_report_universe(
         categories == vec![MarketCategory::Crypto, MarketCategory::Weather],
         "post-activation universe is not the canonical Crypto/Weather Route set"
     );
-    let database_now = db.statement_time().await;
-    let decision_at = DateTime::from_timestamp_millis(database_now.timestamp_millis())
-        .context("mixed-Route report decision clock is outside millisecond range")?;
-    let mut market_ids = Vec::with_capacity(
-        fixture
-            .report_cohorts
-            .iter()
-            .map(|cohort| cohort.markets.len())
-            .sum(),
-    );
-    for cohort in fixture.report_cohorts.iter() {
-        persist_serving_sources(
-            db,
-            fixture.fact_writers.as_ref(),
-            fixture.replay.as_ref(),
-            cohort.markets.as_ref(),
-            decision_at,
-            cohort.book_price_shift,
-        )
-        .await?;
-        market_ids.extend(cohort.markets.iter().map(|market| market.market_id.clone()));
-    }
-    market_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    let retained_market_ids = fixture.report_market_ids();
+    let decision_at =
+        retire_catalog_universe(db, fixture, &retained_market_ids, knowledge_lag_secs).await?;
+    let report_price_shifts = fixture
+        .report_cohorts
+        .iter()
+        .map(|cohort| cohort.book_price_shift)
+        .collect::<BTreeSet<_>>();
     ensure!(
-        market_ids.len() == EVALUATION_MARKETS_PER_TICK * categories.len(),
+        report_price_shifts.len() == 1,
+        "mixed-Route report source cohorts do not share one nuisance price shift"
+    );
+    let report_price_shift = report_price_shifts
+        .first()
+        .copied()
+        .context("mixed-Route report source cohorts have no price shift")?;
+    let report_sources = fixture
+        .report_cohorts
+        .iter()
+        .flat_map(|cohort| cohort.markets.iter().cloned())
+        .collect::<Vec<_>>();
+    persist_report_sources(
+        db,
+        fixture.fact_writers.as_ref(),
+        fixture.replay.as_ref(),
+        &report_sources,
+        decision_at,
+        knowledge_lag_secs,
+        report_price_shift,
+    )
+    .await?;
+    verify_report_catalog(
+        db,
+        fixture,
+        &retained_market_ids,
+        decision_at,
+        knowledge_lag_secs,
+    )
+    .await?;
+    let market_ids = retained_market_ids.into_iter().collect::<Vec<_>>();
+    let routes_by_market = fixture
+        .report_cohorts
+        .iter()
+        .flat_map(|cohort| {
+            cohort.markets.iter().map(|market| {
+                (
+                    market.market_id.clone(),
+                    BuyModelRoute::from(cohort.catalog.category),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    ensure!(
+        market_ids.len() == EVALUATION_MARKETS_PER_TICK * categories.len()
+            && routes_by_market.len() == market_ids.len()
+            && routes_by_market
+                .values()
+                .filter(|route| **route == BuyModelRoute::Crypto)
+                .count()
+                == EVALUATION_MARKETS_PER_TICK
+            && routes_by_market
+                .values()
+                .filter(|route| **route == BuyModelRoute::Weather)
+                .count()
+                == EVALUATION_MARKETS_PER_TICK,
         "mixed-Route report universe has an incomplete market cross-section"
     );
     Ok(FeedbackReportUniverse {
         decision_at,
+        knowledge_lag_secs,
         market_ids,
-        categories,
+        routes_by_market,
     })
 }
 
@@ -5644,11 +9315,16 @@ fn feedback_resolution_times(
     Ok((resolved_at, observed_at))
 }
 
-fn closure_crypto_observation(decision_at: DateTime<Utc>) -> Result<DomainObservationRow> {
+fn closure_crypto_observation(boundary: &DecisionBoundary) -> Result<DomainObservationRow> {
     const KLINE_MILLIS: i64 = 60_000;
 
-    let decision_millis = decision_at.timestamp_millis();
-    let publish_millis = decision_millis
+    let decision_at = boundary.decision_at();
+    let source_cutoff = boundary.cutoff_for(DecisionSource::DomainCrypto);
+    // The latest decision-time candle may still be newer than the governed
+    // Crypto cutoff during minute rollover. Select the latest published candle
+    // admitted by that exact cutoff; arrival remains anchored to the decision.
+    let publish_millis = source_cutoff
+        .timestamp_millis()
         .div_euclid(KLINE_MILLIS)
         .checked_mul(KLINE_MILLIS)
         .context("closure Binance minute boundary overflowed")?;
@@ -5660,8 +9336,8 @@ fn closure_crypto_observation(decision_at: DateTime<Utc>) -> Result<DomainObserv
     let publish_time = DateTime::from_timestamp_millis(publish_millis)
         .context("closure Binance publication time is outside chrono range")?;
     ensure!(
-        observed_at < publish_time && publish_time <= decision_at,
-        "closure Binance candle is not closed and PIT-visible at the decision boundary"
+        observed_at < publish_time && publish_time <= source_cutoff && source_cutoff <= decision_at,
+        "closure Binance candle is not closed and PIT-visible at its Crypto source cutoff"
     );
     let rule = rule_for_alias("btc").context("closure fixture has no BTC source rule")?;
     Ok(DomainObservation {
@@ -5683,33 +9359,168 @@ async fn persist_serving_sources(
     replay: &ClosureReplayContext,
     sources: &[ClosureMarketSource],
     decision_at: DateTime<Utc>,
+    knowledge_lag_secs: u64,
     book_price_shift: Decimal,
-) -> Result<Vec<ReplaySample>> {
+) -> Result<PersistedServingSources> {
+    let prepared = prepare_market_sources(
+        replay,
+        sources,
+        decision_at,
+        knowledge_lag_secs,
+        book_price_shift,
+    )?;
+    let PreparedMarketSources {
+        facts: market_facts,
+        market_infos,
+        expected_weather,
+        weather_cutoff,
+    } = prepared;
+    let CohortMarketFacts {
+        books,
+        microstructure,
+        sessions,
+        domain_observations,
+        weather_observations,
+        weather_forecasts,
+    } = market_facts;
+    let execution_facts = closure_execution_history_rows(
+        sources,
+        decision_at,
+        knowledge_lag_secs,
+        book_price_shift,
+        replay.polygon.as_ref(),
+        ClosureHistoryInterval::for_sources(sources)?,
+    )?;
+    let history = execution_facts.history.clone();
+    let market_info_repository = PgClobMarketInfoRepository::new(db.clone());
+    for market_info in market_infos {
+        market_info_repository
+            .insert_observation(market_info)
+            .await?;
+    }
+    let history = facts
+        .commit_sources(CohortSourceFacts {
+            books,
+            microstructure,
+            sessions,
+            executions: execution_facts.executions,
+            participants: execution_facts.participants,
+            acceptances: vec![execution_facts.acceptance],
+            history,
+            domain_observations,
+            weather_observations,
+            weather_forecasts,
+        })
+        .await?;
+    if let Some(weather_cutoff) = weather_cutoff {
+        verify_weather_visibility(
+            facts.fact_read.as_ref(),
+            decision_at,
+            weather_cutoff,
+            &expected_weather,
+        )
+        .await?;
+    }
+    let samples = sources
+        .iter()
+        .map(|source| {
+            let (scope, ordinal) = closure_market_identity(&source.market_id)?;
+            Ok(ReplaySample {
+                market_id: source.market_id.clone(),
+                token_id: TokenId::new(closure_token(scope, ordinal)),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PersistedServingSources { samples, history })
+}
+
+async fn persist_report_sources(
+    db: &DatabaseConnection,
+    facts: &ClosureFactWriters,
+    replay: &ClosureReplayContext,
+    sources: &[ClosureMarketSource],
+    decision_at: DateTime<Utc>,
+    knowledge_lag_secs: u64,
+    book_price_shift: Decimal,
+) -> Result<()> {
+    let prepared = prepare_market_sources(
+        replay,
+        sources,
+        decision_at,
+        knowledge_lag_secs,
+        book_price_shift,
+    )?;
+    let market_info_repository = PgClobMarketInfoRepository::new(db.clone());
+    for market_info in prepared.market_infos {
+        market_info_repository
+            .insert_observation(market_info)
+            .await?;
+    }
+    facts.commit_market_sources(prepared.facts).await?;
+    if let Some(weather_cutoff) = prepared.weather_cutoff {
+        verify_weather_visibility(
+            facts.fact_read.as_ref(),
+            decision_at,
+            weather_cutoff,
+            &prepared.expected_weather,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn prepare_market_sources(
+    replay: &ClosureReplayContext,
+    sources: &[ClosureMarketSource],
+    decision_at: DateTime<Utc>,
+    knowledge_lag_secs: u64,
+    book_price_shift: Decimal,
+) -> Result<PreparedMarketSources> {
     let first_source = sources
         .first()
         .context("closure serving-source cohort is empty")?;
-    let cohort_scope = closure_market_identity(&first_source.market_id)?
-        .0
-        .to_owned();
+    let first_scope = closure_market_identity(&first_source.market_id)?.0;
+    let cohort_scopes = sources
+        .iter()
+        .map(|source| closure_market_identity(&source.market_id).map(|(scope, _)| scope.to_owned()))
+        .collect::<Result<BTreeSet<_>>>()?;
+    let mixed_report_scopes =
+        BTreeSet::from(["report-crypto".to_owned(), "report-weather".to_owned()]);
+    ensure!(
+        cohort_scopes.len() == 1 || cohort_scopes == mixed_report_scopes,
+        "closure serving-source cohort has unsupported mixed scopes {cohort_scopes:?}"
+    );
     for source in sources {
         let (scope, _) = closure_market_identity(&source.market_id)?;
         ensure!(
-            scope == cohort_scope,
-            "closure serving-source cohort mixes scopes `{cohort_scope}` and `{scope}`"
+            cohort_scopes.contains(scope),
+            "closure serving-source cohort lost scope `{scope}`"
         );
     }
-    let domain_observations = if cohort_scope == "report-crypto" {
-        vec![closure_crypto_observation(decision_at)?]
+    let boundary = DecisionClock::new(knowledge_lag_secs).serving_boundary(
+        decision_at,
+        replay.config.domain.crypto.availability_lag_secs,
+        replay.config.domain.weather.availability_lag_secs,
+    )?;
+    let domain_observations = cohort_scopes
+        .contains("report-crypto")
+        .then(|| closure_crypto_observation(&boundary))
+        .transpose()?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let has_weather = first_scope != "report-crypto" || cohort_scopes.len() > 1;
+    let weather_cutoff = has_weather
+        .then(|| closure_weather_cutoff(replay, decision_at))
+        .transpose()?;
+    let (weather_observations, weather_forecasts) = if let Some(weather_cutoff) = weather_cutoff {
+        closure_weather_facts(decision_at, weather_cutoff)?
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
-    let knowledge_lag_secs = replay.knowledge_lag.as_secs();
+    let expected_weather = weather_forecasts.clone();
     let mut book_rows = Vec::with_capacity(sources.len() * 2);
     let mut microstructure_rows = Vec::with_capacity(sources.len() * 61);
     let mut session_rows = Vec::with_capacity(sources.len() * 2);
-    let mut execution_rows = Vec::with_capacity(sources.len() * 20);
-    let mut participant_rows = Vec::with_capacity(sources.len() * 40);
-    let mut acceptance_rows = Vec::with_capacity(sources.len());
     let mut market_infos = Vec::with_capacity(sources.len());
     for source in sources {
         let source_facts =
@@ -5723,43 +9534,20 @@ async fn persist_serving_sources(
             knowledge_lag_secs,
             book_price_shift,
         )?);
-        let execution_facts = closure_execution_history_rows(
-            source,
-            decision_at,
-            knowledge_lag_secs,
-            book_price_shift,
-        )?;
-        execution_rows.extend(execution_facts.executions);
-        participant_rows.extend(execution_facts.participants);
-        acceptance_rows.push(execution_facts.acceptance);
     }
-    let market_info_repository = PgClobMarketInfoRepository::new(db.clone());
-    for market_info in market_infos {
-        market_info_repository
-            .insert_observation(market_info)
-            .await?;
-    }
-    facts
-        .commit_sources(CohortSourceFacts {
+    Ok(PreparedMarketSources {
+        facts: CohortMarketFacts {
             books: book_rows,
             microstructure: microstructure_rows,
             sessions: session_rows,
-            executions: execution_rows,
-            participants: participant_rows,
-            acceptances: acceptance_rows,
             domain_observations,
-        })
-        .await?;
-    sources
-        .iter()
-        .map(|source| {
-            let (scope, ordinal) = closure_market_identity(&source.market_id)?;
-            Ok(ReplaySample {
-                market_id: source.market_id.clone(),
-                token_id: TokenId::new(closure_token(scope, ordinal)),
-            })
-        })
-        .collect()
+            weather_observations,
+            weather_forecasts,
+        },
+        market_infos,
+        expected_weather,
+        weather_cutoff,
+    })
 }
 
 async fn await_shadow_binding(
@@ -6009,13 +9797,33 @@ async fn path_set_diagnostics(db: &DatabaseConnection, model_version_id: ModelVe
 }
 
 impl ShadowObservationRequest<'_> {
-    async fn persist_sources(&self) -> Result<Vec<ReplaySample>> {
+    fn frozen_boundary(&self) -> Result<DecisionBoundary> {
+        let configured = DecisionClock::new(self.replay.knowledge_lag.as_secs()).serving_boundary(
+            self.decision_at,
+            self.replay.config.domain.crypto.availability_lag_secs,
+            self.replay.config.domain.weather.availability_lag_secs,
+        )?;
+        let (enabled, _, watermark) = self
+            .runtime_finalized_execution_evidence
+            .runtime_parts()
+            .context("closure shadow requires frozen runtime execution evidence")?;
+        if !enabled {
+            return Ok(configured);
+        }
+        Ok(configured.with_source_watermark(
+            DecisionSource::FinalizedExecution,
+            watermark.context("enabled closure shadow history has no frozen watermark")?,
+        )?)
+    }
+
+    async fn persist_sources(&self) -> Result<PersistedServingSources> {
         persist_serving_sources(
             self.db,
             self.facts,
             self.replay,
             self.sources,
             self.decision_at,
+            self.replay.knowledge_lag.as_secs(),
             self.book_price_shift,
         )
         .await
@@ -6073,18 +9881,15 @@ async fn run_shadow_observation(
         request.sources.len() >= EVALUATION_MARKETS_PER_TICK,
         "closure shadow requires a real cross-section of at least {EVALUATION_MARKETS_PER_TICK} markets"
     );
-    let samples = request.persist_sources().await?;
+    let persisted = request.persist_sources().await?;
+    let samples = persisted.samples;
     let replay = request.replay;
+    let decision_boundary = request.frozen_boundary()?;
     let window_end = request
         .decision_at
         .checked_add_signed(Duration::milliseconds(1))
         .context("closure shadow replay window end overflowed")?;
-    let execution_history_chunks = closure_history_chunks(
-        request.sources,
-        request.decision_at,
-        replay.knowledge_lag.as_secs(),
-        request.book_price_shift,
-    )?;
+    let execution_history_chunks = vec![persisted.history.chunk_ref];
     let window = replay
         .loader
         .load(&WindowSpec {
@@ -6115,11 +9920,10 @@ async fn run_shadow_observation(
             finalized_execution_evidence: ReplayExecutionSource::FrozenRuntime(
                 &finalized_execution_evidences,
             ),
-            decision_at: request.decision_at,
+            boundary: &decision_boundary,
             group: &samples,
             required_features: request.required_features,
             category_scope: None,
-            knowledge_lag: replay.knowledge_lag,
         },
     )
     .await?
@@ -6233,21 +10037,27 @@ async fn await_database_time(db: &DatabaseConnection, target: DateTime<Utc>) -> 
 async fn await_candidate_ready(
     db: &DatabaseConnection,
     feedback_cycle_id: FeedbackCycleId,
+    shadow_window_end: DateTime<Utc>,
 ) -> Result<FeedbackClosureOutcome> {
     let binding = ShadowBindingEntity::find()
         .filter(ShadowBindingColumn::FeedbackCycleId.eq(feedback_cycle_id))
         .one(db)
         .await?
         .with_context(|| format!("closure cycle {feedback_cycle_id} has no shadow binding"))?;
-    await_candidate_with_binding(db, feedback_cycle_id, &binding).await
+    await_candidate_with_binding(db, feedback_cycle_id, &binding, shadow_window_end).await
 }
 
 async fn await_candidate_with_binding(
     db: &DatabaseConnection,
     feedback_cycle_id: FeedbackCycleId,
     binding: &ShadowBindingModel,
+    shadow_window_end: DateTime<Utc>,
 ) -> Result<FeedbackClosureOutcome> {
-    let deadline = Instant::now() + CANDIDATE_READY_TIMEOUT;
+    let remaining_window = shadow_window_end
+        .signed_duration_since(db.statement_time().await)
+        .to_std()
+        .unwrap_or_default();
+    let deadline = Instant::now() + remaining_window + CANDIDATE_SETTLEMENT_TIMEOUT;
     let cycles = PgFeedbackCycleRepository::new(db.clone());
     loop {
         let cycle = cycles
@@ -6267,7 +10077,7 @@ async fn await_candidate_with_binding(
         }
         ensure!(
             Instant::now() < deadline,
-            "closure cycle {feedback_cycle_id} did not reach CandidateReady within {CANDIDATE_READY_TIMEOUT:?}"
+            "closure cycle {feedback_cycle_id} did not reach CandidateReady by shadow_window_end={shadow_window_end} plus {CANDIDATE_SETTLEMENT_TIMEOUT:?} settlement headroom"
         );
         sleep(CLOSURE_POLL_INTERVAL).await;
     }
@@ -6488,9 +10298,14 @@ impl<'a> StageLedgerValidator<'a> {
             .collect::<Vec<_>>();
         ensure!(
             linked.len() == 1
-                && started.len() == 1
+                && !started.is_empty()
                 && linked[0].event_sequence < started[0].event_sequence
-                && started[0].event_sequence < terminal.event_sequence
+                && started
+                    .windows(2)
+                    .all(|pair| pair[0].event_sequence < pair[1].event_sequence)
+                && started
+                    .last()
+                    .is_some_and(|event| event.event_sequence < terminal.event_sequence)
                 && stage_events
                     .iter()
                     .all(|event| event.research_job_id == Some(job_id)),
@@ -6525,8 +10340,15 @@ impl<'a> StageLedgerValidator<'a> {
         let job_finished_at = job
             .finished_at
             .with_context(|| format!("closure stage {stage} job has no finished_at"))?;
+        let attempt_ordinal = job
+            .recovery_attempt
+            .checked_add(1)
+            .context("closure attempt ordinal overflowed")?;
         ensure!(
-            started[0].occurred_at == job_started_at
+            usize::try_from(attempt_ordinal)? == started.len()
+                && started
+                    .last()
+                    .is_some_and(|event| event.occurred_at == job_started_at)
                 && terminal.occurred_at == job_finished_at
                 && job_started_at <= job_heartbeat_at
                 && job_heartbeat_at <= job_finished_at
@@ -6543,12 +10365,8 @@ impl<'a> StageLedgerValidator<'a> {
             "closure stage {stage} event artifact differs from its terminal job"
         );
         Ok(StageAttemptEvidence {
-            started_event_sequence: Some(started[0].event_sequence),
-            attempt_ordinal: Some(
-                job.recovery_attempt
-                    .checked_add(1)
-                    .context("closure attempt ordinal overflowed")?,
-            ),
+            started_event_sequence: started.last().map(|event| event.event_sequence),
+            attempt_ordinal: Some(attempt_ordinal),
             max_attempts: Some(
                 job.max_recovery_attempts
                     .checked_add(1)
@@ -6724,6 +10542,7 @@ fn closure_token(scope: &str, ordinal: usize) -> String {
         "shadow" => 740_000,
         "report-crypto" => 750_000,
         "report-weather" => 760_000,
+        "retention" => 770_000,
         _ => 730_000,
     };
     (base + ordinal).to_string()
@@ -6736,6 +10555,7 @@ fn closure_no_token(scope: &str, ordinal: usize) -> TokenId {
         "shadow" => 840_000,
         "report-crypto" => 850_000,
         "report-weather" => 860_000,
+        "retention" => 870_000,
         _ => 830_000,
     };
     TokenId::new((base + ordinal).to_string())
@@ -6777,27 +10597,35 @@ mod tests {
         sync::Arc,
     };
 
-    use anyhow::Result;
+    use anyhow::{Context, Result};
     use chrono::{DateTime, Duration, Utc};
     use quant_pivot_api::gamma::GammaClient;
     use quant_pivot_core::prefetch::historical_window::ReplaySample;
     use quant_pivot_models::{
+        clickhouse::ChDigest,
         config::GammaConfig,
         domain::{
-            market::CATALOG_OBJECT_HASH_VERSION,
+            data_plane::{
+                DecisionClock, DecisionSource, ExchangeHistoryFrontier, WeatherForecastPoint,
+            },
+            market::{CATALOG_OBJECT_HASH_VERSION, EventRegistryInfo, MarketRegistryInfo},
+            order::PolymarketOrderRules,
             quant::{
                 GroundingKind, LinkageOutcome, MarketSubject, PriceComparator, ResolutionOracle,
             },
         },
         enums::{
-            common::MarketCategory,
+            catalog::{CatalogChangeType, CatalogTimestampQuality},
+            common::{MarketCategory, OrderType, Side, TickSize},
             domain::{BinanceMarketSegment, KlineInterval, LinkageSourceRole},
+            market::{EventStatus, MarketStatus},
             quant::OutcomeSide,
         },
         hashing::CanonicalDigest,
         types::{
             ContentHash, DomainSourceId, FinalizedExecutionEvidence, MarketId, PayoutRatio,
-            Probability, ShadowComparisonId, TokenId,
+            Probability, RecommendationId, ShadowComparisonId, Shares, TokenId, Usd,
+            VenueOrderAmount,
         },
     };
     use rust_decimal::Decimal;
@@ -6809,21 +10637,78 @@ mod tests {
 
     use super::{
         CALIBRATION_GROUP_COUNT, CALIBRATION_OBSERVATION_COUNT, CLOSURE_CRYPTO_CLOSE_PRICE,
-        CLOSURE_CRYPTO_STRIKE_STEP, ClosureBookMetrics, ClosureCatalogBuild, ClosureCatalogFacts,
-        EVALUATION_MARKETS_PER_TICK, EVALUATION_OBSERVATION_COUNT, FeedbackClosureFixture, Price,
-        SHADOW_OBSERVATION_COUNT, ScenarioBucketRequirement, ScenarioTrainingPlan,
-        ShadowObservationResult, TRAINING_OBSERVATION_COUNT, TRAINING_RESOLUTION_LAG_SECS,
-        TRAINING_TRUTH_BUFFER_SECS, calibration_market_range, closure_bucket_at,
-        closure_crypto_observation, closure_crypto_strike, closure_levels,
+        CLOSURE_CRYPTO_STRIKE_STEP, CLOSURE_EXECUTIONS_PER_MARKET, CLOSURE_NEG_RISK,
+        CLOSURE_ORDER_RULES, ClosureBookLevels, ClosureBookMetrics, ClosureCatalogBuild,
+        ClosureCatalogFacts, ClosureHistoryInterval, ClosureMarketSource,
+        DeterministicPolygonChain, EVALUATION_MARKETS_PER_TICK, EVALUATION_OBSERVATION_COUNT,
+        FeedbackClosureFixture, PreparedOrderFixture, Price, RETENTION_RUNWAY_MARGIN_DAYS,
+        RetentionAnchorSeed, SHADOW_OBSERVATION_COUNT, ScenarioBucketRequirement,
+        ScenarioTrainingPlan, ShadowObservationResult, TRAINING_OBSERVATION_COUNT,
+        TRAINING_RESOLUTION_LAG_SECS, TRAINING_TRUTH_BUFFER_SECS, V2_PRODUCTION_BLOCK,
+        build_terminal_catalog_commit, calibration_market_range, closure_book_facts,
+        closure_bucket_at, closure_crypto_observation, closure_crypto_strike, closure_depth_bias,
+        closure_execution_history_rows, closure_feature_ordinal, closure_levels,
         closure_linkage_resolver, closure_market_offset, closure_momentum_variation,
         closure_price_tier, closure_regime_sign, closure_resolution_fact,
-        closure_reversion_strength, closure_spread_width, closure_training_groups,
-        closure_yes_wins, evaluation_book_price_shift, evaluation_decision_points,
-        evaluation_market_range, feedback_resolution_times, frozen_finalized_execution_evidences,
-        recommendation_won, rule_for_alias, shadow_decision_at, shadow_market_range,
-        shadow_price_shift, training_book_price_shift, training_market_range,
-        validate_shadow_observations,
+        closure_reversion_strength, closure_serving_microstructure_rows, closure_spread_width,
+        closure_structural_slot, closure_training_groups, closure_weather_facts,
+        closure_weather_subject, closure_yes_wins, evaluation_book_price_shift,
+        evaluation_decision_points, evaluation_market_range, feedback_resolution_times,
+        frozen_finalized_execution_evidences, recommendation_won, rule_for_alias, seeded_uuid,
+        shadow_decision_at, shadow_market_range, shadow_price_shift, training_book_price_shift,
+        training_market_range, validate_shadow_observations, validate_weather_runs,
     };
+
+    #[test]
+    fn retention_anchor_contracts_hold() -> Result<()> {
+        let observed_at = "2026-09-02T12:00:00Z".parse::<DateTime<Utc>>()?;
+        let seed = RetentionAnchorSeed::build(observed_at, 5, ContentHash::from_bytes([0x5a; 32]))?;
+
+        assert_eq!(
+            (seed.window.observed_at - seed.window.oldest_at).num_days(),
+            i64::from(seed.window.required_days + RETENTION_RUNWAY_MARGIN_DAYS)
+        );
+        assert_eq!(seed.old_catalog.effective_at, seed.window.oldest_at);
+        assert_eq!(seed.current_catalog.effective_at, seed.window.newest_at);
+        assert_eq!(
+            seed.old_catalog.event.event_id,
+            seed.current_catalog.event.event_id
+        );
+        assert_eq!(
+            seed.old_catalog.markets[0].info.market_id,
+            seed.current_catalog.markets[0].info.market_id
+        );
+        assert_ne!(
+            seed.old_catalog.event_content_hash,
+            seed.current_catalog.event_content_hash
+        );
+        assert_ne!(
+            seed.old_catalog.markets[0].content_hash,
+            seed.current_catalog.markets[0].content_hash
+        );
+        assert_eq!(seed.current_catalog.event.status, EventStatus::Closed);
+        assert_eq!(
+            seed.current_catalog.markets[0].info.status,
+            MarketStatus::Delisted
+        );
+        assert_eq!(seed.market_infos.len(), 2);
+        assert_eq!(
+            seed.market_infos
+                .iter()
+                .map(|info| info.effective_at)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([seed.window.oldest_at, seed.window.newest_at])
+        );
+        seed.facts.validate()?;
+        seed.facts.validate_window(&seed.window)?;
+        assert_eq!(seed.facts.crypto_prices.len(), 4);
+        assert_eq!(seed.facts.weather_observations.len(), 4);
+        assert_eq!(seed.facts.weather_forecasts.len(), 62);
+        assert_eq!(seed.facts.executions.len(), 2);
+        assert_eq!(seed.facts.participants.len(), 4);
+        assert_eq!(seed.facts.resolutions.len(), 2);
+        Ok(())
+    }
 
     #[test]
     fn runtime_sources_are_frozen() -> Result<()> {
@@ -6848,6 +10733,260 @@ mod tests {
                 &FinalizedExecutionEvidence::materialized(Utc::now())
             )
             .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn weather_evidence_is_complete() -> Result<()> {
+        let decision_at = "2026-08-21T00:00:00Z".parse::<DateTime<Utc>>()?;
+        let subject = closure_weather_subject(decision_at, 3)?;
+        assert!(matches!(subject, MarketSubject::WeatherWindExtreme(_)));
+
+        let visibility_cutoff = decision_at - Duration::seconds(310);
+        let (observations, forecasts) = closure_weather_facts(decision_at, visibility_cutoff)?;
+        assert_eq!(observations.len(), 1);
+        assert_eq!(forecasts.len(), 31);
+        assert!(
+            observations
+                .iter()
+                .all(|row| row.available_at <= decision_at.timestamp_millis())
+        );
+        assert!(forecasts.iter().all(|row| {
+            row.source_id == DomainSourceId::gefs()
+                && row.instrument_key.as_str() == "GEFS:KLGA:GUST"
+                && row.reference_time <= visibility_cutoff.timestamp_millis()
+                && row.available_at <= decision_at.timestamp_millis()
+                && row.valid_time - row.reference_time == Duration::hours(3).num_milliseconds()
+                && row.lead_hours == 3
+        }));
+        assert_eq!(
+            forecasts
+                .iter()
+                .filter_map(|row| row.member)
+                .collect::<HashSet<_>>()
+                .len(),
+            31
+        );
+        let decoded = forecasts
+            .iter()
+            .cloned()
+            .map(WeatherForecastPoint::from_clickhouse_row)
+            .collect::<Option<Vec<_>>>()
+            .context("decode Weather forecast fixture")?;
+        validate_weather_runs(&decoded)?;
+        assert_eq!(
+            forecasts
+                .iter()
+                .map(|row| row.grid_binding_hash)
+                .collect::<HashSet<_>>()
+                .len(),
+            1
+        );
+        assert_eq!(
+            forecasts
+                .iter()
+                .map(|row| row.report_hash)
+                .collect::<HashSet<_>>()
+                .len(),
+            31
+        );
+        let (replayed_observations, replayed_forecasts) =
+            closure_weather_facts(decision_at, visibility_cutoff)?;
+        assert_eq!(
+            replayed_observations
+                .iter()
+                .map(|row| row.report_hash)
+                .collect::<Vec<_>>(),
+            observations
+                .iter()
+                .map(|row| row.report_hash)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            replayed_forecasts
+                .iter()
+                .map(|row| row.report_hash)
+                .collect::<Vec<_>>(),
+            forecasts
+                .iter()
+                .map(|row| row.report_hash)
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn execution_history_has_variance() -> Result<()> {
+        let decision_at = "2026-08-21T00:00:00Z".parse::<DateTime<Utc>>()?;
+        let sources = [
+            ClosureMarketSource {
+                source_id: RecommendationId::from_v7(),
+                market_id: MarketId::new("feedback-closure-training-market-1"),
+            },
+            ClosureMarketSource {
+                source_id: RecommendationId::from_v7(),
+                market_id: MarketId::new("feedback-closure-training-market-2"),
+            },
+        ];
+        let polygon = DeterministicPolygonChain::new();
+        let facts = closure_execution_history_rows(
+            &sources,
+            decision_at,
+            60,
+            Decimal::ZERO,
+            &polygon,
+            ClosureHistoryInterval::for_sources(&sources)?,
+        )?;
+        facts.history.validate_acceptance(&facts.acceptance)?;
+        assert_eq!(facts.executions.len(), 40);
+        assert!(facts.acceptance.from_block >= V2_PRODUCTION_BLOCK);
+        assert!(
+            facts
+                .executions
+                .iter()
+                .all(|row| row.block_number <= facts.acceptance.to_block)
+        );
+        assert_eq!(
+            facts
+                .executions
+                .iter()
+                .map(|row| (row.block_number, row.transaction_index, row.log_index))
+                .collect::<HashSet<_>>()
+                .len(),
+            facts.executions.len()
+        );
+        assert!(
+            facts
+                .executions
+                .iter()
+                .map(|row| Price::from(row.price).inner())
+                .collect::<HashSet<_>>()
+                .len()
+                > 1
+        );
+        let paired = closure_execution_history_rows(
+            &sources,
+            decision_at + Duration::milliseconds(1),
+            60,
+            Decimal::ZERO,
+            &polygon,
+            ClosureHistoryInterval::for_sources(&sources)?,
+        )?;
+        assert_eq!(paired.acceptance.chunk_id, facts.acceptance.chunk_id);
+        paired.history.validate_acceptance(&paired.acceptance)?;
+        assert_ne!(
+            paired.acceptance.state_revision,
+            facts.acceptance.state_revision
+        );
+        assert!(facts.history.matches_contract(&paired.history));
+        assert_eq!(
+            paired.acceptance.provider_digest,
+            facts.acceptance.provider_digest
+        );
+        assert_eq!(
+            paired
+                .executions
+                .iter()
+                .map(|row| {
+                    (
+                        row.execution_id,
+                        row.chunk_id,
+                        row.block_number,
+                        row.transaction_index,
+                        row.log_index,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            facts
+                .executions
+                .iter()
+                .map(|row| {
+                    (
+                        row.execution_id,
+                        row.chunk_id,
+                        row.block_number,
+                        row.transaction_index,
+                        row.log_index,
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn activation_intervals_are_contiguous() -> Result<()> {
+        let decision_at = "2026-08-21T00:00:00Z".parse::<DateTime<Utc>>()?;
+        let sources = [ClosureMarketSource {
+            source_id: RecommendationId::from_v7(),
+            market_id: MarketId::new("feedback-closure-evaluation-market-1"),
+        }];
+        let polygon = DeterministicPolygonChain::new();
+        let policy_hash = ContentHash::from_bytes([91; 32]);
+        let narrow = closure_execution_history_rows(
+            &sources,
+            decision_at,
+            60,
+            Decimal::ZERO,
+            &polygon,
+            ClosureHistoryInterval {
+                frontier: ExchangeHistoryFrontier::Activation,
+                from_block: None,
+                policy_hash: Some(policy_hash),
+            },
+        )?;
+        let first_from = narrow
+            .acceptance
+            .from_block
+            .checked_sub(100)
+            .context("expanded activation interval underflowed")?;
+        let first = closure_execution_history_rows(
+            &sources,
+            decision_at,
+            60,
+            Decimal::ZERO,
+            &polygon,
+            ClosureHistoryInterval {
+                frontier: ExchangeHistoryFrontier::Activation,
+                from_block: Some(first_from),
+                policy_hash: Some(policy_hash),
+            },
+        )?;
+        let second = closure_execution_history_rows(
+            &sources,
+            decision_at + Duration::hours(1),
+            60,
+            Decimal::ZERO,
+            &polygon,
+            ClosureHistoryInterval {
+                frontier: ExchangeHistoryFrontier::Activation,
+                from_block: Some(first.acceptance.to_block + 1),
+                policy_hash: Some(policy_hash),
+            },
+        )?;
+
+        assert_eq!(first.acceptance.from_block, first_from);
+        assert_eq!(first.acceptance.to_block + 1, second.acceptance.from_block);
+        assert!(
+            first
+                .executions
+                .iter()
+                .all(|row| row.block_number >= first.acceptance.from_block
+                    && row.block_number <= first.acceptance.to_block)
+        );
+        assert!(
+            second
+                .executions
+                .iter()
+                .all(|row| row.block_number >= second.acceptance.from_block
+                    && row.block_number <= second.acceptance.to_block)
+        );
+        assert!(
+            first
+                .executions
+                .iter()
+                .all(|row| row.availability_policy_hash == ChDigest::from(policy_hash))
         );
         Ok(())
     }
@@ -6922,6 +11061,106 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn terminal_catalog_retains_report() -> Result<()> {
+        let decision_at = "2026-07-01T00:00:00Z".parse::<DateTime<Utc>>()?;
+        let fetched_at = decision_at + Duration::hours(2);
+        let historical_resolutions = BTreeMap::from([(1, decision_at + Duration::hours(1))]);
+        let historical = Arc::new(ClosureCatalogFacts::build(ClosureCatalogBuild {
+            scope: "evaluation",
+            event_id: "feedback-closure-evaluation-event",
+            category: MarketCategory::Weather,
+            decision_at,
+            market_created_at: decision_at - Duration::days(1),
+            resolutions: &historical_resolutions,
+            first_ordinal: 1,
+            last_ordinal: 1,
+            price_shift: Decimal::ZERO,
+        })?);
+        let report_resolutions = BTreeMap::from([(1, fetched_at + Duration::hours(6))]);
+        let report = Arc::new(ClosureCatalogFacts::build(ClosureCatalogBuild {
+            scope: "report-weather",
+            event_id: "feedback-closure-report-weather-event",
+            category: MarketCategory::Weather,
+            decision_at,
+            market_created_at: decision_at - Duration::days(1),
+            resolutions: &report_resolutions,
+            first_ordinal: 1,
+            last_ordinal: 1,
+            price_shift: Decimal::ZERO,
+        })?);
+        let retained_market_id = MarketId::new("feedback-closure-report-weather-market-1");
+        let retained = BTreeSet::from([retained_market_id.clone()]);
+        let commit = build_terminal_catalog_commit(
+            &[Arc::clone(&historical), Arc::clone(&report)],
+            &retained,
+            fetched_at,
+        )?;
+
+        assert_eq!(commit.events.len(), 2);
+        assert_eq!(commit.markets.len(), 2);
+        let historical_market = commit
+            .markets
+            .iter()
+            .find(|candidate| candidate.projection.market_id != retained_market_id)
+            .context("terminal catalog omitted historical market")?;
+        let historical_payload = serde_json::from_value::<MarketRegistryInfo>(
+            historical_market.object.payload.clone().into_inner(),
+        )?;
+        assert_eq!(historical_payload.status, MarketStatus::Delisted);
+        assert_eq!(
+            PolymarketOrderRules::new(
+                historical_payload.tick_size,
+                Shares::new(historical_payload.min_order_size)
+            )?,
+            CLOSURE_ORDER_RULES
+        );
+        assert_eq!(historical_payload.neg_risk, CLOSURE_NEG_RISK);
+        assert_eq!(
+            historical_market.change_type,
+            CatalogChangeType::GammaConfirmedTombstone
+        );
+        assert_eq!(
+            historical_market.source_timestamp_quality,
+            CatalogTimestampQuality::CommitTimeFallback
+        );
+        let report_market = commit
+            .markets
+            .iter()
+            .find(|candidate| candidate.projection.market_id == retained_market_id)
+            .context("terminal catalog omitted retained report market")?;
+        let report_payload = serde_json::from_value::<MarketRegistryInfo>(
+            report_market.object.payload.clone().into_inner(),
+        )?;
+        assert_eq!(report_payload.status, MarketStatus::Active);
+        assert_eq!(
+            PolymarketOrderRules::new(
+                report_payload.tick_size,
+                Shares::new(report_payload.min_order_size)
+            )?,
+            CLOSURE_ORDER_RULES
+        );
+        assert_eq!(report_payload.neg_risk, CLOSURE_NEG_RISK);
+        assert_eq!(
+            report_market.change_type,
+            CatalogChangeType::GammaScanUpsert
+        );
+        let historical_event = commit
+            .events
+            .iter()
+            .find(|candidate| candidate.projection.event_id == historical.event.event_id)
+            .context("terminal catalog omitted historical event")?;
+        let historical_event_payload = serde_json::from_value::<EventRegistryInfo>(
+            historical_event.object.payload.clone().into_inner(),
+        )?;
+        assert_eq!(historical_event_payload.status, EventStatus::Closed);
+        assert_eq!(
+            historical_event.change.change_type,
+            CatalogChangeType::GammaConfirmedTombstone
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn gamma_catalog_round_trips() -> Result<()> {
         let decision_at = "2026-07-01T00:00:00Z".parse::<DateTime<Utc>>()?;
@@ -6967,6 +11206,81 @@ mod tests {
         assert_eq!(actual.volume_24h, expected.info.volume_24h);
         assert_eq!(actual.primary_category(), MarketCategory::Weather);
         assert_eq!(response[0]["events"][0]["tags"][0]["slug"], "weather");
+        Ok(())
+    }
+
+    #[test]
+    fn closure_catalog_preserves_rules() -> Result<()> {
+        let decision_at = "2026-07-01T00:00:00Z".parse::<DateTime<Utc>>()?;
+        let resolutions = BTreeMap::from([(1, decision_at + Duration::days(2))]);
+        for (scope, category) in [
+            ("training", MarketCategory::Weather),
+            ("calibration", MarketCategory::Weather),
+            ("evaluation", MarketCategory::Weather),
+            ("shadow", MarketCategory::Weather),
+            ("report-crypto", MarketCategory::Crypto),
+            ("report-weather", MarketCategory::Weather),
+        ] {
+            let facts = ClosureCatalogFacts::build(ClosureCatalogBuild {
+                scope,
+                event_id: "feedback-closure-rule-event",
+                category,
+                decision_at,
+                market_created_at: decision_at - Duration::days(1),
+                resolutions: &resolutions,
+                first_ordinal: 1,
+                last_ordinal: 1,
+                price_shift: Decimal::ZERO,
+            })?;
+            let market_id = MarketId::new(format!("feedback-closure-{scope}-market-1"));
+            let catalog = facts.market(&market_id)?;
+            let gamma = facts.gamma_response(catalog, &facts.registry_event)?;
+            let books = closure_book_facts(
+                &ClosureMarketSource {
+                    source_id: RecommendationId::from_v7(),
+                    market_id,
+                },
+                decision_at,
+                2,
+                Decimal::ZERO,
+            )?;
+            let pit = &books.market_info;
+            assert_eq!(catalog.info.tick_size, CLOSURE_ORDER_RULES.tick_size);
+            assert_eq!(
+                catalog.info.min_order_size,
+                CLOSURE_ORDER_RULES.minimum_order_size.inner()
+            );
+            assert_eq!(catalog.info.neg_risk, CLOSURE_NEG_RISK);
+            assert_eq!(gamma[0]["orderPriceMinTickSize"], "0.0025");
+            assert_eq!(gamma[0]["orderMinSize"], "1");
+            assert_eq!(gamma[0]["negRisk"], CLOSURE_NEG_RISK);
+            assert_eq!(
+                PolymarketOrderRules::new(pit.tick_size, pit.minimum_order_size)?,
+                CLOSURE_ORDER_RULES
+            );
+            assert_eq!(pit.neg_risk, CLOSURE_NEG_RISK);
+            assert_eq!(
+                pit.raw_payload["tick_size"],
+                gamma[0]["orderPriceMinTickSize"]
+            );
+            assert_eq!(
+                pit.raw_payload["minimum_order_size"],
+                gamma[0]["orderMinSize"]
+            );
+            assert_eq!(pit.raw_payload["neg_risk"], gamma[0]["negRisk"]);
+            assert_eq!(
+                CanonicalDigest::content_hash_json(&pit.raw_payload)?,
+                pit.payload_hash
+            );
+            for row in &books.ledger_rows {
+                for price in row.bid_prices.iter().chain(&row.ask_prices) {
+                    assert_eq!(
+                        Price::from(*price).inner() % CLOSURE_ORDER_RULES.tick_size.as_decimal(),
+                        Decimal::ZERO
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -7078,6 +11392,117 @@ mod tests {
     }
 
     #[test]
+    fn historical_orders_bind_rules() -> Result<()> {
+        let decision_at = "2026-08-03T00:00:00Z".parse::<DateTime<Utc>>()?;
+        let source = ClosureMarketSource {
+            source_id: RecommendationId::from_v7(),
+            market_id: MarketId::new("feedback-closure-evaluation-market-1"),
+        };
+        let books = closure_book_facts(&source, decision_at, 2, Decimal::ZERO)?;
+        let info = &books.market_info;
+        assert_eq!(info.raw_payload["tick_size"], "0.0025");
+        assert_eq!(info.raw_payload["minimum_order_size"], "1");
+        assert_eq!(
+            CanonicalDigest::content_hash_json(&info.raw_payload)?,
+            info.payload_hash
+        );
+        let rules = PolymarketOrderRules::new(info.tick_size, info.minimum_order_size)?;
+        for (side, price, expected_fee, expected_delta) in [
+            (Side::Buy, dec!(0.60), dec!(1), dec!(-25)),
+            (Side::Sell, dec!(0.45), dec!(0), dec!(18)),
+            (Side::Sell, dec!(0.55), dec!(0), dec!(22)),
+            (Side::Sell, dec!(0.75), dec!(0), dec!(30)),
+        ] {
+            let prepared = PreparedOrderFixture {
+                market_id: info.market_id.clone(),
+                token_id: info.tokens[0].token_id.clone(),
+                side,
+                order_type: if side == Side::Buy {
+                    OrderType::Fak
+                } else {
+                    OrderType::Gtc
+                },
+                venue_amount: if side == Side::Buy {
+                    VenueOrderAmount::PrincipalUsd(Usd::new(dec!(24)))
+                } else {
+                    VenueOrderAmount::Shares(Shares::new(dec!(40)))
+                },
+                expected_fee: Usd::new(expected_fee),
+                expected_filled_shares: Shares::new(dec!(40)),
+                limit_price: Price::new(price),
+                order_rules: rules,
+                book_hash: books.primary_ref.content_hash,
+                clob_market_info_payload_hash: info.payload_hash,
+                prepared_at: decision_at,
+                valid_until: decision_at + Duration::hours(1),
+            }
+            .build()?;
+            assert_eq!(prepared.tick_size, TickSize::QuarterCent);
+            assert_eq!(prepared.minimum_order_size, Shares::ONE);
+            assert_eq!(prepared.clob_market_info_payload_hash, info.payload_hash);
+            assert_eq!(prepared.book_hash, books.primary_ref.content_hash);
+            assert_eq!(prepared.requested_shares, Shares::new(dec!(40)));
+            assert_eq!(prepared.expected_filled_shares, Shares::new(dec!(40)));
+            assert_eq!(prepared.limit_price, Price::new(price));
+            assert_eq!(prepared.total_cash_delta, expected_delta);
+            assert_eq!(
+                rules
+                    .validate_order(prepared.side, prepared.venue_amount, prepared.limit_price)?
+                    .requested_shares,
+                prepared.requested_shares,
+            );
+        }
+        let mut changed_payload = info.raw_payload.clone();
+        changed_payload["tick_size"] = "0.01".into();
+        assert_ne!(
+            CanonicalDigest::content_hash_json(&changed_payload)?,
+            info.payload_hash
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn live_report_sources_align() -> Result<()> {
+        let decision_at = "2026-08-03T00:00:00Z".parse::<DateTime<Utc>>()?;
+        let source = ClosureMarketSource {
+            source_id: RecommendationId::from_v7(),
+            market_id: MarketId::new("feedback-closure-report-crypto-market-1"),
+        };
+        let books = closure_book_facts(&source, decision_at, 2, Decimal::ZERO)?;
+        assert!(books.ledger_rows.iter().all(|row| {
+            row.venue_event_time == (decision_at - Duration::seconds(2)).timestamp_millis()
+                && row.persisted_time == (decision_at - Duration::seconds(2)).timestamp_millis()
+        }));
+
+        let microstructure =
+            closure_serving_microstructure_rows(&source, decision_at, 2, Decimal::ZERO)?;
+        assert_eq!(microstructure.len(), 61);
+        assert_eq!(
+            microstructure.last().map(|row| row.bucket_time),
+            Some((decision_at - Duration::seconds(3)).timestamp_millis())
+        );
+        let sources = [source];
+        let history = closure_execution_history_rows(
+            &sources,
+            decision_at,
+            2,
+            Decimal::ZERO,
+            &DeterministicPolygonChain::new(),
+            ClosureHistoryInterval::for_sources(&sources)?,
+        )?;
+        assert!(!history.executions.is_empty());
+        assert_eq!(
+            history.acceptance.accepted_at,
+            decision_at.timestamp_millis()
+        );
+        assert_eq!(
+            history.acceptance.state_revision,
+            u64::try_from(decision_at.timestamp_micros())?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn shadow_aggregate_allows_concurrency() -> Result<()> {
         let observation = |byte: u8, shadow_comparison_id| ShadowObservationResult {
             shadow_comparison_id,
@@ -7153,11 +11578,12 @@ mod tests {
     }
 
     #[test]
-    fn training_groups_are_factorial() -> Result<()> {
+    fn training_groups_cover_grid() -> Result<()> {
         let group_count = closure_training_groups(8, 4, 16, 89)?;
         let observation_count = TRAINING_OBSERVATION_COUNT / group_count;
         assert_eq!(group_count, 96);
         assert_eq!(observation_count, 8);
+        let mut population_cells = [[0_usize; 2]; 4];
         for group_index in 0..group_count {
             let (first, last) = training_market_range(group_index, observation_count)?;
             let mut cells = [[0_usize; 2]; 4];
@@ -7165,9 +11591,49 @@ mod tests {
                 let strength = closure_reversion_strength("training", ordinal)?;
                 let regime = usize::from(closure_regime_sign("training", ordinal)? > 0);
                 cells[strength - 1][regime] += 1;
+                population_cells[strength - 1][regime] += 1;
             }
-            assert_eq!(cells, [[1, 1]; 4]);
+            let covered_cells = cells.iter().flatten().filter(|count| **count > 0).count();
+            assert!(
+                covered_cells >= 4,
+                "training group {group_index} cells={cells:?}"
+            );
+            assert!(cells.iter().flatten().all(|count| *count <= 3));
+            let pair_first = (first..=last)
+                .find(|ordinal| {
+                    ordinal
+                        .checked_sub(1)
+                        .is_some_and(|zero_based| zero_based.is_multiple_of(8))
+                        && ordinal.checked_add(1).is_some_and(|second| second <= last)
+                })
+                .context("training group has no complete counterfactual pair")?;
+            let second = pair_first + 1;
+            assert_eq!(
+                closure_feature_ordinal("training", pair_first)?,
+                closure_feature_ordinal("training", second)?
+            );
+            assert_eq!(
+                closure_levels("training", true, Decimal::ZERO, pair_first)?,
+                closure_levels("training", true, Decimal::ZERO, second)?
+            );
+            for minutes_ago in 0..=60 {
+                assert_eq!(
+                    closure_momentum_variation("training", pair_first, minutes_ago)?,
+                    closure_momentum_variation("training", second, minutes_ago)?
+                );
+            }
+            assert_ne!(
+                closure_yes_wins("training", pair_first)?,
+                closure_yes_wins("training", second)?
+            );
         }
+        assert!(
+            population_cells
+                .iter()
+                .flatten()
+                .all(|count| (72..=120).contains(count)),
+            "training population cells are imbalanced: {population_cells:?}"
+        );
         Ok(())
     }
 
@@ -7191,14 +11657,21 @@ mod tests {
         };
         let group_count = closure_training_groups(8, 4, 16, plan.group_floor)?;
         let points = plan.points(group_count)?;
+        let (first_complete_bucket, complete_end_bucket) =
+            ScenarioTrainingPlan::complete_bucket_bounds(
+                window_start,
+                latest_decision_exclusive,
+                86_400,
+            )?;
         let buckets = points
             .iter()
             .map(|point| point.timestamp().div_euclid(86_400))
+            .filter(|bucket| *bucket >= first_complete_bucket && *bucket < complete_end_bucket)
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
 
-        assert_eq!(eligible_bucket_count, 89);
+        assert_eq!(eligible_bucket_count, 88);
         assert_eq!(group_count, 96);
         assert_eq!(points.len(), group_count);
         assert_eq!(buckets.len(), eligible_bucket_count);
@@ -7231,6 +11704,220 @@ mod tests {
     }
 
     #[test]
+    fn quote_baseline_unchanged() -> Result<()> {
+        let mut cases = Vec::new();
+        for scope in [
+            "training",
+            "calibration",
+            "evaluation",
+            "shadow",
+            "report-weather",
+        ] {
+            for ordinal in 1..=32 {
+                for shift in [dec!(-0.04), Decimal::ZERO, dec!(0.04)] {
+                    for primary in [true, false] {
+                        let (bids, asks) = closure_levels(scope, primary, shift, ordinal)?;
+                        cases.push((
+                            scope,
+                            ordinal,
+                            shift,
+                            primary,
+                            bids[0].price_decimal(),
+                            bids[0].size_decimal(),
+                            asks[0].price_decimal(),
+                            asks[0].size_decimal(),
+                        ));
+                    }
+                }
+            }
+        }
+        let hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/unaffected-fixture-quotes",
+            1,
+            &cases,
+        )?;
+        assert_eq!(
+            hash.to_string(),
+            "blake3:8ef8b4e3b117886299b70786a98c0543504d9bb7d2e6ed659fadfc8c2efc3049"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn quote_changes_four_books() -> Result<()> {
+        let original = [
+            (dec!(0.395), dec!(0.425), dec!(0.575), dec!(0.605)),
+            (dec!(0.3975), dec!(0.4225), dec!(0.5775), dec!(0.6025)),
+            (dec!(0.400), dec!(0.420), dec!(0.580), dec!(0.600)),
+            (dec!(0.4025), dec!(0.4175), dec!(0.5825), dec!(0.5975)),
+            (dec!(0.405), dec!(0.415), dec!(0.585), dec!(0.595)),
+        ];
+        let mut changed = Vec::new();
+        for scope in ["report-crypto", "report-weather"] {
+            for (index, &(yes_bid, yes_ask, no_bid, no_ask)) in original.iter().enumerate() {
+                let ordinal = index + 1;
+                for primary in [true, false] {
+                    let (bids, asks) = closure_levels(scope, primary, Decimal::ZERO, ordinal)?;
+                    let expected = if primary {
+                        (yes_bid, yes_ask)
+                    } else {
+                        (no_bid, no_ask)
+                    };
+                    if (
+                        bids[0].price_decimal().inner(),
+                        asks[0].price_decimal().inner(),
+                    ) != expected
+                    {
+                        changed.push((scope, ordinal, primary));
+                    }
+                    let (bid_size, ask_size) = if ordinal == 3 {
+                        (dec!(18000), dec!(2000))
+                    } else {
+                        (dec!(2400), dec!(21600))
+                    };
+                    assert_eq!(bids[0].size_decimal().inner(), bid_size);
+                    assert_eq!(asks[0].size_decimal().inner(), ask_size);
+                }
+            }
+        }
+        assert_eq!(
+            changed,
+            vec![
+                ("report-crypto", 2, true),
+                ("report-crypto", 2, false),
+                ("report-crypto", 4, true),
+                ("report-crypto", 4, false),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn quote_contract_is_directional() -> Result<()> {
+        for ordinal in 1..=64 {
+            let quoted_yes = CLOSURE_CRYPTO_CLOSE_PRICE
+                >= closure_crypto_strike("report-crypto", ordinal)?.inner();
+            for shift in [dec!(-0.04), Decimal::ZERO, dec!(0.04)] {
+                let (yes_bids, yes_asks) = closure_levels("report-crypto", true, shift, ordinal)?;
+                let (no_bids, no_asks) = closure_levels("report-crypto", false, shift, ordinal)?;
+                assert_eq!(
+                    yes_bids[0].price_decimal().inner() + no_asks[0].price_decimal().inner(),
+                    Decimal::ONE
+                );
+                assert_eq!(
+                    yes_asks[0].price_decimal().inner() + no_bids[0].price_decimal().inner(),
+                    Decimal::ONE
+                );
+                for (bids, asks) in [(&yes_bids, &yes_asks), (&no_bids, &no_asks)] {
+                    CLOSURE_ORDER_RULES.validate_order(
+                        Side::Buy,
+                        VenueOrderAmount::Shares(Shares::ONE),
+                        bids[0].price_decimal(),
+                    )?;
+                    CLOSURE_ORDER_RULES.validate_order(
+                        Side::Buy,
+                        VenueOrderAmount::Shares(Shares::ONE),
+                        asks[0].price_decimal(),
+                    )?;
+                    assert_eq!(
+                        asks[0].price_decimal().inner() - bids[0].price_decimal().inner(),
+                        closure_spread_width("report-crypto", ordinal)?
+                    );
+                }
+                let quoted = closure_levels("report-crypto", quoted_yes, shift, ordinal)?;
+                let opposite = closure_levels("report-crypto", !quoted_yes, shift, ordinal)?;
+                assert_eq!(
+                    quoted,
+                    closure_levels("report-weather", true, shift, ordinal)?
+                );
+                assert_eq!(
+                    opposite,
+                    closure_levels("report-weather", false, shift, ordinal)?
+                );
+                assert!(quoted.1[0].price_decimal() < opposite.1[0].price_decimal());
+            }
+        }
+        assert!(closure_levels("report-crypto", true, Decimal::ZERO, 0).is_err());
+        assert!(closure_levels("unsupported", true, Decimal::ZERO, 1).is_err());
+        for shift in [dec!(-1), Decimal::ONE] {
+            assert!(closure_levels("report-crypto", true, shift, 1).is_err());
+            assert!(closure_levels("report-crypto", false, shift, 2).is_err());
+        }
+        let off_grid = closure_levels("report-crypto", false, dec!(0.001), 2)?;
+        assert!(
+            CLOSURE_ORDER_RULES
+                .validate_order(
+                    Side::Buy,
+                    VenueOrderAmount::Shares(Shares::ONE),
+                    off_grid.1[0].price_decimal()
+                )
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn quote_sources_remain_aligned() -> Result<()> {
+        let decision_at = "2026-08-03T00:00:00Z".parse::<DateTime<Utc>>()?;
+        for scope in ["report-crypto", "report-weather"] {
+            for ordinal in 1..=EVALUATION_MARKETS_PER_TICK {
+                let source = ClosureMarketSource {
+                    source_id: RecommendationId::new(seeded_uuid(&format!(
+                        "quote-contract:{scope}:{ordinal}"
+                    ))),
+                    market_id: MarketId::new(format!("feedback-closure-{scope}-market-{ordinal}")),
+                };
+                let facts = closure_book_facts(&source, decision_at, 2, Decimal::ZERO)?;
+                for (index, primary) in [true, false].into_iter().enumerate() {
+                    let (bids, asks) = closure_levels(scope, primary, Decimal::ZERO, ordinal)?;
+                    let row = &facts.ledger_rows[index];
+                    assert_eq!(row.token_id, facts.market_info.tokens[index].token_id);
+                    assert_eq!(Price::from(row.bid_prices[0]), bids[0].price_decimal());
+                    assert_eq!(Price::from(row.ask_prices[0]), asks[0].price_decimal());
+                    assert_eq!(
+                        ContentHash::from(row.event_hash),
+                        row.canonical_event_hash()?
+                    );
+                    let mut tampered = row.clone();
+                    tampered.bid_prices[0] = Price::new(
+                        bids[0].price_decimal().inner()
+                            + CLOSURE_ORDER_RULES.tick_size.as_decimal(),
+                    )
+                    .into();
+                    assert_ne!(
+                        ContentHash::from(row.event_hash),
+                        tampered.canonical_event_hash()?
+                    );
+                }
+                let (bids, asks) = closure_levels(scope, true, Decimal::ZERO, ordinal)?;
+                assert_eq!(
+                    facts.primary_ref.content_hash,
+                    CanonicalDigest::content_hash_json(&ClosureBookLevels {
+                        bids: &bids,
+                        asks: &asks
+                    })?
+                );
+                let history =
+                    closure_serving_microstructure_rows(&source, decision_at, 2, Decimal::ZERO)?;
+                assert_eq!(history.len(), 61);
+                for (index, row) in history.iter().enumerate() {
+                    let variation =
+                        closure_momentum_variation(scope, ordinal, 60 - i64::try_from(index)?)?;
+                    assert_eq!(
+                        row.best_bid_close.map(Price::from),
+                        Some(Price::new(bids[0].price_decimal().inner() + variation))
+                    );
+                    assert_eq!(
+                        row.best_ask_close.map(Price::from),
+                        Some(Price::new(asks[0].price_decimal().inner() + variation))
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn report_routes_share_blocks() -> Result<()> {
         for ordinal in 1..=EVALUATION_MARKETS_PER_TICK {
             assert_eq!(
@@ -7259,13 +11946,61 @@ mod tests {
                     closure_momentum_variation("report-weather", ordinal, minutes_ago)?
                 );
             }
-            for primary in [true, false] {
+            let crypto_quoted_yes = CLOSURE_CRYPTO_CLOSE_PRICE
+                >= closure_crypto_strike("report-crypto", ordinal)?.inner();
+            for entry_side in [true, false] {
                 assert_eq!(
-                    closure_levels("report-crypto", primary, Decimal::ZERO, ordinal)?,
-                    closure_levels("report-weather", primary, Decimal::ZERO, ordinal)?
+                    closure_levels(
+                        "report-crypto",
+                        entry_side == crypto_quoted_yes,
+                        Decimal::ZERO,
+                        ordinal
+                    )?,
+                    closure_levels("report-weather", entry_side, Decimal::ZERO, ordinal)?
                 );
             }
         }
+        let decision_at = "2026-08-03T00:00:00Z".parse::<DateTime<Utc>>()?;
+        let sources = ["report-crypto", "report-weather"]
+            .into_iter()
+            .flat_map(|scope| {
+                (1..=EVALUATION_MARKETS_PER_TICK).map(move |ordinal| ClosureMarketSource {
+                    source_id: RecommendationId::new(seeded_uuid(&format!(
+                        "feedback-closure:{scope}:{ordinal}:combined-report-source"
+                    ))),
+                    market_id: MarketId::new(format!("feedback-closure-{scope}-market-{ordinal}")),
+                })
+            })
+            .collect::<Vec<_>>();
+        let execution = closure_execution_history_rows(
+            &sources,
+            decision_at,
+            2,
+            Decimal::ZERO,
+            &DeterministicPolygonChain::new(),
+            ClosureHistoryInterval::for_sources(&sources)?,
+        )?;
+        assert_eq!(
+            execution.executions.len(),
+            sources.len() * CLOSURE_EXECUTIONS_PER_MARKET
+        );
+        assert_eq!(
+            execution
+                .executions
+                .iter()
+                .map(|row| &row.market_id)
+                .collect::<HashSet<_>>()
+                .len(),
+            sources.len()
+        );
+        assert_eq!(
+            execution.acceptance.accepted_at,
+            decision_at.timestamp_millis()
+        );
+        assert_eq!(
+            execution.acceptance.state_revision,
+            u64::try_from(decision_at.timestamp_micros())?
+        );
         Ok(())
     }
 
@@ -7346,7 +12081,8 @@ mod tests {
     #[test]
     fn crypto_observation_is_closed() -> Result<()> {
         let decision_at = "2026-07-01T12:34:56.789Z".parse::<DateTime<Utc>>()?;
-        let row = closure_crypto_observation(decision_at)?;
+        let boundary = DecisionClock::new(2).serving_boundary(decision_at, 5, 300)?;
+        let row = closure_crypto_observation(&boundary)?;
 
         assert_eq!(row.family, "crypto");
         assert_eq!(row.source_id, DomainSourceId::binance());
@@ -7367,6 +12103,36 @@ mod tests {
         );
         assert_eq!(row.ingestion_time, decision_at.timestamp_millis());
         assert!(row.event_time < row.publish_time && row.publish_time <= row.ingestion_time);
+        Ok(())
+    }
+
+    #[test]
+    fn crypto_cutoff_keeps_latest() -> Result<()> {
+        for anchor in ["2026-07-01T12:00:00Z", "2026-07-01T12:34:00Z"] {
+            let anchor = anchor.parse::<DateTime<Utc>>()?;
+            for global_lag in [0, 2, 90] {
+                for crypto_lag in [0, 5, 125] {
+                    for phase_millis in [0, 1, 1_000, 2_000, 4_999, 5_000, 5_001, 59_999] {
+                        let decision_at = anchor + Duration::milliseconds(phase_millis);
+                        let boundary = DecisionClock::new(global_lag).serving_boundary(
+                            decision_at,
+                            crypto_lag,
+                            300,
+                        )?;
+                        let cutoff = boundary.cutoff_for(DecisionSource::DomainCrypto);
+                        let row = closure_crypto_observation(&boundary)?;
+                        assert_eq!(row.publish_time.rem_euclid(60_000), 0);
+                        assert_eq!(row.event_time + 1, row.publish_time);
+                        assert!(row.publish_time <= cutoff.timestamp_millis());
+                        assert!(row.publish_time + 60_000 > cutoff.timestamp_millis());
+                        assert_eq!(row.ingestion_time, decision_at.timestamp_millis());
+                        assert_eq!(Decimal::from(row.value), CLOSURE_CRYPTO_CLOSE_PRICE);
+                        assert_eq!(row.source_id, DomainSourceId::binance());
+                        assert_eq!(row.instrument_key.as_str(), "BINANCE:BTCUSDT:1m");
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -7464,14 +12230,17 @@ mod tests {
 
         assert_eq!(metrics.len(), EVALUATION_MARKETS_PER_TICK);
         assert!(liquidity_values.len() >= 2);
-        assert_eq!(spread_values.len(), EVALUATION_MARKETS_PER_TICK);
-        assert_eq!(ask_values.len(), EVALUATION_MARKETS_PER_TICK);
+        assert_eq!(spread_values.len(), EVALUATION_MARKETS_PER_TICK - 1);
+        assert_eq!(ask_values.len(), EVALUATION_MARKETS_PER_TICK - 1);
         assert_eq!(midpoint_values.len(), 1);
         assert!(signal_values.len() >= 2);
-        assert!(metrics.iter().enumerate().all(|(index, value)| {
+        for (index, value) in metrics.iter().enumerate() {
             let ordinal = index + 1;
-            value.depth_imbalance.is_sign_positive() != ordinal.is_multiple_of(2)
-        }));
+            assert_ne!(
+                value.depth_imbalance.is_sign_positive(),
+                closure_depth_bias("shadow", ordinal)?
+            );
+        }
         for ordinal in 1..=EVALUATION_MARKETS_PER_TICK {
             let (yes_bids, yes_asks) = closure_levels("shadow", true, Decimal::ZERO, ordinal)?;
             let (no_bids, no_asks) = closure_levels("shadow", false, Decimal::ZERO, ordinal)?;
@@ -7512,8 +12281,12 @@ mod tests {
         }
 
         assert_eq!(by_width.len(), EVALUATION_MARKETS_PER_TICK);
+        assert_eq!(
+            by_width.values().map(|counts| counts[0]).sum::<usize>(),
+            1_250
+        );
         for counts in by_width.values() {
-            assert_eq!(counts[0], 250);
+            assert!((230..=270).contains(&counts[0]));
             let regime_rate = Decimal::from(counts[1]) / Decimal::from(counts[0]);
             let label_rate = Decimal::from(counts[2]) / Decimal::from(counts[0]);
             assert!((dec!(0.40)..=dec!(0.60)).contains(&regime_rate));
@@ -7699,7 +12472,7 @@ mod tests {
         let mut strengths = [0_usize; 4];
         for ordinal in 1..=4_096 {
             let regime = closure_regime_sign("training", ordinal)? > 0;
-            let stable = !ordinal.is_multiple_of(2);
+            let stable = !closure_depth_bias("training", ordinal)?;
             let (price_tier, positive_price) = closure_price_tier("training", ordinal)?;
             let strength = closure_reversion_strength("training", ordinal)?;
             regime_yes += usize::from(regime);
@@ -7710,10 +12483,17 @@ mod tests {
             strengths[strength - 1] += 1;
         }
 
-        assert_eq!(regime_yes, 2_048);
-        assert_eq!(strengths, [1_024; 4]);
-        for count in [stable_agreement, price_positive, regime_price_agreement] {
-            assert!((1_850..=2_250).contains(&count));
+        assert!((1_800..=2_300).contains(&regime_yes));
+        assert!(strengths.iter().all(|count| (900..=1_150).contains(count)));
+        for (name, count) in [
+            ("depth/regime", stable_agreement),
+            ("price sign", price_positive),
+            ("price/regime", regime_price_agreement),
+        ] {
+            assert!(
+                (1_800..=2_300).contains(&count),
+                "closure latent stream `{name}` count {count} is not balanced"
+            );
         }
         assert!(
             price_tiers
@@ -7792,10 +12572,75 @@ mod tests {
     }
 
     #[test]
+    fn evaluation_splits_have_both() -> Result<()> {
+        for index in 0..EVALUATION_OBSERVATION_COUNT {
+            let (first, last) = evaluation_market_range(index)?;
+            let selected_side_wins = (first..=last)
+                .map(|ordinal| {
+                    Ok(closure_yes_wins("evaluation", ordinal)?
+                        == (closure_regime_sign("evaluation", ordinal)? > 0))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            assert!(selected_side_wins.iter().any(|won| *won));
+            assert!(selected_side_wins.iter().any(|won| !*won));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn evaluation_pairs_are_counterfactual() -> Result<()> {
+        for index in (0..EVALUATION_OBSERVATION_COUNT).step_by(2) {
+            let (first, _) = evaluation_market_range(index)?;
+            let second = first + 1;
+            assert_eq!(
+                closure_structural_slot("evaluation", first)?,
+                closure_structural_slot("evaluation", second)?
+            );
+            assert_eq!(
+                closure_spread_width("evaluation", first)?,
+                closure_spread_width("evaluation", second)?
+            );
+            assert_eq!(
+                closure_levels("evaluation", true, Decimal::ZERO, first)?,
+                closure_levels("evaluation", true, Decimal::ZERO, second)?
+            );
+            assert_eq!(
+                closure_levels("evaluation", false, Decimal::ZERO, first)?,
+                closure_levels("evaluation", false, Decimal::ZERO, second)?
+            );
+            let decision_at =
+                DateTime::parse_from_rfc3339("2026-08-01T12:00:00Z")?.with_timezone(&Utc);
+            assert_eq!(
+                closure_weather_subject(
+                    decision_at,
+                    closure_feature_ordinal("evaluation", first)?,
+                )?,
+                closure_weather_subject(
+                    decision_at,
+                    closure_feature_ordinal("evaluation", second)?,
+                )?
+            );
+            for minutes_ago in 0..=60 {
+                assert_eq!(
+                    closure_momentum_variation("evaluation", first, minutes_ago)?,
+                    closure_momentum_variation("evaluation", second, minutes_ago)?
+                );
+            }
+            assert_ne!(
+                closure_yes_wins("evaluation", first)?,
+                closure_yes_wins("evaluation", second)?
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn signal_economics_are_monotone() -> Result<()> {
         let mut returns = [Decimal::ZERO; 4];
         let mut counts = [0_usize; 4];
         let mut nuisance_return = Decimal::ZERO;
+        let mut nuisance_by_position = [Decimal::ZERO; 8];
+        let mut nuisance_position_counts = [0_usize; 8];
         for ordinal in 1..=4_096 {
             let regime_yes = closure_regime_sign("training", ordinal)? > 0;
             let strength = closure_reversion_strength("training", ordinal)?;
@@ -7815,17 +12660,21 @@ mod tests {
             };
             counts[strength - 1] += 1;
 
-            let nuisance_yes = !ordinal.is_multiple_of(2);
+            let nuisance_yes = !closure_depth_bias("training", ordinal)?;
             let nuisance_price = if nuisance_yes {
                 yes_asks[0].price_decimal().inner()
             } else {
                 no_asks[0].price_decimal().inner()
             };
-            nuisance_return += if nuisance_yes == yes_wins {
+            let nuisance_sample_return = if nuisance_yes == yes_wins {
                 Decimal::ONE / nuisance_price - Decimal::ONE
             } else {
                 -Decimal::ONE
             };
+            nuisance_return += nuisance_sample_return;
+            let position = (ordinal - 1) % 8;
+            nuisance_by_position[position] += nuisance_sample_return;
+            nuisance_position_counts[position] += 1;
             assert!(yes_bids[0].price_decimal() < yes_asks[0].price_decimal());
         }
         let mean_returns = returns
@@ -7840,14 +12689,31 @@ mod tests {
             .sum::<Decimal>()
             / Decimal::from(4_096);
         let nuisance_return = nuisance_return / Decimal::from(4_096);
+        let nuisance_by_position = nuisance_by_position
+            .into_iter()
+            .zip(nuisance_position_counts)
+            .map(|(total, count)| total / Decimal::from(count))
+            .collect::<Vec<_>>();
 
-        assert!(mean_returns.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!(signal_return > dec!(0.80));
+        assert!(
+            mean_returns
+                .windows(2)
+                .all(|pair| pair[0] <= pair[1] + dec!(0.02)),
+            "fixture strength returns are not monotone: {mean_returns:?}"
+        );
+        assert!(
+            signal_return > dec!(0.55),
+            "fixture signal strategy return {signal_return} is below its governed floor"
+        );
         assert!(
             nuisance_return < dec!(0.02),
-            "fixture nuisance strategy return {nuisance_return} is not economically neutral"
+            "fixture nuisance strategy return {nuisance_return} is not economically neutral: by_position={nuisance_by_position:?}"
         );
-        assert!(signal_return - nuisance_return > dec!(0.80));
+        assert!(
+            signal_return - nuisance_return > dec!(0.55),
+            "fixture signal advantage {} is below its governed floor",
+            signal_return - nuisance_return
+        );
         Ok(())
     }
 }

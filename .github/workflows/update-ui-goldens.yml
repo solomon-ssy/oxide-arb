@@ -49,6 +49,7 @@ jobs:
           --project=visual-desktop-dark
           --project=visual-desktop-light
           --project=visual-mobile-dark
+          --project=visual-tablet-dark
           --update-snapshots
           --grep @visual
       - name: Upload Linux golden artifact

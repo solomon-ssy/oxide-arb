@@ -234,7 +234,7 @@ impl From<TradePolicyCohortProvenance> for RecommendationPolicyProvenance {
     }
 }
 
-/// Honest report-only exit guidance for an L2-free bootstrap model.
+/// Honest analysis-only exit guidance for an L2-free bootstrap model.
 ///
 /// This intentionally contains no synthetic take-profit, stop-loss, trailing,
 /// or opportunistic-exit thresholds. It is not accepted by execution paths.
@@ -490,7 +490,7 @@ impl EvidenceRefs {
     }
 }
 
-// ── Execution eligibility (computed, mode-orthogonal) ─────────────────────
+// ── Execution eligibility (computed, authorization-policy-orthogonal) ─────
 
 /// Per-recommendation execution authority ceiling and immutable blockers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
@@ -503,12 +503,12 @@ pub struct ExecutionEligibility {
 
 impl ExecutionEligibility {
     #[must_use]
-    pub fn allows_operator(&self) -> bool {
+    pub const fn allows_operator(&self) -> bool {
         self.ceiling.allows_operator()
     }
 
     #[must_use]
-    pub fn allows_policy(&self) -> bool {
+    pub const fn allows_policy(&self) -> bool {
         self.blockers.is_empty() && self.ceiling.allows_policy() && self.policy_binding.is_some()
     }
 }

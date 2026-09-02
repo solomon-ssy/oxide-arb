@@ -4,7 +4,7 @@
 > **Deployment contract**
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `pre_deployment_behavior`: 允许 clean-break 与唯一 fresh terminal bootstrap rewrite；任何真实数据销毁仍需操作者单独授权。
 > - `post_deployment_behavior`: 本次实现只交付唯一终态 clean-install contract；不设计升级、降级、旧版本共存或历史数据转换。
 > - `rollback_and_data_verification`: 仅在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置需要操作者另行授权。
 
@@ -314,7 +314,7 @@ confidence/correlation proxy 或 solver fallback。
 重建：
 
 - `report` -> `quant_recommendation_report`
-- `system_runtime_state` -> 删除 `execution_mode`，新增 `quant_runtime_mode`
+- `system_runtime_state` -> 删除；唯一即时控制为 `quant_runtime_control.entry_authorization_policy` + settlement write policy + kill switch
 - `control_factor_*` -> `quant_factor_*` / `quant_model_*`
 
 ### 6.4 删除 runtime config
@@ -357,7 +357,7 @@ confidence/correlation proxy 或 solver fallback。
 
 - `oracle/` 不能作为主路径；若保留，只作为 settlement label source。
 - `ctf/` 不能作为报告系统核心；只在 execution attribution 需要时使用。
-- `keystore/` 在**所有 mode** 加载（私钥用于读真实抵押余额 + 派生 L2 读凭证；report_only ≠ dry-run，报告强制建立在真实账户上）；私钥的**签名/下单**用途仅 `semi_auto` / `auto_execution`。
+- `keystore/` 启动时加载（私钥用于读真实抵押余额 + 派生 L2 读凭证；报告强制建立在真实账户上）；只有已授权且 admission 通过的 intent 才能使用签名/下单能力。
 
 ### 7.3 新 API 边界
 
@@ -448,7 +448,7 @@ ClickHouse：
 - `serve` 中自动 trading engine 启动。
 - mode preflight for DryRun/Paper/Live（旧 ExecutionMode 体系整体删除）。
 - 旧「签名私钥才算就绪」的 mode-gated 凭证策略（纠偏：**所有 mode** 都需私钥 + funder
-  读真实账户用于报告 sizing；私钥的**签名**用途仍仅 semi_auto/auto）。
+  读真实账户用于报告 sizing；私钥签名只属于已授权的 execution submission）。
 
 新增命令：
 
@@ -459,7 +459,7 @@ ClickHouse：
 - `run-model --model-spec`
 - `backtest --model-version --window`
 - `publish-model`
-- `set-mode report_only|semi_auto|auto_execution`
+- `set-entry-authorization operator_approval_required|policy_automatic`
 
 ### 10.2 xtask
 
@@ -612,7 +612,7 @@ Phase 0 完成时必须满足：
 
 - `rg "Endgame|ScoredOpportunity|OpportunityPipeline|DryRun|Paper|Live|ExecutionMode"` 在 active src 中无旧语义命中。
 - `rg "pub use .*oxide_arb"` 无 compatibility re-export。
-- runtime config schema version 只有 v3。
+- 六类 typed policy resource 各自只接受 boot schema `1`；不存在统一 runtime-config version/parser。
 - old API routes 不在 route registry。
 - old tables 不在 active schema graph。
 - docs 中旧 phase 被明确标记 superseded。

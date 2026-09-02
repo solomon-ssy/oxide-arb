@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::service::{
     model_serving_generation::ModelServingGenerationStore,
     model_serving_preimage::{ModelServingPreimageDeps, ModelServingPreimageService},
@@ -73,6 +74,7 @@ impl ModelServingRegistryFixture {
             },
         ));
         Arc::new(ModelServingPreimageService::new(ModelServingPreimageDeps {
+            compute: Arc::new(ComputeExecutor::new().expect("model-serving compute executor")),
             model_registry_repo,
             dataset_repo,
             source_slice_repo: Arc::new(PgSourceSliceRepository::new(self.db.clone())),

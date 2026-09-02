@@ -83,7 +83,7 @@ use quant_pivot_research::{
     hashing::ResearchHasher,
     model::{
         CancellationProbe, CrossFittedRuntime, HorizonMultipliers, LabelSelector, ModelArtifact,
-        ModelRankScore, ModelRankTarget, ModelRuntimeInput, ModelRuntimeOutput,
+        ModelRankScore, ModelRankTarget, ModelRuntimeInput, ModelRuntimeOutput, NestedCalibration,
         NestedCalibrationFitInput, NestedCalibrationFitter, NestedCalibrationObservation,
         NestedCalibrationPolicy, PreparedWeightedFold, QuantModelRuntime, ResolvedCalibration,
         ReturnModelSpec, SubstitutionConfidenceRules, TrainModelRequest, ValidationSpec,
@@ -126,7 +126,7 @@ use crate::{
         backtest::{FrozenTickBuild, frozen_ticks},
         historical_replay::ReplayConfig,
         model_serving_preimage::VerifiedModelServingPreimage,
-        portfolio_context::PromotedPortfolioContextLoader,
+        portfolio_context::{PreparedCpcvPortfolio, PromotedPortfolioContextLoader},
         training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
     },
 };
@@ -1268,7 +1268,7 @@ impl CpcvBacktestService {
     pub async fn run(
         &self,
         input: CpcvBacktestInput,
-        progress: &dyn JobProgressSink,
+        progress: Arc<dyn JobProgressSink>,
         cancel: &CancellationToken,
     ) -> QuantResult<CpcvBacktestOutcome> {
         let contract = input.source.artifact().header().serving_contract();
@@ -1284,10 +1284,10 @@ impl CpcvBacktestService {
         let dataset = input.source.training_dataset();
         let fold_ledger = FoldArtifactLedger::default();
         let (fold_template, replay_template) = self
-            .prepare_templates(&input, fold_ledger.clone(), progress, cancel)
+            .prepare_templates(&input, fold_ledger.clone(), Arc::clone(&progress), cancel)
             .await?;
         let groups = Arc::clone(fold_template.groups());
-        let selection_path = input.binding.methodology.trial_path.clone();
+        let selection_path = input.binding.methodology.trial_path;
 
         let path_set = self
             .run_cpcv(
@@ -1295,25 +1295,25 @@ impl CpcvBacktestService {
                 &fold_template,
                 &replay_template,
                 &groups,
-                progress,
+                progress.as_ref(),
                 cancel,
             )
             .await?;
 
-        let (matrix, trial_grid_count, subject_trial_id) = self
+        let (matrix, trial_grid_count, subject_trial_id, selection_path) = self
             .run_trials(TrialGridExecution {
                 path_set_id: input.path_set_id,
                 fold_template: Arc::clone(&fold_template),
                 replay_template: Arc::clone(&replay_template),
                 groups: Arc::clone(&groups),
-                selection_path: selection_path.clone(),
-                progress,
+                selection_path,
+                progress: progress.as_ref(),
                 cancel,
             })
             .await?;
         let fold_artifacts = fold_ledger.freeze()?;
         let period_length = validation_period_length(&matrix.periods)?;
-        let trial_grid = input.binding.methodology.trial_grid.clone();
+        let trial_grid = input.binding.methodology.trial_grid;
         if usize::try_from(trial_grid_count).ok() != Some(trial_grid.trials.len()) {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
@@ -1325,17 +1325,22 @@ impl CpcvBacktestService {
         }
         verify_fold_function_parity(&fold_artifacts, subject_trial_id)?;
         verify_subject_trial_parity(&path_set, &matrix, &selection_path, subject_trial_id)?;
+        drop(fold_template);
+        drop(replay_template);
+        drop(groups);
 
         progress.report(ResearchJobProgress::with_total(
             "finalize",
             CpcvProgress::FINALIZE.start,
             CpcvProgress::TOTAL,
         ));
-        let (dsr, cscv_selection_evidence, min_track_record_length) = self
+        let final_stats_cancel = cancel.clone();
+        let dsr_significance = self.config.dsr_significance;
+        let (path_set, dsr, cscv_selection_evidence, min_track_record_length) = self
             .deps
             .compute
-            .run_offline_scoped(OfflineMemory::try_gib(2)?, cancel, || {
-                ensure_cpcv_not_cancelled(cancel, "final statistics start")?;
+            .run_offline_cancellable(OfflineMemory::try_gib(2)?, cancel, move || {
+                ensure_cpcv_not_cancelled(&final_stats_cancel, "final statistics start")?;
                 let (dsr, cscv_selection_evidence) = compute_validation_stats(
                     &path_set,
                     &matrix,
@@ -1344,13 +1349,16 @@ impl CpcvBacktestService {
                     period_length,
                 )?;
                 let min_track_record_length = representative_path(&path_set)
-                    .map(|path| {
-                        min_trl_for_path(path, &self.config.dsr_significance, period_length)
-                    })
+                    .map(|path| min_trl_for_path(path, &dsr_significance, period_length))
                     .transpose()?
                     .flatten();
-                ensure_cpcv_not_cancelled(cancel, "final statistics completion")?;
-                Ok((dsr, cscv_selection_evidence, min_track_record_length))
+                ensure_cpcv_not_cancelled(&final_stats_cancel, "final statistics completion")?;
+                Ok((
+                    path_set,
+                    dsr,
+                    cscv_selection_evidence,
+                    min_track_record_length,
+                ))
             })
             .await?;
         // Bailey DSR N/V must describe the same non-redundant economic trial
@@ -1386,7 +1394,7 @@ impl CpcvBacktestService {
         &self,
         input: &CpcvBacktestInput,
         fold_ledger: FoldArtifactLedger,
-        progress: &dyn JobProgressSink,
+        progress: Arc<dyn JobProgressSink>,
         cancel: &CancellationToken,
     ) -> QuantResult<(Arc<FoldTemplate>, Arc<PortfolioReplayTemplate>)> {
         let dataset = input.source.training_dataset();
@@ -1448,42 +1456,42 @@ impl CpcvBacktestService {
         ));
         let predictive_only =
             research_profile.spec.serving_authority == ServingAuthority::AnalysisOnlyWithLiveL2;
-        let (ticks, scenario_methodology) = if predictive_only {
-            (Vec::new(), None)
+        let (ticks, scenario_methodology, label) = if predictive_only {
+            (Vec::new(), None, label)
         } else {
             let probe_runtime = ProbeRuntime::for_cpcv(
                 bindings,
                 *materialization.feature_schema_hash,
                 input_contract.clone(),
             );
-            let frozen_source = self.load_cpcv_source(dataset, research_profile).await?;
-            let portfolio = self
-                .portfolio_contexts
-                .load_cpcv_single(
-                    &input.source,
-                    self.evaluation_frozen_at,
-                    self.portfolio_contexts
-                        .policy()
-                        .recommendation
-                        .reports
-                        .ad_hoc_default_top_n,
-                )
+            let (frozen_source, portfolio) = self
+                .load_cpcv_inputs(input, dataset, research_profile, cancel)
                 .await?;
-            let ticks = self
+            let PreparedCpcvPortfolio {
+                portfolio,
+                scenario_methodology,
+            } = portfolio;
+            let tick_examples = Arc::clone(&examples);
+            let tick_cancel = cancel.clone();
+            let tick_progress = progress;
+            let entry_max_slippage_bps = self.config.entry_max_slippage_bps;
+            let model_run_id = input.model_run_id;
+            let (ticks, label) = self
                 .deps
                 .compute
-                .run_offline_scoped(OfflineMemory::try_gib(6)?, cancel, || {
-                    frozen_ticks(FrozenTickBuild {
-                        examples: &examples,
+                .run_offline_cancellable(OfflineMemory::try_gib(6)?, cancel, move || {
+                    let ticks = frozen_ticks(FrozenTickBuild {
+                        examples: &tick_examples,
                         frozen_source: &frozen_source,
-                        entry_max_slippage_bps: self.config.entry_max_slippage_bps,
+                        entry_max_slippage_bps,
                         rank_target: &label,
                         model: &probe_runtime,
-                        model_run_id: &input.model_run_id,
-                        portfolio: &portfolio.portfolio,
-                        cancel,
-                        sink: progress,
-                    })
+                        model_run_id: &model_run_id,
+                        portfolio: &portfolio,
+                        cancel: &tick_cancel,
+                        sink: tick_progress.as_ref(),
+                    })?;
+                    Ok((ticks, label))
                 })
                 .await?;
             let Some(ticks) = ticks else {
@@ -1492,7 +1500,7 @@ impl CpcvBacktestService {
                 }
                 .into());
             };
-            (ticks, Some(portfolio.scenario_methodology))
+            (ticks, Some(scenario_methodology), label)
         };
         let handle = Handle::current();
         let replay_template = self.replay_template(PortfolioReplayTemplateBuild {
@@ -1511,6 +1519,7 @@ impl CpcvBacktestService {
             scenario_methodology,
             predictive_only,
             evaluation_frozen_at: self.evaluation_frozen_at,
+            cancellation: cancellation_probe(cancel),
         });
         #[cfg(not(feature = "ml-classical"))]
         if model_family.is_classical() {
@@ -1542,11 +1551,13 @@ impl CpcvBacktestService {
         Ok((fold_template, replay_template))
     }
 
-    async fn load_cpcv_source(
+    async fn load_cpcv_inputs(
         &self,
+        input: &CpcvBacktestInput,
         dataset: &TrainingDatasetInfo,
         research_profile: &ResearchProfileArtifact,
-    ) -> QuantResult<FrozenSourceSlice> {
+        cancel: &CancellationToken,
+    ) -> QuantResult<(FrozenSourceSlice, PreparedCpcvPortfolio)> {
         let source_slice = dataset
             .manifest
             .as_ref()
@@ -1556,9 +1567,12 @@ impl CpcvBacktestService {
             .source_lineage
             .source_slice
             .clone();
-        let frozen_source = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
-            .read_ref(&source_slice)
-            .await?;
+        let frozen_source = SourceSliceReader::new(
+            Arc::clone(&self.deps.artifact_store),
+            Arc::clone(&self.deps.compute),
+        )
+        .read_ref(&source_slice, cancel)
+        .await?;
         dataset
             .source_lineage
             .verify_manifest(&frozen_source.manifest)
@@ -1579,7 +1593,19 @@ impl CpcvBacktestService {
             .map_err(|detail| ResearchError::DatasetBuild {
                 detail: format!("CPCV Source Slice profile/PIT contract failed: {detail}"),
             })?;
-        Ok(frozen_source)
+        let portfolio = self
+            .portfolio_contexts
+            .load_cpcv_single(
+                &input.source,
+                self.evaluation_frozen_at,
+                self.portfolio_contexts
+                    .policy()
+                    .recommendation
+                    .reports
+                    .ad_hoc_default_top_n,
+            )
+            .await?;
+        Ok((frozen_source, portfolio))
     }
 
     fn replay_template(&self, input: PortfolioReplayTemplateBuild) -> Arc<PortfolioReplayTemplate> {
@@ -1612,6 +1638,7 @@ impl CpcvBacktestService {
                 scenario_methodology: input.scenario_methodology,
                 predictive_only: input.predictive_only,
                 evaluation_frozen_at: input.evaluation_frozen_at,
+                cancellation: input.cancellation,
             },
         ))
     }
@@ -1880,7 +1907,12 @@ impl CpcvBacktestService {
     async fn run_trials(
         &self,
         input: TrialGridExecution<'_>,
-    ) -> QuantResult<(TrialPerformanceMatrix, u32, Option<u32>)> {
+    ) -> QuantResult<(
+        TrialPerformanceMatrix,
+        u32,
+        Option<u32>,
+        CpcvTrialPathBinding,
+    )> {
         let TrialGridExecution {
             path_set_id,
             fold_template,
@@ -1962,7 +1994,7 @@ impl CpcvBacktestService {
             )
         })
         .await?;
-        Ok((matrix, trial_count, subject_trial_id))
+        Ok((matrix, trial_count, subject_trial_id, selection_path))
     }
 
     async fn decode_examples(
@@ -2711,6 +2743,7 @@ struct PortfolioReplayTemplateBuild {
     scenario_methodology: Option<PortfolioScenarioMethodology>,
     predictive_only: bool,
     evaluation_frozen_at: DateTime<Utc>,
+    cancellation: CancellationProbe,
 }
 
 struct PortfolioReplayTemplateInput {
@@ -2727,6 +2760,7 @@ struct PortfolioReplayTemplateInput {
     scenario_methodology: Option<PortfolioScenarioMethodology>,
     predictive_only: bool,
     evaluation_frozen_at: DateTime<Utc>,
+    cancellation: CancellationProbe,
 }
 
 struct PortfolioReplayTemplate {
@@ -2743,6 +2777,7 @@ struct PortfolioReplayTemplate {
     scenario_methodology: Option<PortfolioScenarioMethodology>,
     predictive_only: bool,
     evaluation_frozen_at: DateTime<Utc>,
+    cancellation: CancellationProbe,
 }
 
 impl PortfolioReplayTemplate {
@@ -2767,6 +2802,7 @@ impl PortfolioReplayTemplate {
             scenario_methodology: input.scenario_methodology,
             predictive_only: input.predictive_only,
             evaluation_frozen_at: input.evaluation_frozen_at,
+            cancellation: input.cancellation,
         }
     }
 
@@ -2874,23 +2910,49 @@ impl PortfolioReplayTemplate {
             &calibration_outcomes,
             &scenario_outcomes,
         )?;
-        let fitted_calibration = NestedCalibrationFitter::fit(&NestedCalibrationFitInput {
-            fit_observations: &calibration_outcomes
-                .iter()
-                .map(|outcome| NestedCalibrationObservation {
-                    composite_score: outcome.composite_score,
-                    token_payout_ratio: outcome.token_payout_ratio,
-                    max_adverse_excursion_bps: outcome.max_adverse_excursion_bps,
-                })
-                .collect::<Vec<_>>(),
-            validation_observations: &scenario_outcomes
-                .iter()
-                .map(|outcome| NestedCalibrationObservation {
-                    composite_score: outcome.composite_score,
-                    token_payout_ratio: outcome.token_payout_ratio,
-                    max_adverse_excursion_bps: outcome.max_adverse_excursion_bps,
-                })
-                .collect::<Vec<_>>(),
+        let fitted_calibration =
+            self.fit_calibration(policy, &evidence, &calibration_outcomes, &scenario_outcomes)?;
+        let calibration_function_hash = fitted_calibration.resolved.runtime_function_hash()?;
+        let scenario =
+            self.fit_scenario(artifact, &evidence, &fitted_calibration, &scenario_outcomes)?;
+        let scenario_economic_function_hash = scenario.economic_function_hash();
+        let test_groups_hash = evidence.test_groups_hash();
+        let calibration = fitted_calibration.resolved;
+        let calibrated_model: Box<dyn QuantModelRuntime> =
+            Box::new(CrossFittedRuntime::new(model, calibration.clone()));
+        Ok(PurgedPortfolioFoldRuntime {
+            model: calibrated_model,
+            calibration,
+            calibration_artifact_hash: fitted_calibration.content_hash,
+            calibration_function_hash,
+            scenario,
+            scenario_economic_function_hash,
+            model_fit_groups_hash: evidence.model_groups_hash,
+            calibration_fit_groups_hash: evidence.calibration_groups_hash,
+            scenario_fit_groups_hash: evidence.scenario_groups_hash,
+            test_groups_hash,
+            model_fit_groups: split.model.group_indices.clone(),
+            calibration_fit_groups: split.calibration.group_indices.clone(),
+            scenario_fit_groups: split.scenario.group_indices.clone(),
+        })
+    }
+
+    fn fit_calibration(
+        &self,
+        policy: FoldEconomicPolicy,
+        evidence: &NestedFoldEvidence,
+        calibration_outcomes: &[ModelCalibrationOutcome],
+        scenario_outcomes: &[ModelCalibrationOutcome],
+    ) -> QuantResult<NestedCalibration> {
+        let calibration_observations = self.calibration_observations(
+            calibration_outcomes,
+            "CPCV calibration observation projection",
+        )?;
+        let scenario_observations = self
+            .calibration_observations(scenario_outcomes, "CPCV scenario observation projection")?;
+        NestedCalibrationFitter::fit(&NestedCalibrationFitInput {
+            fit_observations: &calibration_observations,
+            validation_observations: &scenario_observations,
             policy: NestedCalibrationPolicy {
                 preferred_method: policy.calibration_method,
                 min_samples_isotonic: policy.min_samples_isotonic,
@@ -2898,24 +2960,53 @@ impl PortfolioReplayTemplate {
             },
             fit_evidence_hash: evidence.calibration_fit_hash,
             validation_evidence_hash: evidence.scenario_validation_hash,
-        })?;
-        let calibration_function_hash = fitted_calibration.resolved.runtime_function_hash()?;
-        let mut residual_observations = scenario_outcomes
-            .iter()
-            .map(|outcome| {
-                let expected = fitted_calibration
-                    .resolved
-                    .calibrate_distribution(outcome.composite_score.inner())?
-                    .expected_payout()
-                    .inner();
-                Ok(PortfolioScenarioResidualObservation {
-                    decision_at: outcome.decision_at,
-                    market_id: outcome.market_id.clone(),
-                    token_id: outcome.token_id.clone(),
-                    economic_residual: (outcome.token_payout_ratio.inner() - expected).normalize(),
-                })
-            })
-            .collect::<QuantResult<Vec<_>>>()?;
+            cancellation: self.cancellation.clone(),
+        })
+    }
+
+    fn calibration_observations(
+        &self,
+        outcomes: &[ModelCalibrationOutcome],
+        cancellation_phase: &'static str,
+    ) -> QuantResult<Vec<NestedCalibrationObservation>> {
+        let mut observations = Vec::with_capacity(outcomes.len());
+        for (index, outcome) in outcomes.iter().enumerate() {
+            if index % 1_024 == 0 {
+                self.cancellation.check(cancellation_phase)?;
+            }
+            observations.push(NestedCalibrationObservation {
+                composite_score: outcome.composite_score,
+                token_payout_ratio: outcome.token_payout_ratio,
+                max_adverse_excursion_bps: outcome.max_adverse_excursion_bps,
+            });
+        }
+        Ok(observations)
+    }
+
+    fn fit_scenario(
+        &self,
+        artifact: &ModelArtifact,
+        evidence: &NestedFoldEvidence,
+        calibration: &NestedCalibration,
+        scenario_outcomes: &[ModelCalibrationOutcome],
+    ) -> QuantResult<BacktestScenarioContext> {
+        let mut residual_observations = Vec::with_capacity(scenario_outcomes.len());
+        for (index, outcome) in scenario_outcomes.iter().enumerate() {
+            if index % 1_024 == 0 {
+                self.cancellation.check("CPCV scenario residuals")?;
+            }
+            let expected = calibration
+                .resolved
+                .calibrate_distribution(outcome.composite_score.inner())?
+                .expected_payout()
+                .inner();
+            residual_observations.push(PortfolioScenarioResidualObservation {
+                decision_at: outcome.decision_at,
+                market_id: outcome.market_id.clone(),
+                token_id: outcome.token_id.clone(),
+                economic_residual: (outcome.token_payout_ratio.inner() - expected).normalize(),
+            });
+        }
         residual_observations.sort_by(|left, right| {
             (
                 left.decision_at,
@@ -2952,7 +3043,7 @@ impl PortfolioReplayTemplate {
             }],
             &[RouteContractHash {
                 route,
-                content_hash: fitted_calibration.content_hash,
+                content_hash: calibration.content_hash,
             }],
             &[RouteContractHash {
                 route,
@@ -2976,8 +3067,8 @@ impl PortfolioReplayTemplate {
                 model_version_id: artifact.header().model_version_id(),
                 model_artifact_hash: artifact.content_hash()?,
                 serving_contract_hash: contract.contract_hash(),
-                calibration_artifact_hash: fitted_calibration.content_hash,
-                calibration: &fitted_calibration.resolved,
+                calibration_artifact_hash: calibration.content_hash,
+                calibration: &calibration.resolved,
                 recommendation_contract_hash: trade_policy.content_hash,
                 prediction_horizon_secs: bindings.model.prediction_horizon_secs,
                 observations: &residual_observations,
@@ -2987,31 +3078,11 @@ impl PortfolioReplayTemplate {
                 scenario_fit_groups_hash: evidence.scenario_groups_hash,
                 bound_at: self.evaluation_frozen_at,
             })?;
-        let scenario = BacktestScenarioContext::try_new(
+        BacktestScenarioContext::try_new(
             fitted_scenario.binding,
             fitted_scenario.artifact,
             represented_routes.clone(),
-        )?;
-        let scenario_economic_function_hash = scenario.economic_function_hash();
-        let test_groups_hash = evidence.test_groups_hash();
-        let calibration = fitted_calibration.resolved;
-        let calibrated_model: Box<dyn QuantModelRuntime> =
-            Box::new(CrossFittedRuntime::new(model, calibration.clone()));
-        Ok(PurgedPortfolioFoldRuntime {
-            model: calibrated_model,
-            calibration,
-            calibration_artifact_hash: fitted_calibration.content_hash,
-            calibration_function_hash,
-            scenario,
-            scenario_economic_function_hash,
-            model_fit_groups_hash: evidence.model_groups_hash,
-            calibration_fit_groups_hash: evidence.calibration_groups_hash,
-            scenario_fit_groups_hash: evidence.scenario_groups_hash,
-            test_groups_hash,
-            model_fit_groups: split.model.group_indices.clone(),
-            calibration_fit_groups: split.calibration.group_indices.clone(),
-            scenario_fit_groups: split.scenario.group_indices.clone(),
-        })
+        )
     }
 
     fn replay_calibration(

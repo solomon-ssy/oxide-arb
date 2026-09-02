@@ -25,7 +25,7 @@ use quant_pivot_models::{
         BacktestPathSetId, CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId,
         ModelRunId, ModelVersionId, PolicyBundleGeneration, PortfolioScenarioModelArtifactId,
         ResearchFeatureContract, ResearchProfileRef, SchemaVersion, ServingAuthority,
-        TrainingDatasetId,
+        TradePolicyCohortProvenance, TrainingDatasetId,
         backtest::{
             BacktestPath, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
             CpcvFoldCalibrationPolicy, CpcvFoldValidationRegime, CpcvMethodologyBinding,
@@ -37,11 +37,11 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgBacktestPathSetRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgPolicyRepository, PgTrainingDatasetRepository,
+        PgPolicyRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
         BacktestPathSetRepository, CpcvPathSetCommit, ModelRegistryRepository, ModelRunRepository,
-        PolicyRepository, TrainingDatasetRepository,
+        PolicyRepository, TradePolicyRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -58,12 +58,13 @@ use crate::postgres::PostgresClock;
 
 use super::{
     execution_pg_seed::{
-        CalibratedModelHead, SeedModelVersionInput, SharedDemoInfra, fixture_profile_ref,
-        seed_model_version_named,
+        CalibratedModelHead, CalibrationEvidencePreset, SeedModelVersionInput, SharedDemoInfra,
+        fixture_profile_ref, seed_model_version_named,
     },
     model_spec_fixtures::crypto_profile_ref,
     policy_fixtures::{activate_policy_bundle, bootstrap_policy_bundle},
     research_fixtures::cscv_selection_fixture,
+    trade_policy_fixtures::FixtureBookTiming,
 };
 
 const PIT_STATE_COUNT: u32 = 320;
@@ -71,7 +72,11 @@ const CALIBRATION_STATE_COUNT: u32 = 40;
 const STRESS_STATE_COUNT: u32 = 40;
 const SCENARIO_STATE_COUNT: u32 = PIT_STATE_COUNT + CALIBRATION_STATE_COUNT + STRESS_STATE_COUNT;
 const EXPECTED_BLOCK_LENGTH: u32 = 8;
-const SCENARIO_HORIZON_BUCKETS: u32 = 30;
+// Disposable E2E methodology: 20 buckets require 40 complete observations
+// with block=8 and prove only the algorithm/governance flow. Operational
+// Activation must bind a separately governed real scenario artifact; evidence
+// produced by this fixture is never activation evidence.
+const SCENARIO_HORIZON_BUCKETS: u32 = 20;
 const PATH_HISTORY_DAYS: i64 = 180;
 
 #[derive(serde::Serialize)]
@@ -180,7 +185,57 @@ struct SeededScenarioGraph {
     content_hashes: BTreeMap<ContentHash, ContentHash>,
 }
 
+struct FeedbackRouteSets(Vec<RepresentedRouteSet>);
+
+impl FeedbackRouteSets {
+    fn build() -> Result<Self> {
+        Ok(Self(vec![
+            RepresentedRouteSet::from_routes([BuyModelRoute::Pooled])?,
+            RepresentedRouteSet::from_routes([BuyModelRoute::Crypto])?,
+            RepresentedRouteSet::from_routes([BuyModelRoute::Weather])?,
+            RepresentedRouteSet::from_routes([BuyModelRoute::Pooled, BuyModelRoute::Crypto])?,
+            RepresentedRouteSet::from_routes([BuyModelRoute::Pooled, BuyModelRoute::Weather])?,
+            RepresentedRouteSet::from_routes([BuyModelRoute::Crypto, BuyModelRoute::Weather])?,
+            RepresentedRouteSet::from_routes([
+                BuyModelRoute::Pooled,
+                BuyModelRoute::Crypto,
+                BuyModelRoute::Weather,
+            ])?,
+        ]))
+    }
+}
+
 impl SeededScenarioGraph {
+    async fn route_versions(
+        db: &DatabaseConnection,
+        policy: &DecisionPolicySnapshot,
+        crypto_model_version_id: ModelVersionId,
+        weather_model_version_id: ModelVersionId,
+    ) -> Result<BTreeMap<BuyModelRoute, ModelVersionInfo>> {
+        let registry = PgModelRegistryRepository::new(db.clone());
+        let pooled_model_version_id = policy
+            .model_routing
+            .model
+            .route_binding(BuyModelRoute::Pooled)?
+            .champion
+            .model_version_id;
+        let mut versions = BTreeMap::new();
+        for (route, model_version_id) in [
+            (BuyModelRoute::Pooled, pooled_model_version_id),
+            (BuyModelRoute::Crypto, crypto_model_version_id),
+            (BuyModelRoute::Weather, weather_model_version_id),
+        ] {
+            versions.insert(
+                route,
+                registry
+                    .find_model_version(&model_version_id)
+                    .await?
+                    .with_context(|| format!("mixed-Route {route:?} champion row is missing"))?,
+            );
+        }
+        Ok(versions)
+    }
+
     async fn build(
         db: &DatabaseConnection,
         artifact_store: &Arc<dyn ArtifactStore>,
@@ -318,11 +373,13 @@ pub async fn bootstrap_weather_evaluation_portfolio(
         db,
         SeedModelVersionInput {
             decision_policy_snapshot_id: base_snapshot_id,
+            book_timing: FixtureBookTiming::standard(),
             model_version_id: champion_model_version_id,
             model_name: "weather-evaluation-benchmark",
             profile_ref: fixture_profile_ref(),
             artifact_store: Some(artifact_store),
             head: CalibratedModelHead::Policy,
+            calibration_preset: CalibrationEvidencePreset::Baseline,
         },
     ))
     .await;
@@ -490,11 +547,13 @@ pub async fn seed_crypto_model(
         db,
         SeedModelVersionInput {
             decision_policy_snapshot_id,
+            book_timing: FixtureBookTiming::standard(),
             model_version_id,
             model_name,
             profile_ref: crypto_profile_ref(),
             artifact_store: Some(artifact_store),
             head: CalibratedModelHead::Policy,
+            calibration_preset: CalibrationEvidencePreset::Baseline,
         },
     ))
     .await;
@@ -653,18 +712,44 @@ async fn seed_scenario_validation_run(
     Ok(model_run_id)
 }
 
-/// Install the Crypto champion and the complete evaluation/report scenario graph,
-/// then return Weather lineage rebound to the activated policy generation.
+impl FixtureBookTiming {
+    async fn verify_published(
+        self,
+        db: &DatabaseConnection,
+        provenance: &TradePolicyCohortProvenance,
+    ) -> Result<()> {
+        let policy = PgTradePolicyRepository::new(db.clone())
+            .find(&provenance.artifact_id)
+            .await?
+            .context("mixed-Route Weather trade policy is absent")?;
+        let cohort = policy
+            .payload_json
+            .cohorts
+            .get(usize::try_from(provenance.cohort_index)?)
+            .context("mixed-Route Weather policy cohort is absent")?;
+        ensure!(
+            policy.content_hash == provenance.artifact_hash
+                && cohort.key == provenance.cohort_key
+                && cohort.max_book_age_ms == self.max_book_age_ms,
+            "Crypto/Weather fixture book timing must be identical before model sealing"
+        );
+        Ok(())
+    }
+}
+
+/// Install the Crypto champion and complete scenario graph with the same
+/// fixture book timing as the already-published Weather policy.
 ///
-/// Single-Route artifacts are the immutable ex-ante risk policy used by route-local
-/// backtests and CPCV. The joint Crypto/Weather artifact is the production report
-/// policy. Promotion must refit every artifact whose Route set contains Weather.
+/// Single-Route artifacts govern route-local backtests; the three-Route
+/// artifact governs production reports and is refitted on Weather promotion.
 pub async fn finalize_feedback_portfolio(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
     infra: SharedDemoInfra,
     weather_champion_model_version_id: ModelVersionId,
     evaluation_dataset_id: TrainingDatasetId,
+    book_timing: FixtureBookTiming,
+    calibration_preset: CalibrationEvidencePreset,
 ) -> Result<SharedDemoInfra> {
     let policies = PgPolicyRepository::new(db.clone());
     let base = policies
@@ -680,11 +765,15 @@ pub async fn finalize_feedback_portfolio(
         weather_binding.champion.model_version_id == weather_champion_model_version_id,
         "mixed-Route fixture Weather champion differs from the governed research model"
     );
+    book_timing
+        .verify_published(db, &infra.trade_policy)
+        .await?;
 
     let crypto = Box::pin(seed_model_version_named(
         db,
         SeedModelVersionInput {
             decision_policy_snapshot_id: base.decision_policy_snapshot_id,
+            book_timing,
             model_version_id: ModelVersionId::from_v7(),
             model_name: "feedback-closure-crypto-champion",
             profile_ref: crypto_profile_ref(),
@@ -694,14 +783,20 @@ pub async fn finalize_feedback_portfolio(
                 Decimal::ONE,
             )])
             .expect("Crypto scenario fixture head"),
+            calibration_preset,
         },
     ))
     .await;
-    let registry = PgModelRegistryRepository::new(db.clone());
-    let weather = registry
-        .find_model_version(&weather_champion_model_version_id)
-        .await?
-        .context("mixed-Route Weather champion row is missing")?;
+    let versions = SeededScenarioGraph::route_versions(
+        db,
+        &base.snapshot,
+        crypto.model_version_id,
+        weather_champion_model_version_id,
+    )
+    .await?;
+    let weather = versions
+        .get(&BuyModelRoute::Weather)
+        .context("mixed-Route version map lost Weather")?;
     let evaluation = PgTrainingDatasetRepository::new(db.clone())
         .find_by_id(&evaluation_dataset_id)
         .await?
@@ -720,25 +815,14 @@ pub async fn finalize_feedback_portfolio(
     let replay_data_cutoff = evaluation
         .window_start
         .min(feedback_plan.evaluation().window_start());
-    let crypto_version = registry
-        .find_model_version(&crypto.model_version_id)
-        .await?
-        .context("mixed-Route Crypto champion row is missing")?;
-    let versions = BTreeMap::from([
-        (BuyModelRoute::Crypto, crypto_version),
-        (BuyModelRoute::Weather, weather),
-    ]);
     let evidence_clock = db.statement_time().await;
+    let route_sets = FeedbackRouteSets::build()?;
     let scenario_graph = SeededScenarioGraph::build(
         db,
         artifact_store,
         &base.snapshot,
         &versions,
-        &[
-            RepresentedRouteSet::from_routes([BuyModelRoute::Crypto])?,
-            RepresentedRouteSet::from_routes([BuyModelRoute::Weather])?,
-            RepresentedRouteSet::from_routes([BuyModelRoute::Crypto, BuyModelRoute::Weather])?,
-        ],
+        &route_sets.0,
         replay_data_cutoff,
         evidence_clock,
     )
@@ -757,7 +841,7 @@ pub async fn finalize_feedback_portfolio(
         &policies,
         ConfigResourceKind::ModelRouting,
         "feedback-closure-portfolio-fixture",
-        "activate exact Crypto/Weather scenario model before the production closure",
+        "activate exact Pooled/Crypto/Weather scenario graph before the production closure",
         move |snapshot| {
             let weather = snapshot
                 .model_routing
@@ -1348,4 +1432,452 @@ async fn persist_model(
         "scenario-model artifact failed exact read-back"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeSet, slice};
+
+    use anyhow::{Context, Result, bail};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::{
+            market::{book::BookLevel, fee::BuilderFeeAttribution},
+            order::PolymarketOrderRules,
+            quant::{
+                DiscountCurvePoint, ExecutableEconomicTier, PortfolioScenarioEvidenceRegime,
+                PortfolioScenarioFitEvidence, PortfolioScenarioModelArtifact,
+                PortfolioScenarioResamplingMethod, PortfolioScenarioRouteFitLineage,
+                PortfolioScenarioRouteModelLineage, PortfolioScenarioVisibility,
+                RepresentedRouteSet, RouteCompatibilityDigests, RouteContractHash,
+                ScenarioDistribution,
+            },
+        },
+        enums::{
+            common::{MarketCategory, TickSize},
+            quant::{FillRequirement, OutcomeSide},
+        },
+        hashing::CanonicalDigest,
+        runtime_config::{BuyModelRoute, PortfolioScenarioModelArtifactBinding},
+        types::{
+            BacktestPathSetId, Bps, CalibrationArtifactId, ContentHash, EventId, MarketId,
+            ModelVersionId, PortfolioScenarioModelArtifactId, Price, ReportRouteRunId,
+            SchemaVersion, Shares, SignalCandidateId, TokenId, Usd,
+            calibration::CalibratedPayoutDistribution,
+        },
+    };
+    use quant_pivot_research::{
+        execution_semantics::PitFeeSchedule,
+        hashing::ResearchHasher,
+        portfolio::{
+            CapitalTimeBucketContract, EconomicTierFactory, ExecutableCashTierSeedFactory,
+            ExecutableCashTierSeedInput, PortfolioScenarioFoldFitInput,
+            PortfolioScenarioGenerationInput, PortfolioScenarioGenerator,
+            PortfolioScenarioLegInput, PortfolioScenarioMethodology, PortfolioScenarioModelFitter,
+            PortfolioScenarioResidualObservation, TierSeedBuild, VerifiedPortfolioScenarioModel,
+        },
+    };
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+    use uuid::Uuid;
+
+    use super::{
+        EXPECTED_BLOCK_LENGTH, FixtureRouteContract, SCENARIO_HORIZON_BUCKETS,
+        route_payout_residual, scenario_distributions, scenario_states,
+    };
+    use crate::support::execution_pg_seed::CalibrationEvidencePreset;
+
+    const ADMISSION_FLOOR_BPS: u32 = 5_200;
+    const REQUIRED_MARGIN_BPS: u32 = 800;
+
+    struct CadenceScenario {
+        represented: RepresentedRouteSet,
+        model: PortfolioScenarioModelArtifact,
+        binding: PortfolioScenarioModelArtifactBinding,
+    }
+
+    #[test]
+    fn strong_margin_crosses_streams() -> Result<()> {
+        let payout =
+            CalibrationEvidencePreset::StrongBinarySignal.calibrate_distribution(dec!(0.60))?;
+        // Consecutive production-closure cadences intentionally re-key the
+        // fitted stream; neither date is selected from a searched seed set.
+        let cadences = [
+            Utc.with_ymd_and_hms(2026, 6, 28, 12, 0, 0)
+                .single()
+                .context("first closure cadence is invalid")?,
+            Utc.with_ymd_and_hms(2026, 6, 29, 12, 0, 0)
+                .single()
+                .context("adjacent closure cadence is invalid")?,
+        ];
+        let quotes = [
+            (OutcomeSide::Yes, dec!(0.395), dec!(0.425)),
+            (OutcomeSide::No, dec!(0.3975), dec!(0.4225)),
+            (OutcomeSide::Yes, dec!(0.400), dec!(0.420)),
+            (OutcomeSide::No, dec!(0.4025), dec!(0.4175)),
+            (OutcomeSide::Yes, dec!(0.405), dec!(0.415)),
+        ];
+        let mut streams = BTreeSet::new();
+
+        for cadence in cadences {
+            let scenario = CadenceScenario::build(cadence)?;
+            assert!(
+                streams.insert(scenario.model.scenario_random_stream_hash),
+                "adjacent closure cadences must select different scenario streams"
+            );
+            let verified = VerifiedPortfolioScenarioModel::verify(
+                &scenario.binding,
+                &scenario.model,
+                &scenario.represented,
+            )?;
+            for (index, (side, bid, ask)) in quotes.into_iter().enumerate() {
+                let ordinal = u32::try_from(index + 1)?;
+                let (tier, distributions) =
+                    tier_for_candidate(cadence, ordinal, side, bid, ask, payout, &verified)?;
+                let lower = distributions
+                    .iter()
+                    .map(|distribution| {
+                        let probability = positive_probability_bps(&tier, distribution)?;
+                        assert!(
+                            probability >= ADMISSION_FLOOR_BPS + REQUIRED_MARGIN_BPS,
+                            "StrongBinarySignal margin regressed: cadence={cadence} stream={} ordinal={ordinal} side={side:?} distribution={} probability_bps={probability} required_bps={}",
+                            scenario.model.scenario_random_stream_hash,
+                            distribution.distribution_id,
+                            ADMISSION_FLOOR_BPS + REQUIRED_MARGIN_BPS,
+                        );
+                        Ok(probability)
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .min()
+                    .context("scenario artifact has no allowed distribution")?;
+                assert_eq!(
+                    tier.profit_probability_lower_bps, lower,
+                    "production economic tier must retain the conservative distribution floor"
+                );
+            }
+        }
+        assert_eq!(streams.len(), cadences.len());
+        Ok(())
+    }
+
+    impl CadenceScenario {
+        fn build(cadence: DateTime<Utc>) -> Result<Self> {
+            let represented = RepresentedRouteSet::from_routes([BuyModelRoute::Crypto])?;
+            let contracts = [fixture_contract()?];
+            let contract = &contracts[0];
+            let compatibility = RouteCompatibilityDigests::try_new(
+                &represented,
+                &[RouteContractHash {
+                    route: BuyModelRoute::Crypto,
+                    content_hash: contract.serving_contract_hash,
+                }],
+                &[RouteContractHash {
+                    route: BuyModelRoute::Crypto,
+                    content_hash: contract.calibration_contract_hash,
+                }],
+                &[RouteContractHash {
+                    route: BuyModelRoute::Crypto,
+                    content_hash: contract.recommendation_contract_hash,
+                }],
+            )?;
+            let model = scenario_template(cadence, &represented, &contracts, compatibility)?;
+            let methodology = PortfolioScenarioMethodology::from_promoted(&model)?;
+            let calibration =
+                CalibrationEvidencePreset::StrongBinarySignal.resolved_calibration()?;
+            let observations = fit_observations(cadence);
+            let fitted = PortfolioScenarioModelFitter::fit_fold(&PortfolioScenarioFoldFitInput {
+                methodology: &methodology,
+                represented_routes: &represented,
+                compatibility,
+                evidence_regime: PortfolioScenarioEvidenceRegime::FullL2ExecutionEconomics,
+                route: BuyModelRoute::Crypto,
+                model_version_id: contract.model_version_id,
+                model_artifact_hash: contract.model_artifact_hash,
+                serving_contract_hash: contract.serving_contract_hash,
+                calibration_artifact_hash: contract.calibration_contract_hash,
+                calibration: &calibration,
+                recommendation_contract_hash: contract.recommendation_contract_hash,
+                prediction_horizon_secs: 3_600,
+                observations: &observations,
+                estimator_identity_hash: fixture_hash("strong-margin-estimator")?,
+                model_fit_groups_hash: fixture_hash("strong-margin-model-groups")?,
+                calibration_fit_groups_hash: fixture_hash("strong-margin-calibration-groups")?,
+                scenario_fit_groups_hash: fixture_hash("strong-margin-scenario-groups")?,
+                bound_at: cadence,
+            })?;
+            assert_ne!(
+                fitted.artifact.scenario_random_stream_hash, model.scenario_random_stream_hash,
+                "regression must exercise the fitted stream, not the bootstrap template"
+            );
+            Ok(Self {
+                represented,
+                model: fitted.artifact,
+                binding: fitted.binding,
+            })
+        }
+    }
+
+    fn scenario_template(
+        cadence: DateTime<Utc>,
+        represented: &RepresentedRouteSet,
+        contracts: &[FixtureRouteContract],
+        compatibility: RouteCompatibilityDigests,
+    ) -> Result<PortfolioScenarioModelArtifact> {
+        let contract = contracts
+            .first()
+            .context("StrongBinarySignal template lost its Crypto contract")?;
+        let fit_window_start = cadence - Duration::days(182);
+        let as_of = cadence - Duration::days(2);
+        let states = scenario_states(represented, contracts)?;
+        let discount_curve = vec![DiscountCurvePoint {
+            end_secs: 7_200,
+            annualized_cost_bps: 500,
+        }];
+        let capital_time_bucket_contract_digest =
+            CapitalTimeBucketContract::try_from(discount_curve.as_slice())?.content_hash()?;
+        let scenario_random_stream_hash = ResearchHasher::canonical(&(
+            "feedback-closure-scenario-random-stream-v1",
+            represented.digest,
+            fit_window_start,
+            as_of,
+        ))?;
+        let pit_residual_panel_hash = ResearchHasher::canonical(&(
+            "feedback-closure-margin-panel-v1",
+            represented.digest,
+            fit_window_start,
+            as_of,
+        ))?;
+        let mut model = PortfolioScenarioModelArtifact {
+            portfolio_scenario_model_artifact_id:
+                PortfolioScenarioModelArtifactId::from_content_hash(&pit_residual_panel_hash),
+            schema_version: SchemaVersion::FIRST,
+            as_of,
+            fit_window_start,
+            time_bucket_secs: 3_600,
+            ordered_routes: represented.routes.clone(),
+            route_set_digest: represented.digest,
+            serving_contract_digest: compatibility.serving_contract_digest,
+            calibration_contract_digest: compatibility.calibration_contract_digest,
+            recommendation_contract_digest: compatibility.recommendation_contract_digest,
+            evidence_regime: PortfolioScenarioEvidenceRegime::FullL2ExecutionEconomics,
+            capital_time_bucket_contract_digest,
+            scenario_random_stream_hash,
+            pit_residual_panel_hash,
+            calibration_uncertainty_model_hash: ResearchHasher::canonical(&(
+                "feedback-closure-margin-calibration-v1",
+                contract.calibration_artifact_id,
+                contract.calibration_contract_hash,
+            ))?,
+            stress_catalog_hash: ResearchHasher::canonical(&(
+                "feedback-closure-margin-stress-v1",
+                &states,
+            ))?,
+            resampling_method: PortfolioScenarioResamplingMethod::StationaryBootstrap {
+                expected_block_length: EXPECTED_BLOCK_LENGTH,
+                scenario_horizon_buckets: SCENARIO_HORIZON_BUCKETS,
+            },
+            route_fit_lineage: vec![PortfolioScenarioRouteFitLineage {
+                route: BuyModelRoute::Crypto,
+                model_lineage: PortfolioScenarioRouteModelLineage {
+                    evaluated_model_version_id: contract.model_version_id,
+                    evaluated_model_artifact_hash: contract.model_artifact_hash,
+                    evaluated_serving_contract_hash: contract.serving_contract_hash,
+                    calibration_source_model_version_id: contract
+                        .calibration_source_model_version_id,
+                    calibration_source_model_artifact_hash: contract
+                        .calibration_source_model_artifact_hash,
+                    calibration_source_serving_contract_hash: contract
+                        .calibration_source_serving_contract_hash,
+                },
+                fit_evidence: PortfolioScenarioFitEvidence::CpcvPath {
+                    backtest_path_set_id: BacktestPathSetId::new(fixture_uuid(
+                        "strong-margin-path-set",
+                    )),
+                    backtest_path_set_hash: pit_residual_panel_hash,
+                    representative_path_index: 0,
+                },
+                calibration_artifact_id: contract.calibration_artifact_id,
+                calibration_artifact_hash: contract.calibration_contract_hash,
+                recommendation_contract_hash: contract.recommendation_contract_hash,
+                fit_window_start,
+                fit_window_end: as_of,
+            }],
+            states,
+            distributions: scenario_distributions(),
+            discount_curve,
+            content_hash: pit_residual_panel_hash,
+        };
+        model.content_hash = model.recomputed_hash()?;
+        model.portfolio_scenario_model_artifact_id =
+            PortfolioScenarioModelArtifactId::from_content_hash(&model.content_hash);
+        Ok(model)
+    }
+
+    fn fit_observations(cadence: DateTime<Utc>) -> Vec<PortfolioScenarioResidualObservation> {
+        let observation_start = cadence - Duration::days(181);
+        (0_i64..180)
+            .map(|offset| PortfolioScenarioResidualObservation {
+                decision_at: observation_start + Duration::days(offset),
+                market_id: MarketId::new(format!(
+                    "strong-margin-fit-market-{}",
+                    offset.rem_euclid(5) + 1
+                )),
+                token_id: TokenId::new(format!(
+                    "strong-margin-fit-token-{}",
+                    offset.rem_euclid(5) + 1
+                )),
+                economic_residual: route_payout_residual(BuyModelRoute::Crypto, offset),
+            })
+            .collect()
+    }
+
+    fn fixture_contract() -> Result<FixtureRouteContract> {
+        Ok(FixtureRouteContract {
+            route: BuyModelRoute::Crypto,
+            model_version_id: ModelVersionId::new(fixture_uuid("strong-margin-model")),
+            model_artifact_hash: fixture_hash("strong-margin-model-artifact")?,
+            serving_contract_hash: fixture_hash("strong-margin-serving-contract")?,
+            calibration_source_model_version_id: ModelVersionId::new(fixture_uuid(
+                "strong-margin-calibration-source",
+            )),
+            calibration_source_model_artifact_hash: fixture_hash(
+                "strong-margin-calibration-source-artifact",
+            )?,
+            calibration_source_serving_contract_hash: fixture_hash(
+                "strong-margin-calibration-source-serving",
+            )?,
+            calibration_artifact_id: CalibrationArtifactId::new(fixture_uuid(
+                "strong-margin-calibration",
+            )),
+            calibration_contract_hash: fixture_hash("strong-margin-calibration-contract")?,
+            recommendation_contract_hash: fixture_hash("strong-margin-recommendation-contract")?,
+            prediction_horizon_secs: 3_600,
+        })
+    }
+
+    fn tier_for_candidate(
+        cadence: DateTime<Utc>,
+        ordinal: u32,
+        side: OutcomeSide,
+        bid: Decimal,
+        ask: Decimal,
+        payout: CalibratedPayoutDistribution,
+        model: &VerifiedPortfolioScenarioModel<'_>,
+    ) -> Result<(ExecutableEconomicTier, Vec<ScenarioDistribution>)> {
+        let market_id = MarketId::new(format!("feedback-closure-report-crypto-market-{ordinal}"));
+        let token_id = TokenId::new(format!("strong-margin-{side:?}-{ordinal}"));
+        let lineage_hash = ResearchHasher::canonical(&(
+            "feedback-closure-strong-margin-candidate-v1",
+            cadence,
+            ordinal,
+            side,
+        ))?;
+        let leg = PortfolioScenarioLegInput {
+            route: BuyModelRoute::Crypto,
+            market_id: market_id.clone(),
+            token_id: token_id.clone(),
+            outcome_side: side,
+            calibrated_payout_distribution: payout,
+            observed_exit_capacity_shares: Shares::new(dec!(2_400)),
+            base_capital_release_secs: 3_600,
+            lineage_hash,
+        };
+        let scenario = PortfolioScenarioGenerator::generate(PortfolioScenarioGenerationInput {
+            model_contract: model,
+            decision_at: cadence + Duration::seconds(2),
+            visibility: PortfolioScenarioVisibility::PointInTime,
+            input_universe_hash: ResearchHasher::canonical(&(
+                "feedback-closure-strong-margin-universe-v1",
+                cadence,
+            ))?,
+            legs: slice::from_ref(&leg),
+        })?;
+        let bids = [
+            BookLevel::from_decimal(Price::new(bid), Shares::new(dec!(2_400)))
+                .context("closure margin bid is not representable")?,
+        ];
+        let asks = [
+            BookLevel::from_decimal(Price::new(ask), Shares::new(dec!(21_600)))
+                .context("closure margin ask is not representable")?,
+        ];
+        let fee_schedule = PitFeeSchedule {
+            schedule_hash: fixture_hash("strong-margin-fee-schedule")?,
+            effective_at: cadence - Duration::days(1),
+            available_at: cadence - Duration::days(1),
+            platform_rate: dec!(0.04),
+            exponent: Decimal::ONE,
+            taker_only: true,
+            builder_maker_fee_bps: Bps::ZERO,
+            builder_taker_fee_bps: Bps::ZERO,
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+        };
+        let rules = PolymarketOrderRules::new(TickSize::QuarterCent, Shares::new(dec!(5)))?;
+        let TierSeedBuild::Ready(seed) =
+            ExecutableCashTierSeedFactory::build(ExecutableCashTierSeedInput {
+                report_route_run_id: ReportRouteRunId::new(fixture_uuid(&format!(
+                    "strong-margin-route-run-{cadence}"
+                ))),
+                candidate_id: SignalCandidateId::new(fixture_uuid(&format!(
+                    "strong-margin-candidate-{cadence}-{ordinal}"
+                ))),
+                tier_ordinal: ordinal,
+                route: BuyModelRoute::Crypto,
+                market_id,
+                event_id: EventId::new(format!("strong-margin-event-{ordinal}")),
+                category: MarketCategory::Crypto,
+                token_id,
+                outcome_side: side,
+                bids: &bids,
+                asks: &asks,
+                fee_schedule: &fee_schedule,
+                fill_at: cadence,
+                limit_price: Price::new(ask),
+                cash_budget: Usd::new(dec!(25)),
+                fill_requirement: FillRequirement::AllOrNothing,
+                order_rules: rules,
+                source_lineage_hash: lineage_hash,
+            })?
+        else {
+            bail!("closure StrongBinarySignal tier did not remain exactly executable")
+        };
+        let distributions = scenario.distributions.clone();
+        let tier = EconomicTierFactory::build(*seed, &scenario)?;
+        Ok((tier, distributions))
+    }
+
+    fn positive_probability_bps(
+        tier: &ExecutableEconomicTier,
+        distribution: &ScenarioDistribution,
+    ) -> Result<u32> {
+        distribution
+            .weights
+            .iter()
+            .try_fold(0_u32, |total, weight| {
+                let cashflow = tier
+                    .scenario_cashflows
+                    .get(usize::try_from(weight.scenario_index)?)
+                    .filter(|cashflow| cashflow.scenario_index == weight.scenario_index)
+                    .context("distribution references an absent scenario cash flow")?;
+                if cashflow.discounted_net_usd.is_positive() {
+                    total
+                        .checked_add(weight.probability_bps)
+                        .context("positive scenario mass overflowed u32")
+                } else {
+                    Ok(total)
+                }
+            })
+    }
+
+    fn fixture_hash(label: &str) -> Result<ContentHash> {
+        Ok(CanonicalDigest::content_hash_typed(
+            "quant-pivot/feedback-closure-margin-fixture",
+            1,
+            &label,
+        )?)
+    }
+
+    fn fixture_uuid(label: &str) -> Uuid {
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, label.as_bytes())
+    }
 }

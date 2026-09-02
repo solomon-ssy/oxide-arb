@@ -1,9 +1,6 @@
 //! Batched persistence barrier for the canonical L2 ledger.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use quant_pivot_models::{
     clickhouse::BookL2LedgerRow,
@@ -16,7 +13,7 @@ use tokio::{
         mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender},
         watch::{self, Receiver as WatchReceiver, Sender as WatchSender},
     },
-    time::timeout,
+    time::{Instant, timeout},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -46,13 +43,81 @@ pub enum PartitionCommit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedgerPersistenceError {
     QueueTimeout,
-    QueueClosed,
-    CommitTimeout,
-    CommitCursorClosed,
+    QueueClosed {
+        batch_id: PartitionBatchId,
+    },
+    PublicationQuarantined {
+        batch_id: PartitionBatchId,
+    },
+    ReconciliationTimeout {
+        batch_id: PartitionBatchId,
+    },
+    CommitCursorClosed {
+        batch_id: PartitionBatchId,
+    },
     CommitFailed {
         batch_id: PartitionBatchId,
         generation: u64,
     },
+    ClientFenced {
+        batch_id: PartitionBatchId,
+    },
+}
+
+impl LedgerPersistenceError {
+    #[must_use]
+    pub(crate) const fn requires_fail_stop(self) -> bool {
+        matches!(
+            self,
+            Self::QueueClosed { .. }
+                | Self::ReconciliationTimeout { .. }
+                | Self::CommitCursorClosed { .. }
+                | Self::ClientFenced { .. }
+        )
+    }
+
+    #[must_use]
+    pub(crate) const fn batch_id(self) -> Option<PartitionBatchId> {
+        match self {
+            Self::QueueClosed { batch_id }
+            | Self::PublicationQuarantined { batch_id }
+            | Self::ReconciliationTimeout { batch_id }
+            | Self::CommitCursorClosed { batch_id }
+            | Self::CommitFailed { batch_id, .. }
+            | Self::ClientFenced { batch_id } => Some(batch_id),
+            Self::QueueTimeout => None,
+        }
+    }
+}
+
+/// Independent admission, publication-quarantine, and final reconciliation
+/// budgets for one ledger request. Performance gates own latency SLOs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LedgerPersistenceBudgets {
+    enqueue: Duration,
+    publication_quarantine: Duration,
+    reconciliation_ceiling: Duration,
+}
+
+impl LedgerPersistenceBudgets {
+    #[must_use]
+    pub(crate) const fn new(
+        enqueue: Duration,
+        publication_quarantine: Duration,
+        reconciliation_ceiling: Duration,
+    ) -> Self {
+        Self {
+            enqueue,
+            publication_quarantine,
+            reconciliation_ceiling,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InFlightCommit {
+    batch_id: PartitionBatchId,
+    reconcile_by: Instant,
 }
 
 /// Factory for the eight long-lived partition commit cursors.
@@ -74,6 +139,7 @@ impl LedgerPersistenceHandle {
             request_tx: self.request_tx.clone(),
             commit,
             in_flight: None,
+            fenced_on: None,
         })
     }
 }
@@ -84,76 +150,121 @@ pub struct PartitionLedgerClient {
     partition_id: PartitionId,
     request_tx: MpscSender<QueuedLedgerWriteRequest>,
     commit: WatchReceiver<PartitionCommit>,
-    in_flight: Option<PartitionBatchId>,
+    in_flight: Option<InFlightCommit>,
+    fenced_on: Option<PartitionBatchId>,
 }
 
 impl PartitionLedgerClient {
-    pub async fn persist(
+    /// Submit one immutable partition batch and wait for its bounded durable
+    /// commit cursor before the caller publishes derived book state.
+    pub(crate) async fn persist(
         &mut self,
         batch_id: PartitionBatchId,
         rows: Vec<BookL2LedgerRow>,
-        timeout_duration: Duration,
+        budgets: LedgerPersistenceBudgets,
     ) -> Result<(), LedgerPersistenceError> {
-        if let Some(in_flight) = self.in_flight {
-            let recovered = self.wait_with_timeout(in_flight, timeout_duration).await;
-            if !matches!(recovered, Err(LedgerPersistenceError::CommitTimeout)) {
-                self.in_flight = None;
-            }
-            recovered?;
+        if let Some(batch_id) = self.fenced_on {
+            return Err(LedgerPersistenceError::ClientFenced { batch_id });
         }
+        self.reconcile_outstanding().await?;
+        let submitted_at = Instant::now();
         let request = QueuedLedgerWriteRequest {
             request: LedgerWriteRequest {
                 partition_id: self.partition_id,
                 batch_id,
                 rows,
             },
-            enqueued_at: Instant::now(),
+            enqueued_at: submitted_at,
         };
-        match timeout(timeout_duration, self.request_tx.send(request)).await {
+        match timeout(budgets.enqueue, self.request_tx.send(request)).await {
             Ok(Ok(())) => {}
-            Ok(Err(_)) => return Err(LedgerPersistenceError::QueueClosed),
+            Ok(Err(_)) => return Err(LedgerPersistenceError::QueueClosed { batch_id }),
             Err(_) => return Err(LedgerPersistenceError::QueueTimeout),
         }
-        self.in_flight = Some(batch_id);
-        let result = self.wait_with_timeout(batch_id, timeout_duration).await;
-        if !matches!(result, Err(LedgerPersistenceError::CommitTimeout)) {
+        let publication_by = submitted_at + budgets.publication_quarantine;
+        self.in_flight = Some(InFlightCommit {
+            batch_id,
+            reconcile_by: submitted_at + budgets.reconciliation_ceiling,
+        });
+        let remaining = publication_by.saturating_duration_since(Instant::now());
+        match timeout(remaining, self.wait_for(batch_id)).await {
+            Ok(result) => self.finish_terminal(result),
+            Err(_) => self.observed_terminal(batch_id).map_or(
+                Err(LedgerPersistenceError::PublicationQuarantined { batch_id }),
+                |result| self.finish_terminal(result),
+            ),
+        }
+    }
+
+    pub(crate) async fn reconcile_outstanding(&mut self) -> Result<(), LedgerPersistenceError> {
+        let Some(in_flight) = self.in_flight else {
+            return Ok(());
+        };
+        let remaining = in_flight
+            .reconcile_by
+            .saturating_duration_since(Instant::now());
+        let result = timeout(remaining, self.wait_for(in_flight.batch_id))
+            .await
+            .unwrap_or_else(|_| {
+                self.observed_terminal(in_flight.batch_id).unwrap_or(Err(
+                    LedgerPersistenceError::ReconciliationTimeout {
+                        batch_id: in_flight.batch_id,
+                    },
+                ))
+            });
+        if matches!(
+            result,
+            Err(LedgerPersistenceError::ReconciliationTimeout { .. }
+                | LedgerPersistenceError::CommitCursorClosed { .. })
+        ) {
+            self.fenced_on = Some(in_flight.batch_id);
+        } else {
             self.in_flight = None;
         }
         result
     }
 
-    async fn wait_with_timeout(
+    const fn finish_terminal(
         &mut self,
-        batch_id: PartitionBatchId,
-        timeout_duration: Duration,
+        result: Result<(), LedgerPersistenceError>,
     ) -> Result<(), LedgerPersistenceError> {
-        timeout(timeout_duration, self.wait_for(batch_id))
-            .await
-            .map_or(Err(LedgerPersistenceError::CommitTimeout), |result| result)
+        if let Err(LedgerPersistenceError::CommitCursorClosed { batch_id }) = result {
+            self.fenced_on = Some(batch_id);
+        } else {
+            self.in_flight = None;
+        }
+        result
     }
 
     async fn wait_for(&mut self, batch_id: PartitionBatchId) -> Result<(), LedgerPersistenceError> {
         loop {
-            let state = *self.commit.borrow_and_update();
-            match state {
-                PartitionCommit::Committed(committed) if committed >= batch_id => return Ok(()),
-                PartitionCommit::Failed {
-                    batch_id: failed,
-                    generation,
-                } if failed >= batch_id => {
-                    return Err(LedgerPersistenceError::CommitFailed {
-                        batch_id: failed,
-                        generation,
-                    });
-                }
-                PartitionCommit::Pending
-                | PartitionCommit::Committed(_)
-                | PartitionCommit::Failed { .. } => {}
+            if let Some(result) = self.observed_terminal(batch_id) {
+                return result;
             }
             self.commit
                 .changed()
                 .await
-                .map_err(|_| LedgerPersistenceError::CommitCursorClosed)?;
+                .map_err(|_| LedgerPersistenceError::CommitCursorClosed { batch_id })?;
+        }
+    }
+
+    fn observed_terminal(
+        &mut self,
+        batch_id: PartitionBatchId,
+    ) -> Option<Result<(), LedgerPersistenceError>> {
+        let state = *self.commit.borrow_and_update();
+        match state {
+            PartitionCommit::Committed(committed) if committed >= batch_id => Some(Ok(())),
+            PartitionCommit::Failed {
+                batch_id: failed,
+                generation,
+            } if failed >= batch_id => Some(Err(LedgerPersistenceError::CommitFailed {
+                batch_id: failed,
+                generation,
+            })),
+            PartitionCommit::Pending
+            | PartitionCommit::Committed(_)
+            | PartitionCommit::Failed { .. } => None,
         }
     }
 }
@@ -293,7 +404,12 @@ impl LedgerPersistenceCoordinator {
         if self.commits.is_empty() {
             return;
         }
+        if let Some(oldest) = self.commits.iter().map(|commit| commit.enqueued_at).min() {
+            self.observe_stage("admission_to_sink", oldest);
+        }
+        let sink_started = Instant::now();
         let persisted = self.sink.write_batch_borrowed(&self.rows).await;
+        self.observe_stage("sink_ack", sink_started);
         match persisted {
             Ok(()) => {
                 if let Some(report) = &self.observability.flush_lag_ms
@@ -336,6 +452,15 @@ impl LedgerPersistenceCoordinator {
             gauge.set(i64::try_from(self.request_rx.len()).unwrap_or(i64::MAX));
         }
     }
+
+    fn observe_stage(&self, stage: &'static str, started: Instant) {
+        if let Some(report) = &self.observability.stage_lag_ms {
+            report(
+                stage,
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -363,25 +488,29 @@ mod tests {
     use quant_pivot_storage::write::AsyncWriterObservability;
     use tokio::{
         sync::{mpsc, watch},
-        time::sleep,
+        time::{Instant, sleep},
     };
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     use super::{
-        LedgerPersistenceCoordinator, LedgerPersistenceError, PartitionCommit,
-        PartitionLedgerClient, QueuedLedgerWriteRequest,
+        LedgerPersistenceBudgets, LedgerPersistenceCoordinator, LedgerPersistenceError,
+        LedgerWriteRequest, PartitionCommit, PartitionLedgerClient, QueuedLedgerWriteRequest,
     };
 
     #[derive(Default)]
     struct RecordingSink {
         batches: Mutex<Vec<Vec<BookL2LedgerRow>>>,
         failures_remaining: AtomicU64,
+        write_delay: Duration,
     }
 
     #[async_trait::async_trait]
     impl FactWriter<BookL2LedgerRow> for RecordingSink {
         async fn write_batch(&self, rows: Vec<BookL2LedgerRow>) -> Result<(), StorageError> {
+            if !self.write_delay.is_zero() {
+                sleep(self.write_delay).await;
+            }
             if self
                 .failures_remaining
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
@@ -425,12 +554,25 @@ mod tests {
         }
     }
 
+    const TEST_BUDGETS: LedgerPersistenceBudgets = LedgerPersistenceBudgets::new(
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_secs(5),
+    );
+
     #[tokio::test]
     async fn coordinator_aggregates_advances_cursors() {
         let sink = Arc::new(RecordingSink::default());
+        let stages = Arc::new(Mutex::new(Vec::new()));
+        let observed_stages = Arc::clone(&stages);
         let (handle, coordinator) = LedgerPersistenceCoordinator::new(
             Arc::clone(&sink) as Arc<dyn FactWriter<BookL2LedgerRow>>,
-            AsyncWriterObservability::default(),
+            AsyncWriterObservability {
+                stage_lag_ms: Some(Arc::new(move |stage, _| {
+                    observed_stages.lock().push(stage);
+                })),
+                ..AsyncWriterObservability::default()
+            },
         );
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(coordinator.run(shutdown.clone()));
@@ -438,20 +580,13 @@ mod tests {
         let mut second = handle.partition(PartitionId::new(1)).expect("partition 1");
 
         let (first_result, second_result) = tokio::join!(
-            first.persist(
-                PartitionBatchId::new(1),
-                vec![row(0, 1)],
-                Duration::from_secs(1),
-            ),
-            second.persist(
-                PartitionBatchId::new(1),
-                vec![row(1, 1)],
-                Duration::from_secs(1),
-            ),
+            first.persist(PartitionBatchId::new(1), vec![row(0, 1)], TEST_BUDGETS),
+            second.persist(PartitionBatchId::new(1), vec![row(1, 1)], TEST_BUDGETS),
         );
         assert_eq!(first_result, Ok(()));
         assert_eq!(second_result, Ok(()));
         assert_eq!(sink.batches.lock()[0].len(), 2);
+        assert_eq!(*stages.lock(), ["admission_to_sink", "sink_ack"]);
 
         shutdown.cancel();
         task.await.expect("coordinator");
@@ -471,11 +606,7 @@ mod tests {
 
         assert_eq!(
             client
-                .persist(
-                    PartitionBatchId::new(1),
-                    vec![row(2, 1)],
-                    Duration::from_secs(1),
-                )
+                .persist(PartitionBatchId::new(1), vec![row(2, 1)], TEST_BUDGETS,)
                 .await,
             Err(LedgerPersistenceError::CommitFailed {
                 batch_id: PartitionBatchId::new(1),
@@ -484,11 +615,7 @@ mod tests {
         );
         assert_eq!(
             client
-                .persist(
-                    PartitionBatchId::new(2),
-                    vec![row(2, 2)],
-                    Duration::from_secs(1),
-                )
+                .persist(PartitionBatchId::new(2), vec![row(2, 2)], TEST_BUDGETS,)
                 .await,
             Ok(())
         );
@@ -496,6 +623,77 @@ mod tests {
 
         shutdown.cancel();
         task.await.expect("coordinator");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_commit_within_budget() {
+        let delay = Duration::from_millis(300);
+        let budgets = LedgerPersistenceBudgets::new(
+            Duration::from_millis(250),
+            Duration::from_secs(2),
+            Duration::from_secs(12),
+        );
+        let sink = Arc::new(RecordingSink {
+            write_delay: delay,
+            ..RecordingSink::default()
+        });
+        let (handle, coordinator) = LedgerPersistenceCoordinator::new(
+            Arc::clone(&sink) as Arc<dyn FactWriter<BookL2LedgerRow>>,
+            AsyncWriterObservability::default(),
+        );
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(coordinator.run(shutdown.clone()));
+        let mut client = handle.partition(PartitionId::new(0)).expect("partition 0");
+
+        assert_eq!(
+            client
+                .persist(PartitionBatchId::new(1), vec![row(0, 1)], budgets)
+                .await,
+            Ok(())
+        );
+        assert_eq!(sink.batches.lock().len(), 1);
+
+        shutdown.cancel();
+        task.await.expect("coordinator");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn enqueue_timeout_stays_bounded() {
+        let (request_tx, _request_rx) = mpsc::channel::<QueuedLedgerWriteRequest>(1);
+        request_tx
+            .send(QueuedLedgerWriteRequest {
+                request: LedgerWriteRequest {
+                    partition_id: PartitionId::new(0),
+                    batch_id: PartitionBatchId::new(1),
+                    rows: vec![row(0, 1)],
+                },
+                enqueued_at: Instant::now(),
+            })
+            .await
+            .expect("prefill ledger request queue");
+        let (_commit_tx, commit_rx) = watch::channel(PartitionCommit::Pending);
+        let mut client = PartitionLedgerClient {
+            partition_id: PartitionId::new(0),
+            request_tx,
+            commit: commit_rx,
+            in_flight: None,
+            fenced_on: None,
+        };
+
+        assert_eq!(
+            client
+                .persist(
+                    PartitionBatchId::new(2),
+                    vec![row(0, 2)],
+                    LedgerPersistenceBudgets::new(
+                        Duration::from_millis(250),
+                        Duration::from_secs(2),
+                        Duration::from_secs(12),
+                    ),
+                )
+                .await,
+            Err(LedgerPersistenceError::QueueTimeout)
+        );
     }
 
     #[tokio::test]
@@ -507,6 +705,7 @@ mod tests {
             request_tx,
             commit: commit_rx,
             in_flight: None,
+            fenced_on: None,
         };
         commit_tx.send_replace(PartitionCommit::Committed(PartitionBatchId::new(5)));
         assert_eq!(client.wait_for(PartitionBatchId::new(3)).await, Ok(()));
@@ -516,7 +715,9 @@ mod tests {
         drop(closed_tx);
         assert_eq!(
             client.wait_for(PartitionBatchId::new(6)).await,
-            Err(LedgerPersistenceError::CommitCursorClosed)
+            Err(LedgerPersistenceError::CommitCursorClosed {
+                batch_id: PartitionBatchId::new(6),
+            })
         );
     }
 
@@ -529,6 +730,7 @@ mod tests {
             request_tx,
             commit: commit_rx,
             in_flight: None,
+            fenced_on: None,
         };
         let committer = tokio::spawn(async move {
             let first = request_rx.recv().await.expect("first queued batch");
@@ -543,22 +745,160 @@ mod tests {
                 .persist(
                     PartitionBatchId::new(1),
                     vec![row(0, 1)],
-                    Duration::from_millis(5),
+                    LedgerPersistenceBudgets::new(
+                        Duration::from_secs(1),
+                        Duration::from_millis(5),
+                        Duration::from_secs(1),
+                    ),
                 )
                 .await,
-            Err(LedgerPersistenceError::CommitTimeout)
+            Err(LedgerPersistenceError::PublicationQuarantined {
+                batch_id: PartitionBatchId::new(1),
+            })
         );
         assert_eq!(
             client
-                .persist(
-                    PartitionBatchId::new(2),
-                    vec![row(0, 2)],
-                    Duration::from_secs(1),
-                )
+                .persist(PartitionBatchId::new(2), vec![row(0, 2)], TEST_BUDGETS,)
                 .await,
             Ok(())
         );
         committer.await.expect("late committer");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn barrier_reconciles_late_commit() {
+        let (request_tx, mut request_rx) = mpsc::channel::<QueuedLedgerWriteRequest>(1);
+        let (commit_tx, commit_rx) = watch::channel(PartitionCommit::Pending);
+        let mut client = PartitionLedgerClient {
+            partition_id: PartitionId::new(0),
+            request_tx,
+            commit: commit_rx,
+            in_flight: None,
+            fenced_on: None,
+        };
+        let committer = tokio::spawn(async move {
+            let first = request_rx.recv().await.expect("first queued batch");
+            sleep(Duration::from_secs(3)).await;
+            commit_tx.send_replace(PartitionCommit::Committed(first.request.batch_id));
+            let second = request_rx.recv().await.expect("second queued batch");
+            commit_tx.send_replace(PartitionCommit::Committed(second.request.batch_id));
+        });
+        let budgets = LedgerPersistenceBudgets::new(
+            Duration::from_millis(250),
+            Duration::from_secs(2),
+            Duration::from_secs(12),
+        );
+
+        assert_eq!(
+            client
+                .persist(PartitionBatchId::new(1), vec![row(0, 1)], budgets)
+                .await,
+            Err(LedgerPersistenceError::PublicationQuarantined {
+                batch_id: PartitionBatchId::new(1),
+            })
+        );
+        assert_eq!(client.reconcile_outstanding().await, Ok(()));
+        assert_eq!(
+            client
+                .persist(PartitionBatchId::new(2), vec![row(0, 2)], budgets)
+                .await,
+            Ok(())
+        );
+        committer.await.expect("late committer");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn barrier_reports_commit_failure() {
+        let (request_tx, mut request_rx) = mpsc::channel::<QueuedLedgerWriteRequest>(1);
+        let (commit_tx, commit_rx) = watch::channel(PartitionCommit::Pending);
+        let mut client = PartitionLedgerClient {
+            partition_id: PartitionId::new(0),
+            request_tx,
+            commit: commit_rx,
+            in_flight: None,
+            fenced_on: None,
+        };
+        let committer = tokio::spawn(async move {
+            let first = request_rx.recv().await.expect("first queued batch");
+            sleep(Duration::from_secs(3)).await;
+            commit_tx.send_replace(PartitionCommit::Failed {
+                batch_id: first.request.batch_id,
+                generation: 1,
+            });
+            let second = request_rx.recv().await.expect("second queued batch");
+            commit_tx.send_replace(PartitionCommit::Committed(second.request.batch_id));
+        });
+        let budgets = LedgerPersistenceBudgets::new(
+            Duration::from_millis(250),
+            Duration::from_secs(2),
+            Duration::from_secs(12),
+        );
+
+        assert_eq!(
+            client
+                .persist(PartitionBatchId::new(1), vec![row(0, 1)], budgets)
+                .await,
+            Err(LedgerPersistenceError::PublicationQuarantined {
+                batch_id: PartitionBatchId::new(1),
+            })
+        );
+        assert_eq!(
+            client.reconcile_outstanding().await,
+            Err(LedgerPersistenceError::CommitFailed {
+                batch_id: PartitionBatchId::new(1),
+                generation: 1,
+            })
+        );
+        assert_eq!(
+            client
+                .persist(PartitionBatchId::new(2), vec![row(0, 2)], budgets)
+                .await,
+            Ok(())
+        );
+        committer.await.expect("late committer");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unknown_commit_fences() {
+        let (request_tx, _request_rx) = mpsc::channel::<QueuedLedgerWriteRequest>(1);
+        let (_commit_tx, commit_rx) = watch::channel(PartitionCommit::Pending);
+        let mut client = PartitionLedgerClient {
+            partition_id: PartitionId::new(0),
+            request_tx,
+            commit: commit_rx,
+            in_flight: None,
+            fenced_on: None,
+        };
+        let budgets = LedgerPersistenceBudgets::new(
+            Duration::from_millis(250),
+            Duration::from_secs(2),
+            Duration::from_secs(12),
+        );
+
+        assert_eq!(
+            client
+                .persist(PartitionBatchId::new(1), vec![row(0, 1)], budgets)
+                .await,
+            Err(LedgerPersistenceError::PublicationQuarantined {
+                batch_id: PartitionBatchId::new(1),
+            })
+        );
+        assert_eq!(
+            client
+                .persist(PartitionBatchId::new(2), vec![row(0, 2)], budgets)
+                .await,
+            Err(LedgerPersistenceError::ReconciliationTimeout {
+                batch_id: PartitionBatchId::new(1),
+            })
+        );
+        assert_eq!(
+            client
+                .persist(PartitionBatchId::new(3), vec![row(0, 3)], budgets)
+                .await,
+            Err(LedgerPersistenceError::ClientFenced {
+                batch_id: PartitionBatchId::new(1),
+            })
+        );
     }
 
     #[test]

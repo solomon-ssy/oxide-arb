@@ -111,7 +111,7 @@ pub fn sampled_parity(report: &NewRecommendationReport) -> NewReportFeatureParit
         matched_count: 0,
         mismatched_count: 0,
         pending_materialization_count: 0,
-        feature_contract_hash: Some(content_hash()),
+        feature_contract_hash: content_hash(),
         transform_hash: None,
         failure_code: None,
         failure_detail: None,
@@ -594,7 +594,7 @@ fn evidence_refs() -> EvidenceRefs {
     }
 }
 
-fn execution_eligibility() -> ExecutionEligibility {
+const fn execution_eligibility() -> ExecutionEligibility {
     ExecutionEligibility {
         ceiling: ExecutionAuthorityCeiling::OperatorApproval,
         blockers: Vec::new(),

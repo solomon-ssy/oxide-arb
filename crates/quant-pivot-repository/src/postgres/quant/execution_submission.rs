@@ -20,12 +20,13 @@ use quant_pivot_error::storage::{
 };
 use quant_pivot_models::{
     domain::quant::{
-        CumulativePositionExit, EntryConditionClaim, EntryConditionInstanceInfo,
-        ExecutionIdentityEnrichment, ExecutionIdentityRefs, ExecutionOrderIdentityRefs,
-        ExecutionOrderInfo, ExecutionTradeRef, ExecutionTransactionRef, ExitLedgerWrite,
-        NewClobTradeObservation, NewExecutionOrder, NewExecutionTradeRef,
+        CumulativePositionExit, CumulativePositionFill, EntryConditionClaim,
+        EntryConditionInstanceInfo, ExecutionIdentityEnrichment, ExecutionIdentityRefs,
+        ExecutionOrderIdentityRefs, ExecutionOrderInfo, ExecutionTradeRef, ExecutionTransactionRef,
+        ExitLedgerWrite, NewClobTradeObservation, NewExecutionOrder, NewExecutionTradeRef,
         NewExecutionTransactionRef, NewReconciliation, NewVenueIncentiveEvent, OrderIntentInfo,
-        PositionExitReconciliation, ReconciliationLedgerWrite, SubmissionLedgerWrite,
+        PositionExitReconciliation, PositionFillReconciliation, ReconciliationLedgerWrite,
+        SubmissionLedgerWrite,
     },
     entities::{
         quant_clob_trade_observation::{
@@ -543,6 +544,14 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         } else {
             None
         };
+        let entry_fill_cash_delta = if entry_phase {
+            write
+                .fill
+                .as_ref()
+                .map(|fill| Usd::new(-fill.cost_usd.inner()))
+        } else {
+            None
+        };
 
         if let Some(fill) = write.fill {
             PgStrategyPositionLotRepository::apply_fill(&txn, fill).await?;
@@ -575,7 +584,34 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
                 .map_err(StorageError::from)?;
         }
 
-        if let Some(reconciliation) = write.reconciliation {
+        if let Some(mut reconciliation) = write.reconciliation {
+            if entry_phase {
+                match (entry_fill_shares, reconciliation.venue_filled_shares) {
+                    (Some(fill_shares), Some(reconciled_shares))
+                        if fill_shares == reconciled_shares =>
+                    {
+                        reconciliation.venue_cash_delta_usd =
+                            Some(entry_fill_cash_delta.ok_or_else(|| {
+                                StorageError::invariant_violation(
+                                    Some(QUANT_EXECUTION_ORDER),
+                                    "entry fill has no account cash delta",
+                                )
+                            })?);
+                    }
+                    (None, observed) if observed.is_none_or(|shares| shares.is_zero()) => {}
+                    _ => {
+                        return Err(StorageError::invariant_violation(
+                            Some(QUANT_EXECUTION_ORDER),
+                            "entry fill and reconciliation cumulative shares differ",
+                        ));
+                    }
+                }
+            } else if entry_fill_shares.is_some() {
+                return Err(StorageError::invariant_violation(
+                    Some(QUANT_EXECUTION_ORDER),
+                    "exit submission cannot carry an entry position fill",
+                ));
+            }
             QuantReconciliationEntity::insert(reconciliation.into_active_model())
                 .exec(&txn)
                 .await
@@ -1089,8 +1125,14 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             )
             .await?;
 
-            if let Some(fill) = write.cumulative_fill.take() {
-                PgStrategyPositionLotRepository::reconcile_fill(&txn, fill).await?;
+            if let Some(fill) = write.cumulative_fill.take()
+                && let Some(adjustment) = Self::entry_adjustment(
+                    &fill,
+                    prior_reconciliation.as_ref(),
+                    execution_order_id,
+                )?
+            {
+                PgStrategyPositionLotRepository::reconcile_fill(&txn, adjustment).await?;
             }
 
             if write.intent_status != intent.status {
@@ -1119,6 +1161,49 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
 }
 
 impl PgExecutionSubmissionRepository {
+    fn entry_adjustment(
+        cumulative: &CumulativePositionFill,
+        prior: Option<&QuantReconciliationModel>,
+        execution_order_id: &ExecutionOrderId,
+    ) -> Result<Option<PositionFillReconciliation>, StorageError> {
+        let previous_shares = prior
+            .and_then(|row| row.venue_filled_shares)
+            .unwrap_or(Shares::ZERO);
+        let previous_cost = prior
+            .and_then(|row| row.venue_cash_delta_usd)
+            .map_or(Usd::ZERO, |cash_delta| Usd::new(-cash_delta.inner()));
+        if previous_shares.is_positive()
+            && prior.is_some_and(|row| row.venue_cash_delta_usd.is_none())
+        {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_EXECUTION_ORDER),
+                format!(
+                    "entry reconciliation {execution_order_id} has filled shares without cumulative cash"
+                ),
+            ));
+        }
+        if cumulative.cumulative_shares < previous_shares {
+            return Err(StorageError::state_conflict(
+                QUANT_EXECUTION_ORDER,
+                Some(execution_order_id),
+                format!(
+                    "cumulative entry shares regressed from {previous_shares} to {}",
+                    cumulative.cumulative_shares
+                ),
+            ));
+        }
+        let shares_delta = cumulative.cumulative_shares - previous_shares;
+        let cost_delta_usd = cumulative.cumulative_cost_usd - previous_cost;
+        if shares_delta.is_zero() && cost_delta_usd.is_zero() {
+            return Ok(None);
+        }
+        Ok(Some(PositionFillReconciliation {
+            cumulative: cumulative.clone(),
+            shares_delta,
+            cost_delta_usd,
+        }))
+    }
+
     async fn record_authenticated_fills(
         db: &impl ConnectionTrait,
         order: &ExecutionOrderInfo,

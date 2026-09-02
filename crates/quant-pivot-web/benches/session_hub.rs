@@ -44,7 +44,7 @@ fn bench_session_hub_fanout(c: &mut Criterion) {
         .expect("queue age"),
         frame_bytes: IntGauge::new("bench_ws_frame_bytes", "benchmark").expect("frame bytes"),
     });
-    let hub_task = runtime.spawn(hub.run(shutdown.clone()));
+    let hub_task = runtime.spawn(hub.run(shutdown.clone(), shutdown.clone()));
     let topic = SubscriptionKey::scoped(WsChannel::MarketBookUpdate, MarketId::new("bench-market"));
     let mut receivers = runtime.block_on(async {
         let mut receivers = Vec::with_capacity(SESSION_COUNT);

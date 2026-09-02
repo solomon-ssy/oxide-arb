@@ -209,7 +209,7 @@ impl From<ReportFactDeliveryInfo> for ReportFactDeliveryView {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ReportFunnelStageView {
     pub stage: ReportFunnelStage,
     pub input_count: u64,
@@ -217,7 +217,7 @@ pub struct ReportFunnelStageView {
     pub excluded_count: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct QuantReportFunnelView {
     pub recommendation_report_id: RecommendationReportId,
     pub catalog_visible_count: u64,
@@ -226,7 +226,7 @@ pub struct QuantReportFunnelView {
     pub stages: Vec<ReportFunnelStageView>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ReportFunnelMarketView {
     pub recommendation_report_id: RecommendationReportId,
     pub market_selection_id: MarketSelectionId,

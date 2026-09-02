@@ -5,7 +5,7 @@
 //! partial / emergency), submitting exit orders, routing to manual review, or
 //! holding. The cadence is read from runtime-config
 //! (`execution.exit_monitor.monitor_secs`) on every tick, so activation changes
-//! take effect without a restart. The worker runs in **all** runtime modes —
+//! take effect without a restart. The worker runs independently of entry authorization —
 //! open positions must always be monitored for exit — and gates internally on
 //! `execution.exit_monitor.enabled`. Each successful pass publishes the
 //! exit-monitor health heartbeat that gates admission `#20`.

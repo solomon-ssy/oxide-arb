@@ -25,8 +25,7 @@ use quant_pivot_models::{
 use quant_pivot_storage::{
     clickhouse::{
         ChWriteManager, ClickHousePool, ClickHouseQueryLimits, active_preproduction_query_count,
-        apply_offline_schema_migrations, apply_online_schema_migrations,
-        reset_preproduction_database, verify_schema,
+        bootstrap_schema, reset_preproduction_database, verify_schema,
     },
     write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability, AsyncWriterWorker},
 };
@@ -39,6 +38,12 @@ use uuid::Uuid;
 const QUERY_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
 const QUERY_LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct BootstrapObjectCounts {
+    residue_count: u64,
+    bootstrap_count: u64,
+}
+
 fn maintenance_config(config: &ClickHouseConfig) -> ClickHouseConfig {
     ClickHouseConfig {
         database: "default".to_owned(),
@@ -48,16 +53,16 @@ fn maintenance_config(config: &ClickHouseConfig) -> ClickHouseConfig {
 
 async fn setup_clickhouse() -> (ClickHousePool, Client, ClickHouseConfig, ()) {
     let config = fresh_clickhouse_config("storage");
-    apply_offline_schema_migrations(&config)
+    bootstrap_schema(&config)
         .await
-        .expect("deploy schema");
+        .expect("bootstrap fresh schema");
     let pool = ClickHousePool::connect(&config).await.expect("connect");
     pool.verify_schema().await.expect("verify schema");
     let client = pool.client().clone();
     (pool, client, config, ())
 }
 
-pub async fn first_creates_missing_schema() {
+pub async fn fresh_bootstrap_creates_schema() {
     let config = fresh_clickhouse_config("first_deployment");
 
     let missing = verify_schema(&config)
@@ -65,13 +70,10 @@ pub async fn first_creates_missing_schema() {
         .expect_err("read-only startup must not create a missing database");
     assert!(missing.to_string().contains("does not exist"));
 
-    assert_eq!(
-        apply_online_schema_migrations(&config)
-            .await
-            .expect("first schema migration")
-            .current_version,
-        1
-    );
+    let status = bootstrap_schema(&config)
+        .await
+        .expect("fresh schema bootstrap");
+    assert!(status.required_object_count > 0);
     let pool = ClickHousePool::connect(&config).await.expect("connect");
     pool.verify_schema().await.expect("verify schema");
 
@@ -96,9 +98,9 @@ pub async fn deployment_runtime_rejects_held() {
         .await
         .expect("install deployment lock");
 
-    let deploy_error = apply_offline_schema_migrations(&config)
+    let deploy_error = bootstrap_schema(&config)
         .await
-        .expect_err("second schema deployer must not run concurrently");
+        .expect_err("fresh bootstrap must not run while its lock is held");
     assert!(deploy_error.to_string().contains("deployment lock"));
 
     let runtime_error = verify_schema(&config)
@@ -107,7 +109,7 @@ pub async fn deployment_runtime_rejects_held() {
     assert!(runtime_error.to_string().contains("deployment lock"));
 }
 
-pub async fn clean_boot_rejects_database() {
+pub async fn bootstrap_rejects_nonempty() {
     let config = fresh_clickhouse_config("unmanaged_database");
     let maintenance = ClickHousePool::from_config(&maintenance_config(&config))
         .client()
@@ -137,29 +139,68 @@ pub async fn clean_boot_rejects_database() {
         .await
         .expect("insert unmanaged legacy fact");
 
-    let boot_error = apply_offline_schema_migrations(&config)
+    let boot_error = bootstrap_schema(&config)
         .await
         .expect_err("nonempty unmanaged database must block clean boot");
     assert!(
         boot_error
             .to_string()
-            .contains("contains unmanaged pre-baseline objects")
+            .contains("requires an object-empty database")
     );
     let legacy_count: u64 = client
         .query("SELECT count() FROM legacy_quant_recommendation_event")
         .fetch_one()
         .await
         .expect("legacy rows remain intact");
-    let migration_ledger_count: u64 = client
+    let boot_object_count: u64 = client
         .query(
             "SELECT count() FROM system.tables \
-             WHERE database = currentDatabase() AND name = 'quant_pivot_schema_migration'",
+             WHERE database = currentDatabase() AND name = 'book_microstructure_1m'",
         )
         .fetch_one()
         .await
-        .expect("migration-ledger absence probe");
+        .expect("fresh-bootstrap absence probe");
     assert_eq!(legacy_count, 1);
-    assert_eq!(migration_ledger_count, 0);
+    assert_eq!(boot_object_count, 0);
+}
+
+pub async fn partial_bootstrap_is_rejected() {
+    let config = fresh_clickhouse_config("partial_bootstrap");
+    let maintenance = ClickHousePool::from_config(&maintenance_config(&config))
+        .client()
+        .clone();
+    maintenance
+        .query(&format!("CREATE DATABASE `{}`", config.database))
+        .execute()
+        .await
+        .expect("create partial-bootstrap database");
+    let client = ClickHousePool::from_config(&config).client().clone();
+    client
+        .query("CREATE TABLE partial_bootstrap_marker (value UInt8) ENGINE = TinyLog")
+        .execute()
+        .await
+        .expect("create partial-bootstrap residue");
+
+    let error = bootstrap_schema(&config)
+        .await
+        .expect_err("partial schema must never be resumed");
+    assert!(
+        error
+            .to_string()
+            .contains("requires an object-empty database")
+    );
+    let counts = client
+        .query(
+            "SELECT \
+             countIf(name = 'partial_bootstrap_marker') AS residue_count, \
+             countIf(name = 'book_microstructure_1m') AS bootstrap_count \
+             FROM system.tables WHERE database = currentDatabase()",
+        )
+        .fetch_one::<BootstrapObjectCounts>()
+        .await
+        .expect("inspect rejected partial bootstrap");
+    assert_eq!(counts.residue_count, 1);
+    assert_eq!(counts.bootstrap_count, 0);
 }
 
 pub async fn preproduction_rejects_without_dropping() {
@@ -263,15 +304,41 @@ pub async fn preproduction_rejects_without_dropping() {
 }
 
 pub async fn clickhouse_health_check() {
-    let (pool, _client, _config, _stack) = setup_clickhouse().await;
+    let (pool, client, config, _stack) = setup_clickhouse().await;
     pool.health_check().await.expect("health check should pass");
+    let max_threads: u64 = client
+        .query("SELECT toUInt64(getSetting('max_threads'))")
+        .fetch_one()
+        .await
+        .expect("read ClickHouse max_threads setting");
+    assert_eq!(
+        max_threads,
+        u64::try_from(config.max_threads_per_query).expect("max_threads fits u64")
+    );
+    let health_wait = pool
+        .read_metrics()
+        .admission_wait_seconds
+        .get_metric_with_label_values(&["ch.storage.health.v1"])
+        .expect("health read-admission histogram");
+    let health_inflight = pool
+        .read_metrics()
+        .permits_used
+        .get_metric_with_label_values(&["ch.storage.health.v1"])
+        .expect("health read-admission gauge");
+    assert!(health_wait.get_sample_count() >= 2);
+    assert_eq!(health_inflight.get(), 0);
 }
 
-pub async fn clickhouse_schema_idempotent() {
+pub async fn second_bootstrap_is_rejected() {
     let (pool, _client, config, _stack) = setup_clickhouse().await;
-    apply_online_schema_migrations(&config)
+    let error = bootstrap_schema(&config)
         .await
-        .expect("second schema deployment should be idempotent");
+        .expect_err("an initialized schema must reject a second bootstrap");
+    assert!(
+        error
+            .to_string()
+            .contains("requires an object-empty database")
+    );
     pool.verify_schema().await.expect("schema remains valid");
 }
 
@@ -289,9 +356,9 @@ pub async fn removed_tables_absent() {
 }
 
 pub async fn native_query_limits_rejects() {
-    let (_pool, client, _config, _stack) = setup_clickhouse().await;
+    let (pool, _client, _config, _stack) = setup_clickhouse().await;
     let row_error = ClickHouseQueryLimits::new("ch.system.row_overflow", 1, 1_024)
-        .query(&client, "SELECT number FROM numbers(2)")
+        .query(&pool, "SELECT number FROM numbers(2)")
         .fetch_all::<u64>()
         .await
         .expect_err("row overflow must fail instead of truncating");
@@ -301,7 +368,7 @@ pub async fn native_query_limits_rejects() {
     );
 
     let byte_error = ClickHouseQueryLimits::new("ch.system.byte_overflow", 1_000, 1)
-        .query(&client, "SELECT repeat('x', 1024) FROM numbers(100)")
+        .query(&pool, "SELECT repeat('x', 1024) FROM numbers(100)")
         .fetch_all::<String>()
         .await
         .expect_err("byte overflow must fail instead of truncating");
@@ -314,6 +381,12 @@ pub async fn native_query_limits_rejects() {
 #[derive(clickhouse::Row, serde::Deserialize)]
 struct TableDdl {
     statement: String,
+}
+
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct CanonicalInsertLog {
+    query: String,
+    async_insert: String,
 }
 
 pub async fn canonical_evidence_no_ttl() {
@@ -334,6 +407,138 @@ pub async fn canonical_evidence_no_ttl() {
             "{table} must be seal-first"
         );
     }
+}
+
+pub async fn canonical_insert_is_synchronous() {
+    let (_pool, client, config, _stack) = setup_clickhouse().await;
+    let query_id = Uuid::now_v7().to_string();
+    let token_id = TokenId::new(format!("canonical-sync-{query_id}"));
+    let now = Utc::now().timestamp_millis();
+    let row = BookL2LedgerRow {
+        stream_session_id: Uuid::now_v7(),
+        shard_id: 0,
+        token_id: token_id.clone(),
+        market_id: Some(MarketId::new(format!("market-{query_id}"))),
+        token_sequence: 1,
+        event_type: ChCanonicalBookEventType::Snapshot,
+        bid_prices: vec![ChPrice::from(Price::new(dec!(0.4)))],
+        bid_sizes: vec![ChShares::from(Shares::new(dec!(2)))],
+        ask_prices: vec![ChPrice::from(Price::new(dec!(0.6)))],
+        ask_sizes: vec![ChShares::from(Shares::new(dec!(3)))],
+        old_tick_size: None,
+        new_tick_size: None,
+        trade_price: None,
+        trade_side: None,
+        trade_size: None,
+        fee_rate_bps: None,
+        trade_transaction_hash: None,
+        venue_event_time: now,
+        ingress_time: now + 1,
+        persisted_time: now + 2,
+        event_hash: ChDigest::new([0; 32]),
+        schema_version: BookL2LedgerRow::SCHEMA_VERSION,
+    }
+    .seal()
+    .expect("seal canonical synchronous fixture");
+    let identified_client = client
+        .clone()
+        .with_setting("query_id", query_id.clone())
+        .with_setting("insert_deduplicate", "0");
+
+    ChWriteManager::new(2, &config.io)
+        .write_canonical_ledger(&identified_client, slice::from_ref(&row))
+        .await
+        .expect("write canonical ledger through production manager");
+    let retry_client = client
+        .clone()
+        .with_setting("query_id", format!("{query_id}-retry"))
+        .with_setting("insert_deduplicate", "0");
+    ChWriteManager::new(2, &config.io)
+        .write_canonical_ledger(&retry_client, slice::from_ref(&row))
+        .await
+        .expect("retry canonical ledger through production manager");
+
+    let observation_deadline = Instant::now() + QUERY_LIFECYCLE_TIMEOUT;
+    let logged = loop {
+        client
+            .query("SYSTEM FLUSH LOGS")
+            .execute()
+            .await
+            .expect("flush ClickHouse system logs");
+        let logged = client
+            .query(
+                "SELECT query, Settings['async_insert'] AS async_insert \
+                 FROM system.query_log \
+                 WHERE query_id = ? AND type = 'QueryFinish' AND query_kind = 'Insert' \
+                 ORDER BY event_time_microseconds DESC LIMIT 1",
+            )
+            .bind(&query_id)
+            .fetch_optional::<CanonicalInsertLog>()
+            .await
+            .expect("inspect canonical insert query settings");
+        if let Some(logged) = logged {
+            break logged;
+        }
+        assert!(
+            Instant::now() < observation_deadline,
+            "canonical INSERT query_id {query_id} did not reach system.query_log"
+        );
+        sleep(QUERY_LIFECYCLE_POLL_INTERVAL).await;
+    };
+
+    assert!(
+        logged.query.starts_with("INSERT INTO") && logged.query.contains("quant_book_l2_ledger"),
+        "identified query was not the canonical ledger INSERT: {}",
+        logged.query
+    );
+    assert_eq!(
+        logged.async_insert, "0",
+        "canonical ledger INSERT must override every server/profile default"
+    );
+    let persisted_count: u64 = client
+        .query("SELECT count() FROM quant_book_l2_ledger WHERE token_id = ?")
+        .bind(token_id.as_str())
+        .fetch_one()
+        .await
+        .expect("read durable canonical fixture");
+    assert_eq!(
+        persisted_count, 1,
+        "production manager must override a client-level dedupe=0 setting for exact retries"
+    );
+}
+
+pub async fn resource_governance_is_exact() {
+    let (_pool, client, _config, _stack) = setup_clickhouse().await;
+    let forbidden_count: u64 = client
+        .query(
+            "SELECT count() FROM system.tables WHERE database = 'system' \
+             AND name IN ('metric_log', 'asynchronous_metric_log', 'text_log', 'trace_log', \
+             'processors_profile_log', 'query_thread_log', 'query_views_log', \
+             'query_metric_log', 'part_log', 'background_schedule_pool_log', \
+             'asynchronous_insert_log')",
+        )
+        .fetch_one()
+        .await
+        .expect("inspect forbidden ClickHouse system logs");
+    let query_log_count: u64 = client
+        .query("SELECT count() FROM system.tables WHERE database = 'system' AND name = 'query_log'")
+        .fetch_one()
+        .await
+        .expect("inspect retained ClickHouse query log");
+    let merge_tree_setting_count: u64 = client
+        .query(
+            "SELECT count() FROM system.merge_tree_settings WHERE \
+             (name = 'number_of_free_entries_in_pool_to_execute_mutation' AND value = '1') OR \
+             (name = 'number_of_free_entries_in_pool_to_execute_optimize_entire_partition' \
+              AND value = '1') OR \
+             (name = 'number_of_free_entries_in_pool_to_lower_max_size_of_merge' AND value = '1')",
+        )
+        .fetch_one()
+        .await
+        .expect("inspect ClickHouse MergeTree governance settings");
+    assert_eq!(forbidden_count, 0);
+    assert_eq!(query_log_count, 1);
+    assert_eq!(merge_tree_setting_count, 3);
 }
 
 pub async fn runtime_schema_rejects_ttl() {
@@ -357,18 +562,16 @@ pub async fn runtime_schema_rejects_ttl() {
 pub async fn runtime_schema_rejects_drift() {
     let (_pool, client, config, _stack) = setup_clickhouse().await;
     client
-        .query(
-            "INSERT INTO quant_pivot_schema_migration \
-             SELECT 1, 'cloud_baseline', 'blake3:tampered', now64(3) + INTERVAL 1 SECOND",
-        )
+        .query("CREATE TABLE unmanaged_runtime_probe (value UInt8) ENGINE = TinyLog")
         .execute()
         .await
-        .expect("insert conflicting migration ledger row");
+        .expect("install unmanaged runtime object");
 
     let error = verify_schema(&config)
         .await
-        .expect_err("runtime contract must reject immutable migration drift");
-    assert!(error.to_string().contains("distinct definitions"));
+        .expect_err("runtime contract must reject unmanaged objects");
+    assert!(error.to_string().contains("outside the boot manifest"));
+    assert!(error.to_string().contains("unmanaged_runtime_probe"));
 }
 
 pub async fn runtime_verification_rejects_drift() {
@@ -376,11 +579,11 @@ pub async fn runtime_verification_rejects_drift() {
     client
         .query(
             "ALTER TABLE quant_market_execution \
-             ADD COLUMN IF NOT EXISTS unmanaged_probe Nullable(String)",
+             RENAME COLUMN builder TO unmanaged_builder",
         )
         .execute()
         .await
-        .expect("install semantic schema drift");
+        .expect("install semantic column drift");
 
     let error = verify_schema(&config)
         .await
@@ -391,7 +594,7 @@ pub async fn runtime_verification_rejects_drift() {
 
 pub async fn clickhouse_fact_uses_columns() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
-    let expected: [(&str, &[&str]); 7] = [
+    let expected: [(&str, &[&str]); 8] = [
         (
             "quant_book_l2_ledger",
             &[
@@ -442,6 +645,13 @@ pub async fn clickhouse_fact_uses_columns() {
             "quant_domain_observation",
             &["ENGINE = MergeTree", "ingestion_time"],
         ),
+        (
+            "quant_crypto_price_report",
+            &[
+                "`gap_generation` UInt64",
+                "ORDER BY (source_id, instrument_key, gap_generation, source_sequence",
+            ],
+        ),
     ];
 
     for (table, fragments) in expected {
@@ -472,6 +682,7 @@ pub async fn crypto_price_matches_schema() {
     let row = CryptoPriceReportRow {
         source_id: DomainSourceId::binance(),
         instrument_key: DomainInstrumentKey::new("BINANCE_AGG_TRADE:BTCUSDT"),
+        gap_generation: 3,
         source_sequence: 1,
         price: ChDecimal64::from(dec!(50000)),
         quantity: Some(ChDecimal64::from(dec!(0.01))),
@@ -503,7 +714,7 @@ pub async fn crypto_price_matches_schema() {
     let count: u64 = client
         .query(
             "SELECT count() FROM quant_crypto_price_report \
-             WHERE source_id = 'binance' AND source_sequence = 1",
+             WHERE source_id = 'binance' AND gap_generation = 3 AND source_sequence = 1",
         )
         .fetch_one()
         .await
@@ -682,7 +893,7 @@ pub async fn execution_history_direct_roundtrip() {
 }
 
 pub async fn last_trade_is_signal() {
-    let (_pool, client, _config, _stack) = setup_clickhouse().await;
+    let (_pool, client, config, _stack) = setup_clickhouse().await;
     let now = Utc::now().timestamp_millis();
     let stream_session_id = Uuid::now_v7();
     let row = BookL2LedgerRow {
@@ -711,13 +922,13 @@ pub async fn last_trade_is_signal() {
     }
     .seal()
     .expect("seal LastTrade ledger row");
-    let write_manager = ChWriteManager::new(1);
+    let write_manager = ChWriteManager::new(2, &config.io);
 
     for _ in 0..2 {
         write_manager
-            .write_borrowed_batch(&client, "quant_book_l2_ledger", slice::from_ref(&row))
+            .write_canonical_ledger(&client, slice::from_ref(&row))
             .await
-            .expect("acknowledged async ledger insert");
+            .expect("synchronous deduplicated ledger insert");
     }
 
     let ledger_count: u64 = client
@@ -771,9 +982,9 @@ fn execution_writer(
 }
 
 pub async fn async_writer_shutdown_buffer() {
-    let (_pool, client, _config, _stack) = setup_clickhouse().await;
+    let (_pool, client, config, _stack) = setup_clickhouse().await;
     let shutdown = CancellationToken::new();
-    let write_manager = Arc::new(ChWriteManager::new(4));
+    let write_manager = Arc::new(ChWriteManager::new(4, &config.io));
 
     let (writer, worker) = execution_writer(client.clone(), write_manager);
     let handle = tokio::spawn(worker.run(shutdown.clone()));
@@ -795,8 +1006,8 @@ pub async fn async_writer_shutdown_buffer() {
 }
 
 pub async fn async_writer_channel_buffer() {
-    let (_pool, client, _config, _stack) = setup_clickhouse().await;
-    let write_manager = Arc::new(ChWriteManager::new(4));
+    let (_pool, client, config, _stack) = setup_clickhouse().await;
+    let write_manager = Arc::new(ChWriteManager::new(4, &config.io));
 
     let (writer, worker) = execution_writer(client.clone(), write_manager);
     // Shutdown never fires; dropping the writer must still drain the tail.

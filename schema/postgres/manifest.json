@@ -3698,6 +3698,71 @@
       "default": null,
       "generated": "",
       "identity": "",
+      "name": "recovery_incident_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_account_clean_funder_blocker",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "account_chain_execution_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_account_clean_funder_blocker",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "role",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_account_clean_funder_blocker",
+      "type": "qp_account_chain_execution_role"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_account_clean_funder_blocker",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_account_clean_funder_blocker",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
       "name": "account_chain_execution_id",
       "nullable": false,
       "ordinal": 1,
@@ -3789,11 +3854,11 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "account_pause_submission_id",
+      "name": "account_pause_operation_id",
       "nullable": false,
       "ordinal": 1,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "uuid"
     },
     {
@@ -3806,7 +3871,7 @@
       "nullable": false,
       "ordinal": 2,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "uuid"
     },
     {
@@ -3819,8 +3884,21 @@
       "nullable": false,
       "ordinal": 3,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "operation_kind",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_account_pause_operation",
+      "type": "qp_account_pause_operation_kind"
     },
     {
       "collation": null,
@@ -3830,10 +3908,10 @@
       "identity": "",
       "name": "state",
       "nullable": false,
-      "ordinal": 4,
+      "ordinal": 5,
       "storage": "p",
-      "table": "quant_account_pause_submission",
-      "type": "qp_account_pause_submission_state"
+      "table": "quant_account_pause_operation",
+      "type": "qp_account_pause_operation_state"
     },
     {
       "collation": null,
@@ -3841,11 +3919,11 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "kind",
+      "name": "submission_kind",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 6,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "qp_settlement_submission_kind"
     },
     {
@@ -3856,9 +3934,9 @@
       "identity": "",
       "name": "requested_block",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 7,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "bigint"
     },
     {
@@ -3868,10 +3946,10 @@
       "generated": "",
       "identity": "",
       "name": "interval_blocks",
-      "nullable": false,
-      "ordinal": 7,
+      "nullable": true,
+      "ordinal": 8,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "bigint"
     },
     {
@@ -3881,10 +3959,10 @@
       "generated": "",
       "identity": "",
       "name": "effective_block",
-      "nullable": false,
-      "ordinal": 8,
+      "nullable": true,
+      "ordinal": 9,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "bigint"
     },
     {
@@ -3895,9 +3973,9 @@
       "identity": "",
       "name": "prepared_block_number",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 10,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "bigint"
     },
     {
@@ -3908,9 +3986,9 @@
       "identity": "",
       "name": "prepared_block_hash",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 11,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "text"
     },
     {
@@ -3921,9 +3999,9 @@
       "identity": "",
       "name": "prepared_nonce",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 12,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "text"
     },
     {
@@ -3934,9 +4012,9 @@
       "identity": "",
       "name": "gas_limit",
       "nullable": true,
-      "ordinal": 12,
+      "ordinal": 13,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "text"
     },
     {
@@ -3947,9 +4025,9 @@
       "identity": "",
       "name": "calldata_hash",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 14,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "text"
     },
     {
@@ -3960,9 +4038,9 @@
       "identity": "",
       "name": "deployment_digest",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 15,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "text"
     },
     {
@@ -3973,9 +4051,9 @@
       "identity": "",
       "name": "signed_envelope",
       "nullable": false,
-      "ordinal": 15,
+      "ordinal": 16,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "bytea"
     },
     {
@@ -3986,9 +4064,9 @@
       "identity": "",
       "name": "signed_envelope_hash",
       "nullable": false,
-      "ordinal": 16,
+      "ordinal": 17,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "text"
     },
     {
@@ -3999,9 +4077,9 @@
       "identity": "",
       "name": "transaction_hash",
       "nullable": true,
-      "ordinal": 17,
+      "ordinal": 18,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "text"
     },
     {
@@ -4012,9 +4090,9 @@
       "identity": "",
       "name": "relayer_transaction_id",
       "nullable": true,
-      "ordinal": 18,
+      "ordinal": 19,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "text"
     },
     {
@@ -4025,9 +4103,9 @@
       "identity": "",
       "name": "confirmation_block_number",
       "nullable": true,
-      "ordinal": 19,
+      "ordinal": 20,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "bigint"
     },
     {
@@ -4038,9 +4116,9 @@
       "identity": "",
       "name": "confirmation_block_hash",
       "nullable": true,
-      "ordinal": 20,
+      "ordinal": 21,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "text"
     },
     {
@@ -4051,9 +4129,9 @@
       "identity": "",
       "name": "confirmation_transaction_hash",
       "nullable": true,
-      "ordinal": 21,
+      "ordinal": 22,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "text"
     },
     {
@@ -4064,9 +4142,9 @@
       "identity": "",
       "name": "confirmation_log_index",
       "nullable": true,
-      "ordinal": 22,
+      "ordinal": 23,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "bigint"
     },
     {
@@ -4077,9 +4155,9 @@
       "identity": "",
       "name": "failure_detail",
       "nullable": true,
-      "ordinal": 23,
+      "ordinal": 24,
       "storage": "x",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "text"
     },
     {
@@ -4090,9 +4168,9 @@
       "identity": "",
       "name": "dispatched_at",
       "nullable": true,
-      "ordinal": 24,
+      "ordinal": 25,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "timestamp with time zone"
     },
     {
@@ -4103,9 +4181,9 @@
       "identity": "",
       "name": "confirmed_at",
       "nullable": true,
-      "ordinal": 25,
+      "ordinal": 26,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "timestamp with time zone"
     },
     {
@@ -4116,9 +4194,9 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 26,
+      "ordinal": 27,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "timestamp with time zone"
     },
     {
@@ -4129,9 +4207,9 @@
       "identity": "",
       "name": "updated_at",
       "nullable": false,
-      "ordinal": 27,
+      "ordinal": 28,
       "storage": "p",
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "type": "timestamp with time zone"
     },
     {
@@ -4301,6 +4379,162 @@
       "ordinal": 13,
       "storage": "p",
       "table": "quant_account_recovery_incident",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "account_recovery_manifest_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_account_recovery_manifest",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "recovery_incident_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_account_recovery_manifest",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "attempt_no",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_account_recovery_manifest",
+      "type": "integer"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "observed_at",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_account_recovery_manifest",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "finalized_block_number",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_account_recovery_manifest",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "finalized_block_hash",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_account_recovery_manifest",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "converged",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_account_recovery_manifest",
+      "type": "boolean"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "input_json",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_account_recovery_manifest",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "assessment_json",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_account_recovery_manifest",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "created_lots_json",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_account_recovery_manifest",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_account_recovery_manifest",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_account_recovery_manifest",
       "type": "timestamp with time zone"
     },
     {
@@ -6797,6 +7031,188 @@
       "ordinal": 18,
       "storage": "p",
       "table": "quant_drift_report",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "recommendation_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "horizon_at",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "replay_until",
+      "nullable": true,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "resolution_outcome_hash",
+      "nullable": true,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_cutoff_at",
+      "nullable": true,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "'pending'::qp_outcome_reconciliation_task_status",
+      "generated": "",
+      "identity": "",
+      "name": "status",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "qp_outcome_reconciliation_task_status"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "name": "attempt_count",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "integer"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "claim_owner",
+      "nullable": true,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "lease_expires_at",
+      "nullable": true,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "next_attempt_at",
+      "nullable": true,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "last_error",
+      "nullable": true,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "completed_at",
+      "nullable": true,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "updated_at",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "quant_economic_outcome_reconciliation_task",
       "type": "timestamp with time zone"
     },
     {
@@ -10212,7 +10628,7 @@
       "generated": "",
       "identity": "",
       "name": "feature_contract_hash",
-      "nullable": true,
+      "nullable": false,
       "ordinal": 18,
       "storage": "x",
       "table": "quant_feature_parity_run",
@@ -17235,6 +17651,227 @@
       "nullable": false,
       "ordinal": 1,
       "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "recommendation_report_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "report_route_run_id",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_policy_snapshot_id",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "economic_tier_id",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "model_version_id",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "trade_policy_artifact_id",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_profile_artifact_id",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "state",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "qp_recommendation_economic_outcome_state"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_at",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "horizon_at",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_available_until",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "replay_kernel_version",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "x",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "payload_json",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "x",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "x",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "available_at",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 17,
+      "storage": "p",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "recommendation_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
       "table": "quant_recommendation_execution_rollup",
       "type": "uuid"
     },
@@ -20642,6 +21279,292 @@
       "ordinal": 17,
       "storage": "p",
       "table": "quant_resolution_projection_remediation",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "route_economic_health_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_route_economic_health",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "route",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "x",
+      "table": "quant_route_economic_health",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "route_identity_hash",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "quant_route_economic_health",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_profile_artifact_id",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_route_economic_health",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_policy_hash",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_route_economic_health",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "state",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_route_economic_health",
+      "type": "qp_route_economic_health_state"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "window_start",
+      "nullable": true,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_route_economic_health",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "assessed_through",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_route_economic_health",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "due_observation_count",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_route_economic_health",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "usable_observation_count",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_route_economic_health",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "coverage",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "m",
+      "table": "quant_route_economic_health",
+      "type": "numeric(20,8)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "effective_sample_size",
+      "nullable": true,
+      "ordinal": 12,
+      "storage": "m",
+      "table": "quant_route_economic_health",
+      "type": "numeric(20,8)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "weighted_mean_return_bps",
+      "nullable": true,
+      "ordinal": 13,
+      "storage": "m",
+      "table": "quant_route_economic_health",
+      "type": "numeric(20,8)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "lower_confidence_return_bps",
+      "nullable": true,
+      "ordinal": 14,
+      "storage": "m",
+      "table": "quant_route_economic_health",
+      "type": "numeric(20,8)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "comparison_minimum_observations",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "p",
+      "table": "quant_route_economic_health",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "minimum_coverage",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "m",
+      "table": "quant_route_economic_health",
+      "type": "numeric(20,8)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "minimum_effect_bps",
+      "nullable": false,
+      "ordinal": 17,
+      "storage": "m",
+      "table": "quant_route_economic_health",
+      "type": "numeric(20,8)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "confidence",
+      "nullable": false,
+      "ordinal": 18,
+      "storage": "m",
+      "table": "quant_route_economic_health",
+      "type": "numeric(20,8)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_json",
+      "nullable": false,
+      "ordinal": 19,
+      "storage": "x",
+      "table": "quant_route_economic_health",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 20,
+      "storage": "x",
+      "table": "quant_route_economic_health",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "available_at",
+      "nullable": false,
+      "ordinal": 21,
+      "storage": "p",
+      "table": "quant_route_economic_health",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 22,
+      "storage": "p",
+      "table": "quant_route_economic_health",
       "type": "timestamp with time zone"
     },
     {
@@ -27236,6 +28159,42 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((role = ANY (ARRAY['maker'::qp_account_chain_execution_role, 'self_match'::qp_account_chain_execution_role])) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_account_clean_funder_blocker_contract",
+      "table": "quant_account_clean_funder_blocker",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (account_chain_execution_id) REFERENCES quant_account_chain_execution(account_chain_execution_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_account_clean_funder_blocker-account_chain_execution_i",
+      "table": "quant_account_clean_funder_blocker",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recovery_incident_id) REFERENCES quant_account_recovery_incident(account_recovery_incident_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_account_clean_funder_blocker-recovery_incident_id",
+      "table": "quant_account_clean_funder_blocker",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (recovery_incident_id)",
+      "initially_deferred": false,
+      "name": "quant_account_clean_funder_blocker_pkey",
+      "table": "quant_account_clean_funder_blocker",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK (((evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((kind = 'system_order'::qp_account_execution_association_kind) AND (execution_order_id IS NOT NULL) AND (recovery_incident_id IS NULL)) OR ((kind = ANY (ARRAY['recovery_incident'::qp_account_execution_association_kind, 'opening_inventory'::qp_account_execution_association_kind])) AND (execution_order_id IS NULL) AND (recovery_incident_id IS NOT NULL)))))",
       "initially_deferred": false,
       "name": "ck_quant_account_execution_association_owner",
@@ -27281,10 +28240,10 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((exchange_address ~ '^0x[0-9a-f]{40}$'::text) AND (requested_block >= 0) AND (interval_blocks >= 0) AND (effective_block = (requested_block + interval_blocks)) AND (prepared_block_number >= 0) AND (prepared_block_hash ~ '^0x[0-9a-f]{64}$'::text) AND (calldata_hash ~ '^0x[0-9a-f]{64}$'::text) AND (deployment_digest ~ '^blake3:[0-9a-f]{64}$'::text) AND (octet_length(signed_envelope) > 0) AND (signed_envelope_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((kind = 'direct_eoa'::qp_settlement_submission_kind) AND (transaction_hash IS NOT NULL) AND (relayer_transaction_id IS NULL) AND (gas_limit IS NOT NULL)) OR ((kind = 'relayer'::qp_settlement_submission_kind) AND (transaction_hash IS NULL))) AND (((confirmation_block_number IS NULL) AND (confirmation_block_hash IS NULL) AND (confirmation_transaction_hash IS NULL) AND (confirmation_log_index IS NULL)) OR ((confirmation_block_number >= 0) AND (confirmation_block_hash ~ '^0x[0-9a-f]{64}$'::text) AND (confirmation_transaction_hash ~ '^0x[0-9a-f]{64}$'::text) AND (confirmation_log_index >= 0))) AND (((state = 'prepared'::qp_account_pause_submission_state) AND (dispatched_at IS NULL) AND (confirmed_at IS NULL) AND (confirmation_block_number IS NULL)) OR ((state = ANY (ARRAY['dispatched'::qp_account_pause_submission_state, 'ambiguous'::qp_account_pause_submission_state])) AND (dispatched_at IS NOT NULL) AND (confirmed_at IS NULL) AND (confirmation_block_number IS NULL)) OR ((state = 'confirmed'::qp_account_pause_submission_state) AND (dispatched_at IS NOT NULL) AND (confirmed_at IS NOT NULL) AND (confirmation_block_number IS NOT NULL)) OR ((state = 'failed'::qp_account_pause_submission_state) AND (failure_detail IS NOT NULL)))))",
+      "definition": "CHECK (((exchange_address ~ '^0x[0-9a-f]{40}$'::text) AND (requested_block >= 0) AND (((operation_kind = 'pause'::qp_account_pause_operation_kind) AND (interval_blocks >= 0) AND (effective_block = (requested_block + interval_blocks))) OR ((operation_kind = 'unpause'::qp_account_pause_operation_kind) AND (interval_blocks IS NULL) AND (effective_block IS NULL))) AND (prepared_block_number >= 0) AND (prepared_block_hash ~ '^0x[0-9a-f]{64}$'::text) AND (calldata_hash ~ '^0x[0-9a-f]{64}$'::text) AND (deployment_digest ~ '^blake3:[0-9a-f]{64}$'::text) AND (octet_length(signed_envelope) > 0) AND (signed_envelope_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((submission_kind = 'direct_eoa'::qp_settlement_submission_kind) AND (transaction_hash IS NOT NULL) AND (relayer_transaction_id IS NULL) AND (gas_limit IS NOT NULL)) OR ((submission_kind = 'relayer'::qp_settlement_submission_kind) AND (transaction_hash IS NULL))) AND (((confirmation_block_number IS NULL) AND (confirmation_block_hash IS NULL) AND (confirmation_transaction_hash IS NULL) AND (confirmation_log_index IS NULL)) OR ((confirmation_block_number >= 0) AND (confirmation_block_hash ~ '^0x[0-9a-f]{64}$'::text) AND (confirmation_transaction_hash ~ '^0x[0-9a-f]{64}$'::text) AND (confirmation_log_index >= 0))) AND (((state = 'prepared'::qp_account_pause_operation_state) AND (dispatched_at IS NULL) AND (confirmed_at IS NULL) AND (confirmation_block_number IS NULL)) OR ((state = ANY (ARRAY['dispatched'::qp_account_pause_operation_state, 'ambiguous'::qp_account_pause_operation_state])) AND (dispatched_at IS NOT NULL) AND (confirmed_at IS NULL) AND (confirmation_block_number IS NULL)) OR ((state = 'confirmed'::qp_account_pause_operation_state) AND (dispatched_at IS NOT NULL) AND (confirmed_at IS NOT NULL) AND (confirmation_block_number IS NOT NULL)) OR ((state = 'failed'::qp_account_pause_operation_state) AND (failure_detail IS NOT NULL)))))",
       "initially_deferred": false,
-      "name": "ck_quant_account_pause_submission_contract",
-      "table": "quant_account_pause_submission",
+      "name": "ck_quant_account_pause_operation_contract",
+      "table": "quant_account_pause_operation",
       "type": "c",
       "validated": true
     },
@@ -27292,23 +28251,23 @@
       "deferrable": false,
       "definition": "FOREIGN KEY (recovery_incident_id) REFERENCES quant_account_recovery_incident(account_recovery_incident_id)",
       "initially_deferred": false,
-      "name": "fk-quant_account_pause_submission-recovery_incident_id",
-      "table": "quant_account_pause_submission",
+      "name": "fk-quant_account_pause_operation-recovery_incident_id",
+      "table": "quant_account_pause_operation",
       "type": "f",
       "validated": true
     },
     {
       "deferrable": false,
-      "definition": "PRIMARY KEY (account_pause_submission_id)",
+      "definition": "PRIMARY KEY (account_pause_operation_id)",
       "initially_deferred": false,
-      "name": "quant_account_pause_submission_pkey",
-      "table": "quant_account_pause_submission",
+      "name": "quant_account_pause_operation_pkey",
+      "table": "quant_account_pause_operation",
       "type": "p",
       "validated": true
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((octet_length(reason) >= 1) AND (octet_length(reason) <= 2048) AND (reason = btrim(reason)) AND (reason !~ '[[:cntrl:]]'::text) AND (revision >= 0) AND (opened_at <= created_at) AND (created_at <= updated_at) AND (((status = ANY (ARRAY['open'::qp_account_recovery_incident_status, 'reconciling'::qp_account_recovery_incident_status])) AND (seal_hash IS NULL) AND (sealed_by IS NULL) AND (sealed_at IS NULL)) OR ((status = 'sealed'::qp_account_recovery_incident_status) AND (seal_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (sealed_by IS NOT NULL) AND (sealed_at IS NOT NULL) AND (opened_at <= sealed_at)))))",
+      "definition": "CHECK (((octet_length(reason) >= 1) AND (octet_length(reason) <= 2048) AND (reason = btrim(reason)) AND (reason !~ '[[:cntrl:]]'::text) AND (revision >= 0) AND (opened_at <= created_at) AND (created_at <= updated_at) AND (((status = 'open'::qp_account_recovery_incident_status) AND (seal_hash IS NULL) AND (sealed_by IS NULL) AND (sealed_at IS NULL)) OR ((status = 'reconciling'::qp_account_recovery_incident_status) AND (((seal_hash IS NULL) AND (sealed_by IS NULL) AND (sealed_at IS NULL)) OR ((seal_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (sealed_by IS NOT NULL) AND (sealed_at IS NOT NULL) AND (opened_at <= sealed_at)))) OR ((status = 'sealed'::qp_account_recovery_incident_status) AND (seal_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (sealed_by IS NOT NULL) AND (sealed_at IS NOT NULL) AND (opened_at <= sealed_at)))))",
       "initially_deferred": false,
       "name": "ck_quant_account_recovery_incident_lifecycle",
       "table": "quant_account_recovery_incident",
@@ -27339,6 +28298,33 @@
       "initially_deferred": false,
       "name": "quant_account_recovery_incident_pkey",
       "table": "quant_account_recovery_incident",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((attempt_no > 0) AND (finalized_block_number >= 0) AND (finalized_block_hash ~ '^0x[0-9a-f]{64}$'::text) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(input_json) = 'object'::text) AND (((input_json ->> 'finalized_block_number'::text))::bigint = finalized_block_number) AND ((input_json ->> 'finalized_block_hash'::text) = finalized_block_hash) AND (jsonb_typeof(assessment_json) = 'object'::text) AND (assessment_json ?& ARRAY['allocations'::text, 'created_lots'::text, 'mismatches'::text, 'evidence_hash'::text]) AND ((assessment_json - ARRAY['allocations'::text, 'created_lots'::text, 'mismatches'::text, 'evidence_hash'::text]) = '{}'::jsonb) AND ((assessment_json ->> 'evidence_hash'::text) = evidence_hash) AND (jsonb_typeof((assessment_json -> 'mismatches'::text)) = 'array'::text) AND (jsonb_typeof(created_lots_json) = 'array'::text) AND (converged = (jsonb_array_length((assessment_json -> 'mismatches'::text)) = 0))))",
+      "initially_deferred": false,
+      "name": "ck_quant_account_recovery_manifest_contract",
+      "table": "quant_account_recovery_manifest",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recovery_incident_id) REFERENCES quant_account_recovery_incident(account_recovery_incident_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_account_recovery_manifest-recovery_incident_id",
+      "table": "quant_account_recovery_manifest",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (account_recovery_manifest_id)",
+      "initially_deferred": false,
+      "name": "quant_account_recovery_manifest_pkey",
+      "table": "quant_account_recovery_manifest",
       "type": "p",
       "validated": true
     },
@@ -27744,6 +28730,42 @@
       "initially_deferred": false,
       "name": "quant_drift_report_pkey",
       "table": "quant_drift_report",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((attempt_count >= 0) AND (created_at <= updated_at) AND ((last_error IS NULL) OR ((char_length(btrim(last_error)) >= 1) AND (char_length(btrim(last_error)) <= 4096))) AND (((attempt_count = 0) AND (replay_until IS NULL) AND (source_cutoff_at IS NULL) AND (resolution_outcome_hash IS NULL) AND (status = 'pending'::qp_outcome_reconciliation_task_status)) OR ((attempt_count > 0) AND (replay_until IS NOT NULL) AND (source_cutoff_at IS NOT NULL) AND (source_cutoff_at > replay_until) AND (replay_until <= horizon_at) AND (replay_until <= updated_at) AND (((replay_until = horizon_at) AND (resolution_outcome_hash IS NULL)) OR ((replay_until < horizon_at) AND (resolution_outcome_hash IS NOT NULL) AND (resolution_outcome_hash ~ '^blake3:[0-9a-f]{64}$'::text))))) AND (((status = 'pending'::qp_outcome_reconciliation_task_status) AND (attempt_count = 0) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at IS NULL) AND (last_error IS NULL) AND (completed_at IS NULL)) OR ((status = 'delivering'::qp_outcome_reconciliation_task_status) AND (attempt_count > 0) AND (claim_owner IS NOT NULL) AND (lease_expires_at > updated_at) AND (next_attempt_at IS NULL) AND (completed_at IS NULL)) OR ((status = 'retrying'::qp_outcome_reconciliation_task_status) AND (attempt_count > 0) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at > updated_at) AND (last_error IS NOT NULL) AND (completed_at IS NULL)) OR ((status = 'completed'::qp_outcome_reconciliation_task_status) AND (attempt_count > 0) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at IS NULL) AND (last_error IS NULL) AND (completed_at IS NOT NULL) AND (completed_at <= updated_at)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_economic_outcome_task_contract",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recommendation_id) REFERENCES quant_recommendation(recommendation_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_economic_outcome_reconciliation_task-recommendation_id",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recommendation_id, resolution_outcome_hash) REFERENCES quant_recommendation_resolution_outcome(recommendation_id, outcome_hash)",
+      "initially_deferred": false,
+      "name": "fk_economic_task_resolution",
+      "table": "quant_economic_outcome_reconciliation_task",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (recommendation_id)",
+      "initially_deferred": false,
+      "name": "quant_economic_outcome_reconciliation_task_pkey",
+      "table": "quant_economic_outcome_reconciliation_task",
       "type": "p",
       "validated": true
     },
@@ -28438,6 +29460,15 @@
       "name": "uq_quant_feature_parity_candidate_subject_market",
       "table": "quant_feature_parity_candidate",
       "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((feature_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text))",
+      "initially_deferred": false,
+      "name": "ck_quant_feature_parity_run_contract_hash",
+      "table": "quant_feature_parity_run",
+      "type": "c",
       "validated": true
     },
     {
@@ -30584,6 +31615,87 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((decision_at < horizon_at) AND (source_available_until <= available_at) AND (available_at <= created_at) AND ((char_length(replay_kernel_version) >= 1) AND (char_length(replay_kernel_version) <= 128)) AND (replay_kernel_version = btrim(replay_kernel_version)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(payload_json) = 'object'::text) AND (payload_json ?& ARRAY['detail'::text, 'amounts'::text, 'evidence'::text]) AND ((payload_json - ARRAY['detail'::text, 'amounts'::text, 'evidence'::text]) = '{}'::jsonb) AND (((payload_json -> 'detail'::text) ->> 'kind'::text) = (state)::text) AND (jsonb_typeof((payload_json -> 'amounts'::text)) = 'object'::text) AND (jsonb_typeof((payload_json -> 'evidence'::text)) = 'object'::text) AND ((state = 'censored'::qp_recommendation_economic_outcome_state) OR (((payload_json -> 'amounts'::text) -> 'net_pnl_usd'::text) <> 'null'::jsonb)) AND ((state <> 'horizon_liquidated'::qp_recommendation_economic_outcome_state) OR ((((payload_json -> 'evidence'::text) ->> 'exit_evidence_kind'::text) = 'full_bid_ladder'::text) AND (((payload_json -> 'evidence'::text) ->> 'full_l2_covered'::text))::boolean))))",
+      "initially_deferred": false,
+      "name": "ck_recommendation_economic_outcome_contract",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_economic_outcome-decision_policy_snapsh",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (model_version_id) REFERENCES quant_model_version(model_version_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_economic_outcome-model_version_id",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recommendation_id) REFERENCES quant_recommendation(recommendation_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_economic_outcome-recommendation_id",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recommendation_report_id) REFERENCES quant_recommendation_report(recommendation_report_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_economic_outcome-recommendation_report_",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (report_route_run_id) REFERENCES quant_report_route_run(report_route_run_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_economic_outcome-report_route_run_id",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_economic_outcome-research_profile_artif",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (trade_policy_artifact_id) REFERENCES quant_trade_policy_artifact(artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_economic_outcome-trade_policy_artifact_",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (recommendation_id)",
+      "initially_deferred": false,
+      "name": "quant_recommendation_economic_outcome_pkey",
+      "table": "quant_recommendation_economic_outcome",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK (((intent_count >= 0) AND (attempt_count >= 0) AND (attempt_count <= intent_count) AND (unfilled_attempt_count >= 0) AND (partially_filled_attempt_count >= 0) AND (fully_filled_attempt_count >= 0) AND (((unfilled_attempt_count + partially_filled_attempt_count) + fully_filled_attempt_count) = attempt_count) AND (total_requested_shares >= (0)::numeric) AND (total_filled_shares >= (0)::numeric) AND (total_filled_shares <= total_requested_shares) AND ((total_entry_fee_usd IS NULL) OR (total_entry_fee_usd >= (0)::numeric)) AND ((total_exit_fee_usd IS NULL) OR (total_exit_fee_usd >= (0)::numeric)) AND ((total_settlement_payout_usd IS NULL) OR (total_settlement_payout_usd >= (0)::numeric)) AND (((attempt_count = 0) AND (first_attempt_terminal_at IS NULL) AND (last_attempt_terminal_at IS NULL)) OR ((attempt_count > 0) AND (first_attempt_terminal_at IS NOT NULL) AND (last_attempt_terminal_at IS NOT NULL) AND (first_attempt_terminal_at <= last_attempt_terminal_at) AND (last_attempt_terminal_at <= terminal_at))) AND (terminal_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND ((attempt_set_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((rollup_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text)))",
       "initially_deferred": false,
       "name": "ck_quant_execution_rollup_contract",
@@ -30958,6 +32070,15 @@
       "name": "quant_recommendation_resolution_outcome_pkey",
       "table": "quant_recommendation_resolution_outcome",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (recommendation_id, outcome_hash)",
+      "initially_deferred": false,
+      "name": "uq_resolution_outcome_hash",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "u",
       "validated": true
     },
     {
@@ -31821,6 +32942,42 @@
       "initially_deferred": false,
       "name": "quant_resolution_projection_remediation_request_hash_key",
       "table": "quant_resolution_projection_remediation",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((due_observation_count >= 0) AND (usable_observation_count >= 0) AND (usable_observation_count <= due_observation_count) AND (comparison_minimum_observations > 0) AND (coverage >= (0)::numeric) AND (coverage <= (1)::numeric) AND (minimum_coverage > (0)::numeric) AND (minimum_coverage <= (1)::numeric) AND (minimum_effect_bps > (0)::numeric) AND (confidence > (0)::numeric) AND (confidence <= (1)::numeric) AND ((window_start IS NULL) = (due_observation_count = 0)) AND ((window_start IS NULL) OR (window_start < assessed_through)) AND (assessed_through <= available_at) AND (available_at <= created_at) AND (route_identity_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (feedback_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(evidence_json) = 'object'::text) AND (evidence_json ?& ARRAY['observation_hash'::text, 'uniqueness_weight_hash'::text, 'methodology_version'::text]) AND ((evidence_json - ARRAY['observation_hash'::text, 'uniqueness_weight_hash'::text, 'methodology_version'::text]) = '{}'::jsonb) AND ((evidence_json ->> 'observation_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((char_length(btrim((evidence_json ->> 'methodology_version'::text))) >= 1) AND (char_length(btrim((evidence_json ->> 'methodology_version'::text))) <= 128)) AND (((state = ANY (ARRAY['insufficient_evidence'::qp_route_economic_health_state, 'data_incomplete'::qp_route_economic_health_state])) AND (effective_sample_size IS NULL) AND (weighted_mean_return_bps IS NULL) AND (lower_confidence_return_bps IS NULL) AND ((evidence_json -> 'uniqueness_weight_hash'::text) = 'null'::jsonb)) OR ((state = ANY (ARRAY['healthy'::qp_route_economic_health_state, 'degraded'::qp_route_economic_health_state])) AND (effective_sample_size > (0)::numeric) AND (weighted_mean_return_bps IS NOT NULL) AND (lower_confidence_return_bps IS NOT NULL) AND ((evidence_json ->> 'uniqueness_weight_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text))) AND ((state <> 'insufficient_evidence'::qp_route_economic_health_state) OR (due_observation_count < comparison_minimum_observations)) AND ((state <> 'data_incomplete'::qp_route_economic_health_state) OR (coverage < minimum_coverage) OR (usable_observation_count < comparison_minimum_observations)) AND ((state <> 'healthy'::qp_route_economic_health_state) OR ((usable_observation_count >= comparison_minimum_observations) AND (coverage >= minimum_coverage) AND (lower_confidence_return_bps >= minimum_effect_bps))) AND ((state <> 'degraded'::qp_route_economic_health_state) OR ((usable_observation_count >= comparison_minimum_observations) AND (coverage >= minimum_coverage) AND (lower_confidence_return_bps < minimum_effect_bps)))))",
+      "initially_deferred": false,
+      "name": "ck_route_economic_health_contract",
+      "table": "quant_route_economic_health",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_route_economic_health-research_profile_artifact_id",
+      "table": "quant_route_economic_health",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (route_economic_health_id)",
+      "initially_deferred": false,
+      "name": "quant_route_economic_health_pkey",
+      "table": "quant_route_economic_health",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (route_identity_hash, research_profile_artifact_id, assessed_through)",
+      "initially_deferred": false,
+      "name": "uq_route_economic_health_cutoff",
+      "table": "quant_route_economic_health",
       "type": "u",
       "validated": true
     },
@@ -32987,13 +34144,20 @@
     },
     {
       "labels": [
+        "pause",
+        "unpause"
+      ],
+      "name": "qp_account_pause_operation_kind"
+    },
+    {
+      "labels": [
         "prepared",
         "dispatched",
         "ambiguous",
         "confirmed",
         "failed"
       ],
-      "name": "qp_account_pause_submission_state"
+      "name": "qp_account_pause_operation_state"
     },
     {
       "labels": [
@@ -33971,6 +35135,17 @@
     },
     {
       "labels": [
+        "entry_not_triggered",
+        "entry_unfilled",
+        "policy_exited",
+        "horizon_liquidated",
+        "resolved_before_horizon",
+        "censored"
+      ],
+      "name": "qp_recommendation_economic_outcome_state"
+    },
+    {
+      "labels": [
         "prepared",
         "published",
         "superseded",
@@ -34226,6 +35401,15 @@
         "disabled"
       ],
       "name": "qp_role_status"
+    },
+    {
+      "labels": [
+        "insufficient_evidence",
+        "healthy",
+        "degraded",
+        "data_incomplete"
+      ],
+      "name": "qp_route_economic_health_state"
     },
     {
       "labels": [
@@ -34546,6 +35730,16 @@
       "volatility": "v"
     },
     {
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_economic_outcome_task()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'economic replay task cannot be deleted'; END IF; IF ROW(NEW.recommendation_id, NEW.horizon_at, NEW.created_at) IS DISTINCT FROM ROW(OLD.recommendation_id, OLD.horizon_at, OLD.created_at) THEN RAISE EXCEPTION 'economic replay task identity is immutable'; END IF; IF OLD.replay_until IS NOT NULL AND ROW(NEW.replay_until, NEW.source_cutoff_at, NEW.resolution_outcome_hash) IS DISTINCT FROM ROW(OLD.replay_until, OLD.source_cutoff_at, OLD.resolution_outcome_hash) THEN RAISE EXCEPTION 'economic replay first-claim boundary is immutable'; END IF; IF OLD.status = 'completed'::public.qp_outcome_reconciliation_task_status THEN RAISE EXCEPTION 'completed economic replay task is immutable'; END IF; IF NEW.status = 'completed'::public.qp_outcome_reconciliation_task_status AND NOT EXISTS (SELECT 1 FROM public.quant_recommendation_economic_outcome WHERE recommendation_id = NEW.recommendation_id) THEN RAISE EXCEPTION 'economic task completion requires its durable outcome'; END IF; NEW.updated_at = statement_timestamp(); RETURN NEW; END; $function$\n",
+      "identity_arguments": "",
+      "language": "plpgsql",
+      "name": "trigger_guard_economic_outcome_task",
+      "owner": "$schema_owner",
+      "result": "trigger",
+      "security_definer": false,
+      "volatility": "v"
+    },
+    {
       "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_factor_value()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ DECLARE owning_kind public.qp_model_run_kind; owning_window_start timestamptz; owning_window_end timestamptz; BEGIN IF TG_OP <> 'INSERT' THEN RAISE EXCEPTION 'factor-value ledger is append-only (WORM); % is not permitted', TG_OP; END IF; NEW.created_at = statement_timestamp(); SELECT run_kind, window_start, window_end INTO owning_kind, owning_window_start, owning_window_end FROM public.quant_model_run WHERE model_run_id = NEW.model_run_id AND status = 'running'::public.qp_model_run_status FOR UPDATE; IF NOT FOUND THEN RAISE EXCEPTION 'factor values require an owning Running model run'; END IF; IF ( owning_kind IN ('live_inference'::public.qp_model_run_kind, 'shadow'::public.qp_model_run_kind) AND (owning_window_start <> owning_window_end OR NEW.decision_at <> owning_window_start) ) OR ( owning_kind NOT IN ('live_inference'::public.qp_model_run_kind, 'shadow'::public.qp_model_run_kind) AND NEW.decision_at NOT BETWEEN owning_window_start AND owning_window_end ) THEN RAISE EXCEPTION 'factor value does not match owning model-run decision window'; END IF; PERFORM 1 FROM public.quant_feature_vector WHERE feature_vector_id = NEW.feature_vector_id AND market_id = NEW.market_id AND decision_at = NEW.decision_at FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'factor value does not match feature-vector market/decision lineage'; END IF; IF EXISTS ( SELECT 1 FROM public.quant_factor_value WHERE model_run_id = NEW.model_run_id AND market_id = NEW.market_id AND decision_at = NEW.decision_at AND feature_vector_id <> NEW.feature_vector_id ) THEN RAISE EXCEPTION 'one factor plane cannot bind multiple feature vectors'; END IF; RETURN NEW; END; $function$\n",
       "identity_arguments": "",
       "language": "plpgsql",
@@ -34699,6 +35893,13 @@
       "grantee": "$schema_owner",
       "object_kind": "function",
       "object_name": "trigger_guard_calibration_artifact()",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "trigger_guard_economic_outcome_task()",
       "privilege": "EXECUTE"
     },
     {
@@ -35867,6 +37068,55 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "quant_account_clean_funder_blocker",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_clean_funder_blocker",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_clean_funder_blocker",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_clean_funder_blocker",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_clean_funder_blocker",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_clean_funder_blocker",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_clean_funder_blocker",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "quant_account_execution_association",
       "privilege": "DELETE"
     },
@@ -35916,49 +37166,49 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_account_pause_submission",
+      "object_name": "quant_account_pause_operation",
       "privilege": "DELETE"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_account_pause_submission",
+      "object_name": "quant_account_pause_operation",
       "privilege": "INSERT"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_account_pause_submission",
+      "object_name": "quant_account_pause_operation",
       "privilege": "REFERENCES"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_account_pause_submission",
+      "object_name": "quant_account_pause_operation",
       "privilege": "SELECT"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_account_pause_submission",
+      "object_name": "quant_account_pause_operation",
       "privilege": "TRIGGER"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_account_pause_submission",
+      "object_name": "quant_account_pause_operation",
       "privilege": "TRUNCATE"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_account_pause_submission",
+      "object_name": "quant_account_pause_operation",
       "privilege": "UPDATE"
     },
     {
@@ -36008,6 +37258,55 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_account_recovery_incident",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_manifest",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_manifest",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_manifest",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_manifest",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_manifest",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_manifest",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_manifest",
       "privilege": "UPDATE"
     },
     {
@@ -36694,6 +37993,55 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_drift_report",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_economic_outcome_reconciliation_task",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_economic_outcome_reconciliation_task",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_economic_outcome_reconciliation_task",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_economic_outcome_reconciliation_task",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_economic_outcome_reconciliation_task",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_economic_outcome_reconciliation_task",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_economic_outcome_reconciliation_task",
       "privilege": "UPDATE"
     },
     {
@@ -39248,6 +40596,55 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "quant_recommendation_economic_outcome",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_economic_outcome",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_economic_outcome",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_economic_outcome",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_economic_outcome",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_economic_outcome",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_economic_outcome",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "quant_recommendation_execution_rollup",
       "privilege": "DELETE"
     },
@@ -40075,6 +41472,55 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_resolution_projection_remediation",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_route_economic_health",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_route_economic_health",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_route_economic_health",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_route_economic_health",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_route_economic_health",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_route_economic_health",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_route_economic_health",
       "privilege": "UPDATE"
     },
     {
@@ -42280,6 +43726,26 @@
       "valid": true
     },
     {
+      "definition": "CREATE UNIQUE INDEX quant_account_clean_funder_blocker_pkey ON public.quant_account_clean_funder_blocker USING btree (recovery_incident_id)",
+      "method": "btree",
+      "name": "quant_account_clean_funder_blocker_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_account_clean_funder_blocker",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_account_clean_funder_execution ON public.quant_account_clean_funder_blocker USING btree (account_chain_execution_id)",
+      "method": "btree",
+      "name": "uq_quant_account_clean_funder_execution",
+      "primary": false,
+      "ready": true,
+      "table": "quant_account_clean_funder_blocker",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE UNIQUE INDEX quant_account_execution_association_pkey ON public.quant_account_execution_association USING btree (account_chain_execution_id)",
       "method": "btree",
       "name": "quant_account_execution_association_pkey",
@@ -42290,22 +43756,22 @@
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX quant_account_pause_submission_pkey ON public.quant_account_pause_submission USING btree (account_pause_submission_id)",
+      "definition": "CREATE UNIQUE INDEX quant_account_pause_operation_pkey ON public.quant_account_pause_operation USING btree (account_pause_operation_id)",
       "method": "btree",
-      "name": "quant_account_pause_submission_pkey",
+      "name": "quant_account_pause_operation_pkey",
       "primary": true,
       "ready": true,
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "unique": true,
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX uq_quant_account_pause_incident_exchange ON public.quant_account_pause_submission USING btree (recovery_incident_id, exchange_address)",
+      "definition": "CREATE UNIQUE INDEX uq_quant_account_pause_operation_identity ON public.quant_account_pause_operation USING btree (recovery_incident_id, exchange_address, operation_kind)",
       "method": "btree",
-      "name": "uq_quant_account_pause_incident_exchange",
+      "name": "uq_quant_account_pause_operation_identity",
       "primary": false,
       "ready": true,
-      "table": "quant_account_pause_submission",
+      "table": "quant_account_pause_operation",
       "unique": true,
       "valid": true
     },
@@ -42326,6 +43792,36 @@
       "primary": false,
       "ready": true,
       "table": "quant_account_recovery_incident",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_account_recovery_manifest_pkey ON public.quant_account_recovery_manifest USING btree (account_recovery_manifest_id)",
+      "method": "btree",
+      "name": "quant_account_recovery_manifest_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_account_recovery_manifest",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_account_recovery_manifest_attempt ON public.quant_account_recovery_manifest USING btree (recovery_incident_id, attempt_no)",
+      "method": "btree",
+      "name": "uq_quant_account_recovery_manifest_attempt",
+      "primary": false,
+      "ready": true,
+      "table": "quant_account_recovery_manifest",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_account_recovery_manifest_converged ON public.quant_account_recovery_manifest USING btree (recovery_incident_id) WHERE converged",
+      "method": "btree",
+      "name": "uq_quant_account_recovery_manifest_converged",
+      "primary": false,
+      "ready": true,
+      "table": "quant_account_recovery_manifest",
       "unique": true,
       "valid": true
     },
@@ -42736,6 +44232,26 @@
       "primary": false,
       "ready": true,
       "table": "quant_drift_report",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_economic_outcome_task_due ON public.quant_economic_outcome_reconciliation_task USING btree (status, horizon_at, next_attempt_at, lease_expires_at, recommendation_id) WHERE (status <> 'completed'::qp_outcome_reconciliation_task_status)",
+      "method": "btree",
+      "name": "idx_quant_economic_outcome_task_due",
+      "primary": false,
+      "ready": true,
+      "table": "quant_economic_outcome_reconciliation_task",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_economic_outcome_reconciliation_task_pkey ON public.quant_economic_outcome_reconciliation_task USING btree (recommendation_id)",
+      "method": "btree",
+      "name": "quant_economic_outcome_reconciliation_task_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_economic_outcome_reconciliation_task",
       "unique": true,
       "valid": true
     },
@@ -44710,6 +46226,26 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_recommendation_economic_profile_horizon ON public.quant_recommendation_economic_outcome USING btree (research_profile_artifact_id, horizon_at DESC, recommendation_id)",
+      "method": "btree",
+      "name": "idx_recommendation_economic_profile_horizon",
+      "primary": false,
+      "ready": true,
+      "table": "quant_recommendation_economic_outcome",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_recommendation_economic_outcome_pkey ON public.quant_recommendation_economic_outcome USING btree (recommendation_id)",
+      "method": "btree",
+      "name": "quant_recommendation_economic_outcome_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_recommendation_economic_outcome",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_execution_rollup_available ON public.quant_recommendation_execution_rollup USING btree (available_at, recommendation_id)",
       "method": "btree",
       "name": "idx_quant_execution_rollup_available",
@@ -44824,6 +46360,16 @@
       "method": "btree",
       "name": "quant_recommendation_resolution_outcome_pkey",
       "primary": true,
+      "ready": true,
+      "table": "quant_recommendation_resolution_outcome",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_resolution_outcome_hash ON public.quant_recommendation_resolution_outcome USING btree (recommendation_id, outcome_hash)",
+      "method": "btree",
+      "name": "uq_resolution_outcome_hash",
+      "primary": false,
       "ready": true,
       "table": "quant_recommendation_resolution_outcome",
       "unique": true,
@@ -45160,7 +46706,7 @@
       "valid": true
     },
     {
-      "definition": "CREATE INDEX idx_quant_research_readiness_evidence_latest ON public.quant_research_readiness_evidence USING btree (kind, observed_at DESC)",
+      "definition": "CREATE INDEX idx_quant_research_readiness_evidence_latest ON public.quant_research_readiness_evidence USING btree (kind, scope_hash, observed_at DESC, evidence_id DESC)",
       "method": "btree",
       "name": "idx_quant_research_readiness_evidence_latest",
       "primary": false,
@@ -45336,6 +46882,36 @@
       "primary": false,
       "ready": true,
       "table": "quant_resolution_projection_remediation",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_route_economic_health_latest ON public.quant_route_economic_health USING btree (route_identity_hash, research_profile_artifact_id, assessed_through DESC, route_economic_health_id DESC)",
+      "method": "btree",
+      "name": "idx_route_economic_health_latest",
+      "primary": false,
+      "ready": true,
+      "table": "quant_route_economic_health",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_route_economic_health_pkey ON public.quant_route_economic_health USING btree (route_economic_health_id)",
+      "method": "btree",
+      "name": "quant_route_economic_health_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_route_economic_health",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_route_economic_health_cutoff ON public.quant_route_economic_health USING btree (route_identity_hash, research_profile_artifact_id, assessed_through)",
+      "method": "btree",
+      "name": "uq_route_economic_health_cutoff",
+      "primary": false,
+      "ready": true,
+      "table": "quant_route_economic_health",
       "unique": true,
       "valid": true
     },
@@ -46375,6 +47951,13 @@
     },
     {
       "kind": "r",
+      "name": "quant_account_clean_funder_blocker",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "quant_account_execution_association",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -46382,7 +47965,7 @@
     },
     {
       "kind": "r",
-      "name": "quant_account_pause_submission",
+      "name": "quant_account_pause_operation",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -46390,6 +47973,13 @@
     {
       "kind": "r",
       "name": "quant_account_recovery_incident",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_account_recovery_manifest",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -46488,6 +48078,13 @@
     {
       "kind": "r",
       "name": "quant_drift_report",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_economic_outcome_reconciliation_task",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -46858,6 +48455,13 @@
     },
     {
       "kind": "r",
+      "name": "quant_recommendation_economic_outcome",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "quant_recommendation_execution_rollup",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -46971,6 +48575,13 @@
     {
       "kind": "r",
       "name": "quant_resolution_projection_remediation",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_route_economic_health",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -47290,22 +48901,34 @@
       "table": "quant_account_chain_execution"
     },
     {
+      "definition": "CREATE TRIGGER trg_quant_account_clean_funder_blocker_append_only BEFORE DELETE OR UPDATE ON public.quant_account_clean_funder_blocker FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_account_clean_funder_blocker_append_only",
+      "table": "quant_account_clean_funder_blocker"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_account_execution_association_append_only BEFORE DELETE OR UPDATE ON public.quant_account_execution_association FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_quant_account_execution_association_append_only",
       "table": "quant_account_execution_association"
     },
     {
-      "definition": "CREATE TRIGGER trg_quant_account_pause_submission_updated_at BEFORE UPDATE ON public.quant_account_pause_submission FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
+      "definition": "CREATE TRIGGER trg_quant_account_pause_operation_updated_at BEFORE UPDATE ON public.quant_account_pause_operation FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
       "enabled": "O",
-      "name": "trg_quant_account_pause_submission_updated_at",
-      "table": "quant_account_pause_submission"
+      "name": "trg_quant_account_pause_operation_updated_at",
+      "table": "quant_account_pause_operation"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_account_recovery_incident_updated_at BEFORE UPDATE ON public.quant_account_recovery_incident FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
       "enabled": "O",
       "name": "trg_quant_account_recovery_incident_updated_at",
       "table": "quant_account_recovery_incident"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_account_recovery_manifest_append_only BEFORE DELETE OR UPDATE ON public.quant_account_recovery_manifest FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_account_recovery_manifest_append_only",
+      "table": "quant_account_recovery_manifest"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_attribution_artifact_append_only BEFORE DELETE OR UPDATE ON public.quant_attribution_artifact FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
@@ -47378,6 +49001,12 @@
       "enabled": "O",
       "name": "trg_quant_drift_report_append_only",
       "table": "quant_drift_report"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_economic_outcome_task_guard BEFORE DELETE OR UPDATE ON public.quant_economic_outcome_reconciliation_task FOR EACH ROW EXECUTE FUNCTION trigger_guard_economic_outcome_task()",
+      "enabled": "O",
+      "name": "trg_quant_economic_outcome_task_guard",
+      "table": "quant_economic_outcome_reconciliation_task"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_entry_condition_artifact_append_only BEFORE DELETE OR UPDATE ON public.quant_entry_condition_artifact FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
@@ -47638,6 +49267,12 @@
       "table": "quant_order_intent"
     },
     {
+      "definition": "CREATE TRIGGER trg_recommendation_economic_outcome_append_only BEFORE DELETE OR UPDATE ON public.quant_recommendation_economic_outcome FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_recommendation_economic_outcome_append_only",
+      "table": "quant_recommendation_economic_outcome"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_execution_rollup_append_only BEFORE DELETE OR UPDATE ON public.quant_recommendation_execution_rollup FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_quant_execution_rollup_append_only",
@@ -47708,6 +49343,12 @@
       "enabled": "O",
       "name": "trg_quant_resolution_remediation_append_only",
       "table": "quant_resolution_projection_remediation"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_route_economic_health_append_only BEFORE DELETE OR UPDATE ON public.quant_route_economic_health FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_route_economic_health_append_only",
+      "table": "quant_route_economic_health"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_settlement_chain_submission_updated_at BEFORE UPDATE ON public.quant_settlement_chain_submission FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",

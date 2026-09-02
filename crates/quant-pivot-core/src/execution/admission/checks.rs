@@ -1,24 +1,28 @@
-//! The 25 admission checks, each a pure function of the frozen
+//! The 27 admission checks, each a pure function of the frozen
 //! [`AdmissionInput`]. Every check is hard: a violation is `Deny`, a
 //! not-now-but-retryable condition is `Defer`, otherwise `Allow`.
 
+use quant_pivot_api::clob::{VenueFundingAsset, VenueFundingEvidence};
 use quant_pivot_models::{
+    domain::order::PolymarketOrderRules,
     enums::{
-        common::OrderType,
+        common::{OrderType, Side},
         execution::AdmissionCheckId,
         quant::{
             AuthorizationKind, EntryAuthorizationPolicy, EntryConditionState, FillRequirement,
-            OrderIntentStatus, RecommendationReportStatus,
+            OrderIntentStatus, RecommendationReportStatus, RouteEconomicHealthState,
         },
     },
-    types::{Bps, OrderAmount, Usd},
+    types::{Bps, OrderAmount, Usd, VenueOrderAmount},
 };
 use quant_pivot_research::execution_semantics::{
-    BookWalkFill, BookWalkOutcome, LiquidityRole, walk_buy_cash_budget, walk_buy_exact_shares,
+    BookWalkOutcome, LiquidityRole, walk_buy_cash_budget,
 };
 use rust_decimal::Decimal;
 
-use super::{AdmissionCheck, AdmissionCheckTrace, AdmissionInput, VenueHealth};
+use super::{
+    AdmissionCheck, AdmissionCheckTrace, AdmissionEconomicHealth, AdmissionInput, VenueHealth,
+};
 use crate::execution::settlement_recovery_admission::SettlementRecoveryAdmission;
 
 // 1 ──────────────────────────────────────────────────────────────────────────
@@ -153,6 +157,75 @@ impl AdmissionCheck for AuthorizationPolicyCheck {
     }
 }
 
+/// Route economic evidence may only reduce execution authority.
+pub(super) struct EconomicHealthCheck;
+
+impl EconomicHealthCheck {
+    fn evaluate(
+        health: &AdmissionEconomicHealth,
+        authorization_kind: Option<AuthorizationKind>,
+    ) -> AdmissionCheckTrace {
+        let check = AdmissionCheckId::EconomicHealth;
+        match health {
+            AdmissionEconomicHealth::Present { state, .. }
+                if matches!(
+                    state,
+                    RouteEconomicHealthState::Degraded | RouteEconomicHealthState::DataIncomplete
+                ) =>
+            {
+                return AdmissionCheckTrace::deny(
+                    check,
+                    format!("Route economic health is {}", state.as_str()),
+                );
+            }
+            _ => {}
+        }
+        if authorization_kind != Some(AuthorizationKind::ActivePolicy) {
+            return AdmissionCheckTrace::pass(
+                check,
+                "operator authorization is allowed without positive economic-health evidence",
+            );
+        }
+        match health {
+            AdmissionEconomicHealth::Present {
+                state: RouteEconomicHealthState::Healthy,
+                fresh: true,
+                ..
+            } => AdmissionCheckTrace::pass(check, "fresh Healthy Route economic evidence"),
+            AdmissionEconomicHealth::Present {
+                state: RouteEconomicHealthState::Healthy,
+                fresh: false,
+                ..
+            } => AdmissionCheckTrace::deny(
+                check,
+                "PolicyAutomatic requires fresh Route economic evidence",
+            ),
+            AdmissionEconomicHealth::Missing
+            | AdmissionEconomicHealth::Present {
+                state: RouteEconomicHealthState::InsufficientEvidence,
+                ..
+            } => AdmissionCheckTrace::deny(
+                check,
+                "PolicyAutomatic requires fresh Healthy Route economic evidence",
+            ),
+            AdmissionEconomicHealth::Present { .. } => AdmissionCheckTrace::deny(
+                check,
+                "Route economic evidence does not authorize automatic entry",
+            ),
+        }
+    }
+}
+
+impl AdmissionCheck for EconomicHealthCheck {
+    fn id(&self) -> AdmissionCheckId {
+        AdmissionCheckId::EconomicHealth
+    }
+
+    fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
+        Self::evaluate(&input.economic_health, input.intent.authorization_kind)
+    }
+}
+
 // 5 ──────────────────────────────────────────────────────────────────────────
 /// A promised automatic resolution exit has a current, account-scoped recovery path.
 pub(super) struct SettlementRecoveryCheck;
@@ -269,8 +342,8 @@ impl AdmissionCheck for BookFreshnessCheck {
 }
 
 // 7a ─────────────────────────────────────────────────────────────────────────
-/// Venue tick/NegRisk metadata must agree with the frozen registry, and the
-/// signed entry price must be representable on that tick grid.
+/// Catalog, PIT registry, live book, and exact prepared-order identities and
+/// venue rules must agree before any money-changing claim.
 pub(super) struct VenueMetadataCheck;
 
 impl AdmissionCheck for VenueMetadataCheck {
@@ -280,27 +353,112 @@ impl AdmissionCheck for VenueMetadataCheck {
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
         let metadata = &input.venue_metadata;
-        if metadata.registry_tick_size != metadata.venue_tick_size {
-            return AdmissionCheckTrace::deny(self.id(), "registry/venue tick-size mismatch")
-                .with_threshold(metadata.registry_tick_size.as_str())
-                .with_actual(metadata.venue_tick_size.as_str());
+        let expected_market = &input.recommendation.market_id;
+        let expected_token = &input.intent.entry_order_json.token_id;
+        if let Err(reason) = metadata.validate(expected_market, expected_token) {
+            return AdmissionCheckTrace::deny(self.id(), "venue metadata changed or mismatched")
+                .with_actual(reason);
         }
-        if metadata.registry_neg_risk != metadata.venue_neg_risk {
-            return AdmissionCheckTrace::deny(self.id(), "registry/venue NegRisk mismatch")
-                .with_threshold(metadata.registry_neg_risk.to_string())
-                .with_actual(metadata.venue_neg_risk.to_string());
+        let prepared = &input.prepared_order;
+        let spec = &input.intent.entry_order_json;
+        if prepared.market_id != *expected_market
+            || prepared.token_id != spec.token_id
+            || prepared.tick_size != metadata.current_tick_size
+            || prepared.minimum_order_size != metadata.current_minimum_order_size
+            || prepared.neg_risk != metadata.current_neg_risk
+            || prepared.clob_market_info_payload_hash != metadata.current_payload_hash
+            || prepared.side != spec.side
+            || prepared.order_type != spec.order_type
+            || prepared.post_only != spec.post_only
+            || prepared.limit_price != spec.limit_price
+        {
+            return AdmissionCheckTrace::deny(self.id(), "prepared order identity drifted")
+                .with_actual(format!("{prepared:?}"));
         }
-        let tick = metadata.registry_tick_size.as_decimal();
-        let price = input.intent.entry_order_json.limit_price.inner();
-        if price < tick || price > Decimal::ONE - tick || !(price / tick).fract().is_zero() {
+        let rules = match PolymarketOrderRules::new(
+            metadata.current_tick_size,
+            metadata.current_minimum_order_size,
+        ) {
+            Ok(rules) => rules,
+            Err(error) => {
+                return AdmissionCheckTrace::deny(self.id(), "live venue rules are invalid")
+                    .with_actual(error.to_string());
+            }
+        };
+        let canonical = match rules.validate_order(
+            prepared.side,
+            prepared.venue_amount,
+            prepared.limit_price,
+        ) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                return AdmissionCheckTrace::deny(self.id(), "prepared order is not canonical")
+                    .with_actual(error.to_string());
+            }
+        };
+        if canonical.requested_shares != prepared.requested_shares {
+            return AdmissionCheckTrace::deny(self.id(), "prepared signed shares drifted")
+                .with_threshold(canonical.requested_shares.to_string())
+                .with_actual(prepared.requested_shares.to_string());
+        }
+        if let OrderAmount::Shares(source) = spec.amount
+            && prepared.venue_amount != VenueOrderAmount::Shares(source)
+        {
+            return AdmissionCheckTrace::deny(self.id(), "intent shares are not canonical")
+                .with_threshold(prepared.requested_shares.to_string())
+                .with_actual(source.to_string());
+        }
+        if prepared.side == Side::Buy && prepared.expected_worst_fill_price > prepared.limit_price {
             return AdmissionCheckTrace::deny(
                 self.id(),
-                "entry limit price is outside the venue tick grid",
+                "predicted BUY fill exceeds the signed limit",
             )
-            .with_threshold(tick.to_string())
-            .with_actual(price.to_string());
+            .with_threshold(prepared.limit_price.to_string())
+            .with_actual(prepared.expected_worst_fill_price.to_string());
         }
-        AdmissionCheckTrace::pass(self.id(), "venue metadata and entry tick grid match")
+        AdmissionCheckTrace::pass(self.id(), "catalog, venue metadata, and order rules match")
+    }
+}
+
+// 7b ─────────────────────────────────────────────────────────────────────────
+/// Valid funding deficits are retryable state, never malformed-input errors.
+pub(super) struct VenueFundingCheck;
+
+impl AdmissionCheck for VenueFundingCheck {
+    fn id(&self) -> AdmissionCheckId {
+        AdmissionCheckId::VenueFunding
+    }
+
+    fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
+        let evidence = &input.venue_funding;
+        let snapshot = evidence.snapshot();
+        if snapshot.asset != VenueFundingAsset::Collateral || snapshot.token_id.is_some() {
+            return AdmissionCheckTrace::deny(self.id(), "entry funding identity is invalid")
+                .with_threshold("collateral; token absent")
+                .with_actual(format!("{:?}; {:?}", snapshot.asset, snapshot.token_id));
+        }
+        let actual = format!(
+            "balance={},allowance={}",
+            snapshot.balance,
+            snapshot
+                .allowance
+                .as_ref()
+                .map_or("missing", |allowance| allowance.as_str())
+        );
+        match evidence {
+            VenueFundingEvidence::Ready { .. } => {
+                AdmissionCheckTrace::pass(self.id(), "live balance and allowance sufficient")
+                    .with_threshold(evidence.required().to_string())
+                    .with_actual(actual)
+            }
+            VenueFundingEvidence::MissingAllowance { .. }
+            | VenueFundingEvidence::InsufficientBalance { .. }
+            | VenueFundingEvidence::InsufficientAllowance { .. } => {
+                AdmissionCheckTrace::defer(self.id(), "live venue funding is not ready")
+                    .with_threshold(evidence.required().to_string())
+                    .with_actual(actual)
+            }
+        }
     }
 }
 
@@ -424,7 +582,7 @@ impl AdmissionCheck for CapitalBudgetCheck {
 ///
 /// `portfolio.exposure_limits.max_open_recommendations` bounds how many intents
 /// may hold capital in flight at once. The intent under admission is already
-/// counted in `open_intent_count` (it is `Approved` / `ApprovedByPolicy`), so
+/// counted in `open_intent_count` (it is `Authorized`), so
 /// the check is `open_intent_count <= cap` — no off-by-one add-back.
 pub(super) struct MaxOpenIntentsCheck;
 
@@ -584,17 +742,22 @@ impl AdmissionCheck for LiquidityDepthCheck {
                 );
             }
         } else {
-            let Ok(fill) = (input).entry_walk() else {
-                return AdmissionCheckTrace::deny(
-                    self.id(),
-                    "entry book walk or fee schedule is invalid",
-                );
-            };
-            if fill.outcome == BookWalkOutcome::Unfilled {
+            if input.prepared_order.expected_filled_shares.is_zero() {
                 return AdmissionCheckTrace::defer(
                     self.id(),
                     "insufficient ask depth at the price cap",
                 );
+            }
+            if spec.order_type == OrderType::Fok
+                && input.prepared_order.expected_filled_shares
+                    < input.prepared_order.requested_shares
+            {
+                return AdmissionCheckTrace::defer(
+                    self.id(),
+                    "FOK prediction cannot fill canonical signed shares",
+                )
+                .with_threshold(input.prepared_order.requested_shares.to_string())
+                .with_actual(input.prepared_order.expected_filled_shares.to_string());
             }
         }
         let entry = &input.recommendation.trade_plan.entry;
@@ -649,16 +812,11 @@ impl AdmissionCheck for SlippageCheck {
         let Some(best_ask) = book.best_ask() else {
             return AdmissionCheckTrace::defer(self.id(), "ask side empty");
         };
-        let Ok(fill) = (input).entry_walk() else {
-            return AdmissionCheckTrace::deny(
-                self.id(),
-                "entry book walk or fee schedule is invalid",
-            );
-        };
-        let Some(vwap) = fill.vwap else {
+        if input.prepared_order.expected_filled_shares.is_zero() {
             return AdmissionCheckTrace::defer(self.id(), "no executable shares at limit");
-        };
-        let Some(slippage) = Bps::spread(vwap, best_ask) else {
+        }
+        let Some(slippage) = Bps::spread(input.prepared_order.expected_worst_fill_price, best_ask)
+        else {
             return AdmissionCheckTrace::deny(self.id(), "degenerate best-ask price");
         };
         if slippage > spec.max_slippage_bps {
@@ -669,39 +827,6 @@ impl AdmissionCheck for SlippageCheck {
         AdmissionCheckTrace::pass(self.id(), "estimated slippage within tolerance")
             .with_threshold(spec.max_slippage_bps.to_string())
             .with_actual(slippage.to_string())
-    }
-}
-
-impl AdmissionInput {
-    fn entry_walk(&self) -> Result<BookWalkFill, ()> {
-        let book = self.book.as_ref().ok_or(())?;
-        let spec = &self.intent.entry_order_json;
-        let requirement = match spec.order_type {
-            OrderType::Fok => FillRequirement::AllOrNothing,
-            OrderType::Fak => FillRequirement::AllowPartial,
-            OrderType::Gtc | OrderType::Gtd { .. } => return Err(()),
-        };
-        let fill = match spec.amount {
-            OrderAmount::CashBudget(usd) => walk_buy_cash_budget(
-                &book.asks,
-                usd,
-                spec.limit_price,
-                requirement,
-                &self.fee_schedule,
-                LiquidityRole::Taker,
-                self.now,
-            ),
-            OrderAmount::Shares(shares) => walk_buy_exact_shares(
-                &book.asks,
-                shares,
-                spec.limit_price,
-                requirement,
-                &self.fee_schedule,
-                LiquidityRole::Taker,
-                self.now,
-            ),
-        };
-        fill.map_err(|_| ())
     }
 }
 
@@ -747,7 +872,7 @@ impl AdmissionCheck for KillSwitchCheck {
         {
             return AdmissionCheckTrace::deny(
                 self.id(),
-                "blocking in-flight exposure (ambiguous/unresolvable) blocks auto execution",
+                "blocking in-flight exposure (ambiguous/unresolvable) blocks policy-automatic entry",
             );
         }
         AdmissionCheckTrace::pass(self.id(), "kill switch allows new entry")
@@ -830,6 +955,86 @@ impl AdmissionCheck for CalibratedReturnModelCheck {
                 self.id(),
                 "return model is heuristic (uncalibrated) — fail-closed",
             )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use quant_pivot_models::{
+        enums::{
+            execution::AdmissionOutcome,
+            quant::{AuthorizationKind, RouteEconomicHealthState},
+        },
+        types::{ContentHash, RouteEconomicHealthId},
+    };
+
+    use super::{AdmissionEconomicHealth, EconomicHealthCheck};
+
+    impl AdmissionEconomicHealth {
+        fn test_fixture(state: RouteEconomicHealthState, fresh: bool) -> Self {
+            Self::Present {
+                route_economic_health_id: RouteEconomicHealthId::from_v7(),
+                evidence_hash: ContentHash::from_bytes([8; 32]),
+                state,
+                assessed_through: Utc::now(),
+                fresh,
+            }
+        }
+    }
+
+    #[test]
+    fn economic_health_reduces_authority() {
+        let operator = Some(AuthorizationKind::OperatorApproval);
+        let automatic = Some(AuthorizationKind::ActivePolicy);
+        assert_eq!(
+            EconomicHealthCheck::evaluate(&AdmissionEconomicHealth::Missing, operator).outcome,
+            AdmissionOutcome::Allow
+        );
+        assert_eq!(
+            EconomicHealthCheck::evaluate(&AdmissionEconomicHealth::Missing, automatic).outcome,
+            AdmissionOutcome::Deny
+        );
+        assert_eq!(
+            EconomicHealthCheck::evaluate(
+                &AdmissionEconomicHealth::test_fixture(
+                    RouteEconomicHealthState::InsufficientEvidence,
+                    true,
+                ),
+                operator,
+            )
+            .outcome,
+            AdmissionOutcome::Allow
+        );
+        assert_eq!(
+            EconomicHealthCheck::evaluate(
+                &AdmissionEconomicHealth::test_fixture(RouteEconomicHealthState::Healthy, true),
+                automatic,
+            )
+            .outcome,
+            AdmissionOutcome::Allow
+        );
+        assert_eq!(
+            EconomicHealthCheck::evaluate(
+                &AdmissionEconomicHealth::test_fixture(RouteEconomicHealthState::Healthy, false),
+                automatic,
+            )
+            .outcome,
+            AdmissionOutcome::Deny
+        );
+        for state in [
+            RouteEconomicHealthState::Degraded,
+            RouteEconomicHealthState::DataIncomplete,
+        ] {
+            assert_eq!(
+                EconomicHealthCheck::evaluate(
+                    &AdmissionEconomicHealth::test_fixture(state, true),
+                    operator,
+                )
+                .outcome,
+                AdmissionOutcome::Deny
+            );
         }
     }
 }

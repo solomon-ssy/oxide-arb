@@ -2,10 +2,12 @@
 
 use std::{
     collections::{BTreeSet, HashSet},
+    future::Future,
     sync::Arc,
 };
 
 use futures_util::future::BoxFuture;
+use quant_pivot_compute::{ComputeExecutor, OfflineMemoryLease};
 use quant_pivot_error::{
     QuantResult, feedback::FeedbackError, research::ResearchError, storage::StorageError,
 };
@@ -56,6 +58,7 @@ use quant_pivot_research::{
         artifact::ModelPayload, model_input_contract_hash,
     },
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     governance::{
@@ -75,6 +78,7 @@ use crate::{
 
 /// Persistence and object-store dependencies for deep serving verification.
 pub struct ModelServingPreimageDeps {
+    pub compute: Arc<ComputeExecutor>,
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
     pub source_slice_repo: Arc<dyn SourceSliceRepository>,
@@ -82,6 +86,72 @@ pub struct ModelServingPreimageDeps {
     pub calibration_repo: Arc<dyn CalibrationArtifactRepository>,
     pub trade_policy_preimages: Arc<TradePolicyPreimageVerifier>,
     pub artifact_store: Arc<dyn ArtifactStore>,
+}
+
+/// One verification operation's cancellation scope and existing memory budget.
+///
+/// Nested graph reads borrow this context instead of admitting another memory
+/// lease. Dropping the operation cancels outstanding cooperative CPU work;
+/// that work retains its actual compute and memory permits until it stops.
+pub struct ModelPreimageReadContext<'a> {
+    cancel: CancellationToken,
+    memory_lease: Option<&'a OfflineMemoryLease>,
+}
+
+impl<'a> ModelPreimageReadContext<'a> {
+    /// Attach verification to its job and, when present, its admitted budget.
+    #[must_use]
+    pub fn new(cancel: &CancellationToken, memory_lease: Option<&'a OfflineMemoryLease>) -> Self {
+        Self {
+            cancel: cancel.child_token(),
+            memory_lease,
+        }
+    }
+
+    /// Cancellation shared by every nested verification and object read.
+    #[must_use]
+    pub const fn cancel(&self) -> &CancellationToken {
+        &self.cancel
+    }
+
+    /// The caller's already-admitted memory budget, if any.
+    #[must_use]
+    pub const fn memory_lease(&self) -> Option<&'a OfflineMemoryLease> {
+        self.memory_lease
+    }
+
+    pub(crate) fn run<T>(
+        &self,
+        work: impl Future<Output = QuantResult<T>>,
+    ) -> impl Future<Output = QuantResult<T>> {
+        // Allocate before constructing the cancellation future so its state
+        // never embeds the complete recursively verified model graph.
+        let work = Box::pin(work);
+        async move {
+            tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => Err(ResearchError::Cancelled {
+                    detail: "model preimage verification cancelled".to_owned(),
+                }.into()),
+                result = work => result,
+            }
+        }
+    }
+}
+
+impl Default for ModelPreimageReadContext<'_> {
+    fn default() -> Self {
+        Self {
+            cancel: CancellationToken::new(),
+            memory_lease: None,
+        }
+    }
+}
+
+impl Drop for ModelPreimageReadContext<'_> {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 /// A fully verified immutable serving source.
@@ -349,8 +419,10 @@ impl ModelServingPreimageService {
     pub async fn load(
         &self,
         version: &ModelVersionInfo,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<VerifiedModelServingPreimage> {
-        self.load_depth(version, PreimageVerificationDepth::FullObjects)
+        context
+            .run(self.load_depth(version, PreimageVerificationDepth::FullObjects, context))
             .await
     }
 
@@ -360,8 +432,10 @@ impl ModelServingPreimageService {
     pub(crate) async fn load_runtime(
         &self,
         version: &ModelVersionInfo,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<VerifiedModelServingPreimage> {
-        self.load_depth(version, PreimageVerificationDepth::RuntimeLineage)
+        context
+            .run(self.load_depth(version, PreimageVerificationDepth::RuntimeLineage, context))
             .await
     }
 
@@ -369,12 +443,13 @@ impl ModelServingPreimageService {
         &self,
         version: &ModelVersionInfo,
         depth: PreimageVerificationDepth,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<VerifiedModelServingPreimage> {
-        let mut root = self.load_base(version, depth).await?;
+        let mut root = self.load_base(version, depth, context).await?;
         let mut visiting = HashSet::new();
         let mut verified = HashSet::new();
         root.calibration = self
-            .verify_graph(version, &root, &mut visiting, &mut verified, depth)
+            .verify_graph(version, &root, &mut visiting, &mut verified, depth, context)
             .await?;
         root.graph_verified = true;
         root.ensure_runtime_materialized()?;
@@ -385,6 +460,7 @@ impl ModelServingPreimageService {
         &self,
         version: &ModelVersionInfo,
         depth: PreimageVerificationDepth,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<VerifiedModelServingPreimage> {
         let artifact =
             ModelArtifact::load_verified(self.deps.artifact_store.as_ref(), version).await?;
@@ -396,7 +472,14 @@ impl ModelServingPreimageService {
             .load_policy_preimage(&contract.bindings().policy_snapshot)
             .await?;
         let training_dataset = self
-            .load_training_preimage(&artifact, &model_spec, &profile, &policy_snapshot, depth)
+            .load_training_preimage(
+                &artifact,
+                &model_spec,
+                &profile,
+                &policy_snapshot,
+                depth,
+                context,
+            )
             .await?;
         let bias_table = self
             .verify_bias_preimage(contract, &policy_snapshot)
@@ -421,6 +504,7 @@ impl ModelServingPreimageService {
         visiting: &'a mut HashSet<ModelVersionId>,
         verified: &'a mut HashSet<ModelVersionId>,
         depth: PreimageVerificationDepth,
+        context: &'a ModelPreimageReadContext<'_>,
     ) -> BoxFuture<'a, QuantResult<Option<ResolvedCalibration>>> {
         Box::pin(async move {
             let version_id = version.model_version_id;
@@ -436,10 +520,17 @@ impl ModelServingPreimageService {
                 .into());
             }
             let calibration = if let Some(parent) =
-                Box::pin(self.load_calibration_parent(version, source, depth)).await?
+                Box::pin(self.load_calibration_parent(version, source, depth, context)).await?
             {
-                self.verify_graph(&parent.version, &parent.source, visiting, verified, depth)
-                    .await?;
+                self.verify_graph(
+                    &parent.version,
+                    &parent.source,
+                    visiting,
+                    verified,
+                    depth,
+                    context,
+                )
+                .await?;
                 Some(parent.calibration)
             } else {
                 None
@@ -460,6 +551,7 @@ impl ModelServingPreimageService {
                     },
                     TradePolicyEvidenceDurability::Production,
                     depth,
+                    context,
                 ),
             )
             .await?
@@ -485,6 +577,7 @@ impl ModelServingPreimageService {
                     visiting,
                     verified,
                     depth,
+                    context,
                 )
                 .await?;
             }
@@ -502,8 +595,15 @@ impl ModelServingPreimageService {
         &self,
         source: &VerifiedModelServingPreimage,
         info: &CalibrationArtifactInfo,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<VerifiedModelScoreCalibration> {
-        self.verify_calibrator_depth(source, info, PreimageVerificationDepth::FullObjects)
+        context
+            .run(self.verify_calibrator_depth(
+                source,
+                info,
+                PreimageVerificationDepth::FullObjects,
+                context,
+            ))
             .await
     }
 
@@ -512,6 +612,7 @@ impl ModelServingPreimageService {
         source: &VerifiedModelServingPreimage,
         info: &CalibrationArtifactInfo,
         depth: PreimageVerificationDepth,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<VerifiedModelScoreCalibration> {
         let calibrator = VerifiedModelScoreCalibration::try_from(info)?;
         let source_model_version_id = source
@@ -531,7 +632,7 @@ impl ModelServingPreimageService {
             }
             .into());
         }
-        self.verify_calibration_dataset(source, &calibrator, depth)
+        self.verify_calibration_dataset(source, &calibrator, depth, context)
             .await?;
         Ok(calibrator)
     }
@@ -550,11 +651,22 @@ impl ModelServingPreimageService {
         dataset: &'a TrainingDatasetInfo,
         purpose: DatasetPurpose,
         dataset_policy: &ModelServingPolicySnapshotBinding,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<VerifiedReplayDataset<'a>> {
-        let replay =
-            Box::pin(self.verify_replay_bindings(source, dataset, purpose, dataset_policy)).await?;
-        self.verify_source_slice_ledger(dataset).await?;
-        Ok(replay)
+        context
+            .run(async {
+                let replay = Box::pin(self.verify_replay_bindings(
+                    source,
+                    dataset,
+                    purpose,
+                    dataset_policy,
+                    context,
+                ))
+                .await?;
+                self.verify_source_slice_ledger(dataset).await?;
+                Ok(replay)
+            })
+            .await
     }
 
     /// Verify one model against an already-loaded replay Dataset without
@@ -566,6 +678,7 @@ impl ModelServingPreimageService {
         dataset: &'a TrainingDatasetInfo,
         purpose: DatasetPurpose,
         dataset_policy: &ModelServingPolicySnapshotBinding,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<VerifiedReplayDataset<'a>> {
         if !source.graph_verified {
             return Err(ResearchError::InvalidModelArtifact {
@@ -600,6 +713,7 @@ impl ModelServingPreimageService {
                 profile: source.profile(),
             },
             TradePolicyEvidenceDurability::ContentVerified,
+            context,
         ))
         .await?;
         if trade_policy
@@ -645,6 +759,7 @@ impl ModelServingPreimageService {
         &self,
         source: &VerifiedModelServingPreimage,
         dataset: &TrainingDatasetInfo,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<ModelScoreCalibrationFitContract> {
         let model_policy = &source
             .artifact()
@@ -657,6 +772,7 @@ impl ModelServingPreimageService {
             dataset,
             DatasetPurpose::Calibration,
             model_policy,
+            context,
         ))
         .await?;
         let calibration = verified.materialization();
@@ -715,6 +831,7 @@ impl ModelServingPreimageService {
         version: &ModelVersionInfo,
         source: &VerifiedModelServingPreimage,
         depth: PreimageVerificationDepth,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<Option<VerifiedCalibrationParent>> {
         let derivation =
             version
@@ -765,7 +882,7 @@ impl ModelServingPreimageService {
                 entity: "quant_model_version",
                 id: parent_id.to_string(),
             })?;
-        let parent_source = self.load_base(&parent, depth).await?;
+        let parent_source = self.load_base(&parent, depth, context).await?;
         let info = self
             .deps
             .calibration_repo
@@ -776,7 +893,7 @@ impl ModelServingPreimageService {
                 id: calibration_artifact_id.to_string(),
             })?;
         let verified = self
-            .verify_calibrator_depth(&parent_source, &info, depth)
+            .verify_calibrator_depth(&parent_source, &info, depth, context)
             .await?;
         let binding = binding.ok_or_else(|| ResearchError::InvalidModelArtifact {
             detail: format!(
@@ -800,7 +917,7 @@ impl ModelServingPreimageService {
         Ok(Some(VerifiedCalibrationParent {
             version: parent,
             source: parent_source,
-            calibration: ResolvedCalibration::from(verified),
+            calibration: ResolvedCalibration::try_from(verified)?,
         }))
     }
 
@@ -1038,15 +1155,29 @@ impl ModelServingPreimageService {
         &self,
         dataset: &TrainingDatasetInfo,
         profile: &ResearchProfileArtifact,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<()> {
-        self.verify_dataset_bytes(dataset).await?;
-        self.verify_source_slice_ledger(dataset).await?;
+        context
+            .run(async {
+                self.verify_dataset_bytes(dataset).await?;
+                self.verify_source_slice_ledger(dataset).await?;
 
-        let lineage = &dataset.source_lineage;
-        let frozen = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
-            .read_ref(&lineage.source_slice)
-            .await?;
-        Self::verify_source_manifest(dataset, profile, &frozen.manifest)
+                let source_slice = &dataset.source_lineage.source_slice;
+                let reader = SourceSliceReader::new(
+                    Arc::clone(&self.deps.artifact_store),
+                    Arc::clone(&self.deps.compute),
+                );
+                let frozen = match context.memory_lease() {
+                    Some(lease) => {
+                        reader
+                            .read_ref_leased(source_slice, context.cancel(), lease)
+                            .await?
+                    }
+                    None => reader.read_ref(source_slice, context.cancel()).await?,
+                };
+                Self::verify_source_manifest(dataset, profile, &frozen.manifest)
+            })
+            .await
     }
 
     pub(crate) async fn verify_dataset(
@@ -1054,13 +1185,14 @@ impl ModelServingPreimageService {
         dataset: &TrainingDatasetInfo,
         profile: &ResearchProfileArtifact,
         depth: PreimageVerificationDepth,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<()> {
         match depth {
             PreimageVerificationDepth::RuntimeLineage => {
                 self.verify_dataset_lineage(dataset, profile).await
             }
             PreimageVerificationDepth::FullObjects => {
-                self.verify_dataset_objects(dataset, profile).await
+                self.verify_dataset_objects(dataset, profile, context).await
             }
         }
     }
@@ -1073,9 +1205,12 @@ impl ModelServingPreimageService {
         self.verify_dataset_bytes(dataset).await?;
         self.verify_source_slice_ledger(dataset).await?;
         let lineage = &dataset.source_lineage;
-        let manifest = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
-            .verify_manifest_ref(&lineage.source_slice)
-            .await?;
+        let manifest = SourceSliceReader::new(
+            Arc::clone(&self.deps.artifact_store),
+            Arc::clone(&self.deps.compute),
+        )
+        .verify_manifest_ref(&lineage.source_slice)
+        .await?;
         Self::verify_source_manifest(dataset, profile, &manifest)
     }
 
@@ -1183,6 +1318,7 @@ impl ModelServingPreimageService {
         profile: &ResearchProfileArtifact,
         policy: &DecisionPolicySnapshotInfo,
         depth: PreimageVerificationDepth,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<TrainingDatasetInfo> {
         let contract = artifact.header().serving_contract();
         let binding = &contract.bindings().dataset;
@@ -1224,7 +1360,8 @@ impl ModelServingPreimageService {
             &contract.bindings().policy_snapshot,
             &dataset,
         )?;
-        self.verify_dataset(&dataset, profile, depth).await?;
+        self.verify_dataset(&dataset, profile, depth, context)
+            .await?;
         Ok(dataset)
     }
 
@@ -1423,6 +1560,7 @@ impl ModelServingPreimageService {
         source: &VerifiedModelServingPreimage,
         calibrator: &VerifiedModelScoreCalibration,
         depth: PreimageVerificationDepth,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<()> {
         let contract = source.artifact().header().serving_contract();
         let training = require_dataset_materialization(source.training_dataset())?;
@@ -1442,7 +1580,8 @@ impl ModelServingPreimageService {
                 .label_horizon_secs(),
         )?;
         Self::verify_calibration_window(source, calibrator, &dataset, &materialization)?;
-        self.verify_dataset(&dataset, source.profile(), depth).await
+        self.verify_dataset(&dataset, source.profile(), depth, context)
+            .await
     }
 
     fn verify_calibration_model(
@@ -1726,12 +1865,69 @@ impl ModelServingPreimageService {
 
 #[cfg(test)]
 mod tests {
-    use super::label_horizon_matches;
+    use std::{cell::Cell, future};
+
+    use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+    use tokio_util::sync::CancellationToken;
+
+    use super::{ModelPreimageReadContext, label_horizon_matches};
 
     #[test]
     fn event_driven_label_matches() {
         assert!(label_horizon_matches(&[0], 0));
         assert!(label_horizon_matches(&[3_600, 86_400], 86_400));
         assert!(!label_horizon_matches(&[0], 86_400));
+    }
+
+    #[test]
+    fn scope_drop_cancels_children() {
+        let parent = CancellationToken::new();
+        let context = ModelPreimageReadContext::new(&parent, None);
+        let nested = context.cancel().child_token();
+        drop(context);
+        assert!(nested.is_cancelled());
+        assert!(!parent.is_cancelled());
+    }
+
+    #[test]
+    fn standalone_scope_cancels_children() {
+        let context = ModelPreimageReadContext::default();
+        let nested = context.cancel().child_token();
+        drop(context);
+        assert!(nested.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancelled_scope_skips_work() {
+        let parent = CancellationToken::new();
+        let context = ModelPreimageReadContext::new(&parent, None);
+        let polled = Cell::new(false);
+        parent.cancel();
+        let result = context
+            .run(async {
+                polled.set(true);
+                Ok(())
+            })
+            .await;
+        drop(context);
+        assert!(matches!(
+            result,
+            Err(QuantError::Research(ResearchError::Cancelled { .. }))
+        ));
+        assert!(!polled.get());
+    }
+
+    #[tokio::test]
+    async fn parent_cancels_waiting_scope() {
+        let parent = CancellationToken::new();
+        let context = ModelPreimageReadContext::new(&parent, None);
+        let (result, ()) = tokio::join!(context.run(future::pending::<QuantResult<()>>()), async {
+            parent.cancel();
+        },);
+        drop(context);
+        assert!(matches!(
+            result,
+            Err(QuantError::Research(ResearchError::Cancelled { .. }))
+        ));
     }
 }

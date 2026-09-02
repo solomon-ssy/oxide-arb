@@ -108,19 +108,17 @@ impl RuntimeControlPort for QuantRuntimeControl {
         let from = current.entry_authorization_policy;
         let preflight = if from == target {
             None
-        } else {
-            if from.is_upgrade_to(target) {
-                let report = self.preflight.run(target).await?;
-                if !report.passed {
-                    return Err(ExecutionError::AuthorizationPreflightDenied {
-                        reason: report.summary(),
-                    }
-                    .into());
+        } else if from.is_upgrade_to(target) {
+            let report = self.preflight.run(target).await?;
+            if !report.passed {
+                return Err(ExecutionError::AuthorizationPreflightDenied {
+                    reason: report.summary(),
                 }
-                Some(report)
-            } else {
-                None
+                .into());
             }
+            Some(report)
+        } else {
+            None
         };
 
         self.persist(RuntimeControlUpdate {

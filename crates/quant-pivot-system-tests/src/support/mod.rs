@@ -10,6 +10,7 @@ use quant_pivot_models::{
 
 pub mod artifact_store;
 pub mod catalog_fixtures;
+pub mod economic_outcome_fixtures;
 pub mod execution_history_fixtures;
 pub mod execution_pg_seed;
 pub mod fact_sink;
@@ -21,6 +22,7 @@ pub mod model_spec_fixtures;
 pub mod pit;
 pub mod policy_fixtures;
 pub mod portfolio_scenario_fixtures;
+pub mod production_history;
 pub mod report_fixtures;
 pub mod report_lifecycle_seed;
 pub mod report_pipeline_harness;

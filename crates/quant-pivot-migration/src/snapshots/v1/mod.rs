@@ -21,9 +21,11 @@ pub mod policy_approval;
 pub mod policy_profile_artifact;
 pub mod policy_revision;
 pub mod quant_account_chain_execution;
+pub mod quant_account_clean_funder_blocker;
 pub mod quant_account_execution_association;
-pub mod quant_account_pause_submission;
+pub mod quant_account_pause_operation;
 pub mod quant_account_recovery_incident;
+pub mod quant_account_recovery_manifest;
 pub mod quant_account_snapshot;
 pub mod quant_attribution_artifact;
 pub mod quant_backtest_path_set;
@@ -38,6 +40,7 @@ pub mod quant_domain_event_outbox;
 pub mod quant_domain_source_cursor;
 pub mod quant_domain_source_expectation;
 pub mod quant_drift_report;
+pub mod quant_economic_outcome_reconciliation_task;
 pub mod quant_entry_condition_artifact;
 pub mod quant_entry_condition_audit;
 pub mod quant_entry_condition_evaluation_outbox;
@@ -90,6 +93,7 @@ pub mod quant_model_version;
 pub mod quant_order_intent;
 pub mod quant_portfolio_plan;
 pub mod quant_recommendation;
+pub mod quant_recommendation_economic_outcome;
 pub mod quant_recommendation_execution_rollup;
 pub mod quant_recommendation_execution_rollup_attempt;
 pub mod quant_recommendation_report;
@@ -107,6 +111,7 @@ pub mod quant_resolution_observation_inbox;
 pub mod quant_resolution_observation_projection;
 pub mod quant_resolution_outcome_reconciliation_task;
 pub mod quant_resolution_projection_remediation;
+pub mod quant_route_economic_health;
 pub mod quant_settlement_authorization;
 pub mod quant_settlement_chain_submission;
 pub mod quant_settlement_external_cursor;
@@ -139,7 +144,7 @@ pub mod user_role;
 
 pub const MODULE_PREFIX: &str = "quant_pivot_migration::snapshots::v1::*";
 
-pub const TABLES: &[&str] = &[
+pub const SCHEMA_TABLES: &[&str] = &[
     "casbin_rule",
     "catalog_event_change",
     "catalog_event_object",
@@ -161,9 +166,11 @@ pub const TABLES: &[&str] = &[
     "policy_profile_artifact",
     "policy_revision",
     "quant_account_chain_execution",
+    "quant_account_clean_funder_blocker",
     "quant_account_execution_association",
-    "quant_account_pause_submission",
+    "quant_account_pause_operation",
     "quant_account_recovery_incident",
+    "quant_account_recovery_manifest",
     "quant_account_snapshot",
     "quant_attribution_artifact",
     "quant_backtest_path_set",
@@ -183,6 +190,7 @@ pub const TABLES: &[&str] = &[
     "quant_entry_condition_instance",
     "quant_equity_snapshot",
     "quant_execution_account",
+    "quant_economic_outcome_reconciliation_task",
     "quant_execution_attempt_reconciliation_task",
     "quant_clob_trade_observation",
     "quant_execution_order",
@@ -232,6 +240,7 @@ pub const TABLES: &[&str] = &[
     "quant_execution_attempt_outcome",
     "quant_execution_rollup_reconciliation_task",
     "quant_recommendation_execution_rollup",
+    "quant_recommendation_economic_outcome",
     "quant_recommendation_execution_rollup_attempt",
     "quant_recommendation_resolution_outcome",
     "quant_recommendation_report",
@@ -246,6 +255,7 @@ pub const TABLES: &[&str] = &[
     "quant_report_route_run",
     "quant_report_schedule_gap",
     "quant_report_schedule_state",
+    "quant_route_economic_health",
     "quant_research_job",
     "quant_research_readiness_evidence",
     "quant_settlement_authorization",
@@ -277,10 +287,11 @@ pub const TABLES: &[&str] = &[
     "user_role",
 ];
 
-pub const ENUMS: &[&str] = &[
+pub const SCHEMA_ENUMS: &[&str] = &[
     "qp_account_chain_execution_role",
     "qp_account_execution_association_kind",
-    "qp_account_pause_submission_state",
+    "qp_account_pause_operation_kind",
+    "qp_account_pause_operation_state",
     "qp_account_recovery_incident_kind",
     "qp_account_recovery_incident_status",
     "qp_account_source",
@@ -376,6 +387,7 @@ pub const ENUMS: &[&str] = &[
     "qp_execution_attempt_terminal_state",
     "qp_recommendation_resolution_kind",
     "qp_recommendation_report_status",
+    "qp_recommendation_economic_outcome_state",
     "qp_recommendation_status",
     "qp_reconciliation_result",
     "qp_report_fact_delivery_status",
@@ -396,6 +408,7 @@ pub const ENUMS: &[&str] = &[
     "qp_resource_type",
     "qp_role_kind",
     "qp_role_status",
+    "qp_route_economic_health_state",
     "qp_settlement_authorization_state",
     "qp_settlement_case_state",
     "qp_settlement_effective_policy",
@@ -457,9 +470,11 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("policy_profile_artifact.rs"),
     include_bytes!("policy_revision.rs"),
     include_bytes!("quant_account_chain_execution.rs"),
+    include_bytes!("quant_account_clean_funder_blocker.rs"),
     include_bytes!("quant_account_execution_association.rs"),
-    include_bytes!("quant_account_pause_submission.rs"),
+    include_bytes!("quant_account_pause_operation.rs"),
     include_bytes!("quant_account_recovery_incident.rs"),
+    include_bytes!("quant_account_recovery_manifest.rs"),
     include_bytes!("quant_account_snapshot.rs"),
     include_bytes!("quant_attribution_artifact.rs"),
     include_bytes!("quant_backtest_path_set.rs"),
@@ -479,6 +494,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_entry_condition_instance.rs"),
     include_bytes!("quant_equity_snapshot.rs"),
     include_bytes!("quant_execution_account.rs"),
+    include_bytes!("quant_economic_outcome_reconciliation_task.rs"),
     include_bytes!("quant_execution_attempt_reconciliation_task.rs"),
     include_bytes!("quant_clob_trade_observation.rs"),
     include_bytes!("quant_execution_order.rs"),
@@ -528,6 +544,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_execution_attempt_outcome.rs"),
     include_bytes!("quant_execution_rollup_reconciliation_task.rs"),
     include_bytes!("quant_recommendation_execution_rollup.rs"),
+    include_bytes!("quant_recommendation_economic_outcome.rs"),
     include_bytes!("quant_recommendation_execution_rollup_attempt.rs"),
     include_bytes!("quant_recommendation_report.rs"),
     include_bytes!("quant_recommendation_resolution_outcome.rs"),
@@ -542,6 +559,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_report_route_run.rs"),
     include_bytes!("quant_report_schedule_gap.rs"),
     include_bytes!("quant_report_schedule_state.rs"),
+    include_bytes!("quant_route_economic_health.rs"),
     include_bytes!("quant_research_job.rs"),
     include_bytes!("quant_research_readiness_evidence.rs"),
     include_bytes!("quant_settlement_authorization.rs"),

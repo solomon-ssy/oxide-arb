@@ -1,21 +1,21 @@
 //! Infrastructure bundle: persistence, analytics write plane, metrics.
 
-use std::{sync::Arc, time::Duration};
+use std::{mem::size_of, sync::Arc, time::Duration};
 
 use prometheus::IntCounter;
 use quant_pivot_error::{QuantResult, infra::InfraError, storage::entity::MARKET_RESOLUTION_EVENT};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, MarketResolutionRow,
+        BookStreamSessionRow, CryptoPriceReportRow, MarketResolutionRow,
         QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
         QuantFactorEventRow, QuantPositionEventRow, QuantServingEvidenceCompletionRow,
         QuantSignalCandidateEventRow,
     },
-    config::DeployConfig,
+    config::{CLICKHOUSE_DERIVED_FACT_FLUSH_MS, DeployConfig},
     types::ContentHash,
 };
 use quant_pivot_repository::{
-    clickhouse::{ChFactWriter, ChQuantFactReadRepository},
+    clickhouse::{ChCanonicalLedgerWriter, ChFactWriter, ChQuantFactReadRepository},
     traits::{FactWriter, QuantFactReadRepository},
 };
 use quant_pivot_storage::{
@@ -36,13 +36,16 @@ use crate::{
         task_registry::{AppRunner, PendingTaskQueue},
     },
     observability::{
-        book_fact_writer::BookFactWriter,
+        book_fact_writer::{BookFactWriter, microstructure_row_weight},
         capital_allocation_fact_writer::CapitalAllocationEventWriter,
         execution_fact_writer::ExecutionEventWriter,
         exit_signal_fact_writer::ExitSignalEvaluationEventWriter,
-        fact_lag::IngestPipelineLagTracker, factor_fact_writer::FactorEventWriter,
-        feature_fact_writer::FeatureEventWriter, ledger_persistence::LedgerPersistenceCoordinator,
-        metrics_hub::MetricsHub, model_input_fact_writer::ModelInputEventWriter,
+        fact_lag::IngestPipelineLagTracker,
+        factor_fact_writer::FactorEventWriter,
+        feature_fact_writer::FeatureEventWriter,
+        ledger_persistence::LedgerPersistenceCoordinator,
+        metrics_hub::MetricsHub,
+        model_input_fact_writer::ModelInputEventWriter,
         position_fact_writer::PositionEventWriter,
         signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
@@ -70,6 +73,8 @@ pub struct InfraBundle {
     pub factor_event_writer: Arc<FactorEventWriter>,
     /// Exact serving input evidence sink (`quant_model_input_event`).
     pub model_input_event_writer: Arc<ModelInputEventWriter>,
+    /// Count- and byte-bounded durable Crypto source-fact sink.
+    pub crypto_price_writer: Arc<DurableWriter<CryptoPriceReportRow>>,
     /// Pre-portfolio signal-candidate sink (`quant_signal_candidate_event`).
     pub signal_candidate_event_writer: Arc<SignalCandidateEventWriter>,
     /// Execution-order lifecycle sink (`quant_execution_event`).
@@ -98,7 +103,7 @@ impl InfraBundle {
             &persistence.ingest_lag_tracker,
             &metrics,
             deploy,
-        );
+        )?;
         let market_resolution_fact_writer: Arc<dyn FactWriter<MarketResolutionRow>> =
             Arc::new(ChFactWriter::new(
                 Arc::clone(&persistence.ch),
@@ -124,6 +129,7 @@ impl InfraBundle {
             feature_event_writer: analytics.feature_event_writer,
             factor_event_writer: analytics.factor_event_writer,
             model_input_event_writer: analytics.model_input_event_writer,
+            crypto_price_writer: analytics.crypto_price_writer,
             signal_candidate_event_writer: analytics.signal_candidate_event_writer,
             execution_event_writer: analytics.execution_event_writer,
             capital_allocation_event_writer: analytics.capital_allocation_event_writer,
@@ -171,15 +177,21 @@ async fn connect_persistence(
 
     let clickhouse_schema = verify_clickhouse_schema(&deploy.db.clickhouse).await?;
     tracing::info!(
-        schema_version = clickhouse_schema.current_version,
+        schema_fingerprint = %clickhouse_schema.schema_fingerprint,
         required_objects = clickhouse_schema.required_object_count,
         "ClickHouse runtime schema verified before pool initialization"
     );
 
     let ch = Arc::new(ClickHousePool::connect(&deploy.db.clickhouse).await?);
+    ch.read_metrics()
+        .register(&metrics.registry)
+        .map_err(|error| InfraError::MetricsRegistration {
+            subsystem: "clickhouse_read",
+            detail: error.to_string(),
+        })?;
     let pooled_clickhouse_schema = ch.verify_schema().await?;
     tracing::info!(
-        schema_version = pooled_clickhouse_schema.current_version,
+        schema_fingerprint = %pooled_clickhouse_schema.schema_fingerprint,
         required_objects = pooled_clickhouse_schema.required_object_count,
         "ClickHouse runtime schema verified"
     );
@@ -214,6 +226,7 @@ async fn connect_persistence(
     let ingest_lag_tracker = Arc::new(IngestPipelineLagTracker::new());
     let ch_write_manager = Arc::new(ChWriteManager::new(
         deploy.db.clickhouse.max_concurrent_inserts,
+        &deploy.db.clickhouse.io,
     ));
     ch_write_manager
         .metrics()
@@ -245,6 +258,7 @@ struct AnalyticsWriters {
     feature_event_writer: Arc<FeatureEventWriter>,
     factor_event_writer: Arc<FactorEventWriter>,
     model_input_event_writer: Arc<ModelInputEventWriter>,
+    crypto_price_writer: Arc<DurableWriter<CryptoPriceReportRow>>,
     signal_candidate_event_writer: Arc<SignalCandidateEventWriter>,
     execution_event_writer: Arc<ExecutionEventWriter>,
     capital_allocation_event_writer: Arc<CapitalAllocationEventWriter>,
@@ -259,13 +273,15 @@ fn build_analytics_writers(
     ingest_lag_tracker: &Arc<IngestPipelineLagTracker>,
     metrics: &Arc<MetricsHub>,
     deploy: &DeployConfig,
-) -> AnalyticsWriters {
+) -> QuantResult<AnalyticsWriters> {
     let (book_fact_writer, fact_writer_queue) =
-        build_book_fact_writer(ch, ch_write_manager, ingest_lag_tracker, metrics, deploy);
+        build_book_fact_writer(ch, ch_write_manager, ingest_lag_tracker, metrics, deploy)?;
     let feature_event_writer = build_feature_event_writer(ch, ch_write_manager);
     let factor_event_writer =
         build_factor_event_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
     let model_input_event_writer = build_model_input_writer(ch, ch_write_manager);
+    let crypto_price_writer =
+        build_crypto_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue)?;
     let signal_candidate_event_writer =
         build_signal_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
     let exit_signal_evaluation_event_writer =
@@ -276,18 +292,19 @@ fn build_analytics_writers(
         position: position_event_writer,
     } = build_ledger_event_writers(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
 
-    AnalyticsWriters {
+    Ok(AnalyticsWriters {
         book_fact_writer,
         feature_event_writer,
         factor_event_writer,
         model_input_event_writer,
+        crypto_price_writer,
         signal_candidate_event_writer,
         execution_event_writer,
         capital_allocation_event_writer,
         position_event_writer,
         exit_signal_evaluation_event_writer,
         fact_writer_queue,
-    }
+    })
 }
 
 /// Assemble the book fact-writer plane through the shared `ChWriteManager`.
@@ -301,7 +318,7 @@ fn build_book_fact_writer(
     ingest_lag: &Arc<IngestPipelineLagTracker>,
     metrics: &Arc<MetricsHub>,
     deploy: &DeployConfig,
-) -> (Arc<BookFactWriter>, PendingTaskQueue) {
+) -> QuantResult<(Arc<BookFactWriter>, PendingTaskQueue)> {
     let ch = &deploy.db.clickhouse;
 
     let queue = PendingTaskQueue::default();
@@ -336,30 +353,47 @@ fn build_book_fact_writer(
         lag_obs("quant_book_stream_session"),
         durable_config("quant_book_stream_session"),
     );
+    let mut ledger_observability = lag_obs("quant_book_l2_ledger");
+    let ledger_metrics = Arc::clone(metrics);
+    ledger_observability.stage_lag_ms = Some(Arc::new(move |stage, lag_ms| {
+        ledger_metrics.observe_ledger_stage(stage, lag_ms);
+    }));
     let (ledger, ledger_coordinator) = LedgerPersistenceCoordinator::new(
-        Arc::new(ChFactWriter::<BookL2LedgerRow>::new_async_insert(
+        Arc::new(ChCanonicalLedgerWriter::new(
             Arc::clone(ch_pool),
             Arc::clone(write_manager),
-            "quant_book_l2_ledger",
         )),
-        lag_obs("quant_book_l2_ledger"),
+        ledger_observability,
     );
     queue.push(TaskId::BookL2LedgerWriter, move |token| {
         ledger_coordinator.run(token)
     });
-    let microstructure = spawn_durable_fact_stream::<BookMicrostructureRow>(
-        &queue,
-        TaskId::BookMicrostructure1sWriter,
-        Arc::new(ChFactWriter::new(
-            Arc::clone(ch_pool),
-            Arc::clone(write_manager),
-            "book_microstructure_1s",
-        )),
+    let microstructure_sink = Arc::new(ChFactWriter::new(
+        Arc::clone(ch_pool),
+        Arc::clone(write_manager),
+        "book_microstructure_1s",
+    ));
+    let (microstructure, microstructure_worker) = DurableWriter::new_weighted(
+        durable_config("book_microstructure_1s")
+            .max_batch_size(ch.batch_size)
+            .max_batch_delay(Duration::from_millis(CLICKHOUSE_DERIVED_FACT_FLUSH_MS)),
+        ch.max_inflight_write_bytes,
+        microstructure_row_weight,
+        move |rows| {
+            let sink = Arc::clone(&microstructure_sink);
+            Box::pin(async move { sink.write_batch(rows).await })
+        },
         lag_obs("book_microstructure_1s"),
-        durable_config("book_microstructure_1s").max_batch_size(ch.batch_size),
-    );
-    let writer = Arc::new(BookFactWriter::new(ledger, sessions, microstructure));
-    (writer, queue)
+    )?;
+    queue.push(TaskId::BookMicrostructure1sWriter, move |token| {
+        microstructure_worker.run(token)
+    });
+    let writer = Arc::new(BookFactWriter::new(
+        ledger,
+        sessions,
+        Arc::new(microstructure),
+    ));
+    Ok((writer, queue))
 }
 
 /// Wire the acknowledged long-format feature-evidence sink.
@@ -424,6 +458,52 @@ fn build_model_input_writer(
             "quant_serving_evidence_completion",
         )),
     ))
+}
+
+/// Wire source-native Crypto facts through one global count- and byte-bounded
+/// acknowledged batch. Source workers retain receipts through cursor commit.
+fn build_crypto_writer(
+    ch_pool: &Arc<ClickHousePool>,
+    write_manager: &Arc<ChWriteManager>,
+    metrics: &Arc<MetricsHub>,
+    deploy: &DeployConfig,
+    queue: &PendingTaskQueue,
+) -> QuantResult<Arc<DurableWriter<CryptoPriceReportRow>>> {
+    let ch = &deploy.db.clickhouse;
+    let config = DurableWriterConfig::new("quant_crypto_price_report")
+        .capacity(ch.batch_size)
+        .max_batch_size(ch.batch_size)
+        .max_batch_delay(Duration::from_secs(ch.flush_interval_secs));
+    let sink = Arc::new(ChFactWriter::new(
+        Arc::clone(ch_pool),
+        Arc::clone(write_manager),
+        "quant_crypto_price_report",
+    ));
+    let (writer, worker) = DurableWriter::new_weighted(
+        config,
+        ch.max_inflight_write_bytes,
+        crypto_row_weight,
+        move |rows| {
+            let sink = Arc::clone(&sink);
+            Box::pin(async move { sink.write_batch(rows).await })
+        },
+        metrics.async_writer_observability("quant_crypto_price_report"),
+    )?;
+    queue.push(TaskId::CryptoPriceReportWriter, move |token| {
+        worker.run(token)
+    });
+    Ok(Arc::new(writer))
+}
+
+fn crypto_row_weight(row: &CryptoPriceReportRow) -> usize {
+    // The source worker retains the domain report through cursor commit while
+    // the queue owns this row and ClickHouse owns its transient encoded bytes.
+    // Charge all three resident representations conservatively.
+    size_of::<CryptoPriceReportRow>()
+        .saturating_add(row.source_id.as_str().len())
+        .saturating_add(row.instrument_key.as_str().len())
+        .saturating_add(row.raw_report.capacity())
+        .saturating_mul(3)
 }
 
 /// Wire the pre-portfolio signal-candidate async writer

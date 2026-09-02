@@ -2,22 +2,25 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{QpAccountPauseSubmissionState, QpSettlementSubmissionKind};
+use super::sea_orm_active_enums::{
+    QpAccountPauseOperationKind, QpAccountPauseOperationState, QpSettlementSubmissionKind,
+};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "quant_account_pause_submission")]
+#[sea_orm(table_name = "quant_account_pause_operation")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub account_pause_submission_id: Uuid,
+    pub account_pause_operation_id: Uuid,
     pub recovery_incident_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub exchange_address: String,
-    pub state: QpAccountPauseSubmissionState,
-    pub kind: QpSettlementSubmissionKind,
+    pub operation_kind: QpAccountPauseOperationKind,
+    pub state: QpAccountPauseOperationState,
+    pub submission_kind: QpSettlementSubmissionKind,
     pub requested_block: i64,
-    pub interval_blocks: i64,
-    pub effective_block: i64,
+    pub interval_blocks: Option<i64>,
+    pub effective_block: Option<i64>,
     pub prepared_block_number: i64,
     #[sea_orm(column_type = "Text")]
     pub prepared_block_hash: String,

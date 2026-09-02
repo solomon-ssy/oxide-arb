@@ -4,9 +4,10 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    event, market, quant_execution_rollup_reconciliation_task, quant_order_intent,
-    quant_portfolio_plan, quant_recommendation_execution_rollup, quant_recommendation_report,
-    quant_recommendation_resolution_outcome, quant_report_route_run,
+    event, market, quant_economic_outcome_reconciliation_task,
+    quant_execution_rollup_reconciliation_task, quant_order_intent, quant_portfolio_plan,
+    quant_recommendation_economic_outcome, quant_recommendation_execution_rollup,
+    quant_recommendation_report, quant_recommendation_resolution_outcome, quant_report_route_run,
     quant_resolution_outcome_reconciliation_task,
 };
 use crate::{
@@ -103,6 +104,11 @@ pub struct Model {
     #[sea_orm(has_one, relation_enum = "ExecutionRollupReconciliationTask")]
     pub execution_rollup_reconciliation_task:
         HasOne<quant_execution_rollup_reconciliation_task::Entity>,
+    #[sea_orm(has_one, relation_enum = "EconomicOutcome")]
+    pub economic_outcome: HasOne<quant_recommendation_economic_outcome::Entity>,
+    #[sea_orm(has_one, relation_enum = "EconomicOutcomeReconciliationTask")]
+    pub economic_outcome_reconciliation_task:
+        HasOne<quant_economic_outcome_reconciliation_task::Entity>,
     #[sea_orm(has_one, relation_enum = "ResolutionOutcomeReconciliationTask")]
     pub resolution_outcome_reconciliation_task:
         HasOne<quant_resolution_outcome_reconciliation_task::Entity>,

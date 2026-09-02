@@ -2,7 +2,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     sync::Arc,
     time::Duration as StdDuration,
 };
@@ -26,8 +26,8 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, DiagnosticCode, FeatureParityDetail, FeatureParityDetailSource,
-        FeatureParityEventId, MarketId, ModelRunId, ModelVersionId, RecommendationReportId,
-        ResearchJobProgress, TrainingDatasetId,
+        FeatureParityEventId, FeatureVectorId, MarketId, ModelRunId, ModelVersionId,
+        RecommendationReportId, ResearchJobProgress, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::traits::{
@@ -72,6 +72,17 @@ impl FeatureParitySubject {
     }
 }
 
+/// Model-input sampling eligibility established by durable serving evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeatureParityInputWitness {
+    /// This row carries selection dependencies, not a model-input witness.
+    SelectionOnly,
+    /// The serving completion is not durable yet; a later job attempt re-discovers it.
+    PendingServingEvidence,
+    /// A verified serving input binds this market to its exact feature vector.
+    VerifiedModelInput { feature_vector_id: FeatureVectorId },
+}
+
 /// Stable serving row that may be replayed from durable evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeatureParityCandidate {
@@ -84,6 +95,8 @@ pub struct FeatureParityCandidate {
     /// persisted selection is empty; no fake market is introduced.
     pub market_id: Option<MarketId>,
     pub decision_at: DateTime<Utc>,
+    /// Ephemeral qualification; replay revalidates it against the durable rows.
+    pub input_witness: FeatureParityInputWitness,
 }
 
 impl FeatureParityCandidate {
@@ -164,6 +177,7 @@ pub trait FeatureParityReplaySource: Send + Sync {
     async fn list_candidates(
         &self,
         run: &FeatureParityRunInfo,
+        cancel: &CancellationToken,
     ) -> QuantResult<Vec<FeatureParityCandidate>>;
 
     async fn replay(
@@ -403,7 +417,7 @@ impl FeatureParityExecutor {
         } else {
             self.parity.mark_running(&params.parity_run_id).await?
         };
-        let selected = self.discover_candidates(&run, progress).await?;
+        let selected = self.discover_candidates(&run, progress, cancel).await?;
         self.replay_or_defer(run, selected, pending_timeout, progress, cancel)
             .await
     }
@@ -413,10 +427,10 @@ impl FeatureParityExecutor {
         run: FeatureParityRunInfo,
     ) -> QuantResult<FeatureParityRunView> {
         match run.status {
-            FeatureParityRunStatus::Passed => view(run),
+            FeatureParityRunStatus::Passed => Ok(run.into()),
             FeatureParityRunStatus::Mismatched => {
                 let contained = self.ensure_containment(&run, &[]).await?;
-                view(contained)
+                Ok(contained.into())
             }
             FeatureParityRunStatus::Failed => {
                 let contained = self.ensure_containment(&run, &[]).await?;
@@ -451,10 +465,14 @@ impl FeatureParityExecutor {
         &self,
         run: &FeatureParityRunInfo,
         progress: &Arc<dyn JobProgressSink>,
+        cancel: &CancellationToken,
     ) -> QuantResult<Vec<FeatureParityCandidate>> {
         progress.report(ResearchJobProgress::indeterminate("discover_evidence", 0));
-        let candidates = match self.source.list_candidates(run).await {
+        let candidates = match self.source.list_candidates(run, cancel).await {
             Ok(candidates) => candidates,
+            Err(error @ QuantError::Research(ResearchError::Cancelled { .. })) => {
+                return Err(error);
+            }
             Err(error) => {
                 return self
                     .fail_integrity(run, "source_unavailable", &error.to_string())
@@ -642,7 +660,7 @@ impl FeatureParityExecutor {
             completed_rows,
             completed_rows,
         ));
-        view(completed)
+        Ok(completed.into())
     }
 
     async fn fail_integrity<T>(
@@ -791,7 +809,6 @@ fn validate_job_binding(
     if run.window_start != request_start
         || run.window_end != request_end
         || run.reason != params.request.reason
-        || run.feature_contract_hash.is_none()
     {
         return Err(ResearchError::Determinism {
             detail: format!("feature-parity job/run binding mismatch for {}", run.run_id),
@@ -844,6 +861,16 @@ fn deterministic_sample(
             }
             .into());
         }
+        if matches!(
+            candidate.subject,
+            FeatureParitySubject::RecommendationReport(_)
+        ) && candidate.input_witness != FeatureParityInputWitness::SelectionOnly
+        {
+            return Err(ResearchError::Determinism {
+                detail: "report-selection candidate cannot claim a model-input witness".to_owned(),
+            }
+            .into());
+        }
     }
     if kind == FeatureParityRunKind::Full {
         candidates.sort_by(|left, right| left.sampling_key.cmp(&right.sampling_key));
@@ -875,23 +902,55 @@ fn deterministic_sample(
         .into());
     }
 
-    // A global hash-only sample can omit every Route-local model subject and
-    // leave only report-selection comparisons. Reserve one deterministic row
-    // per frozen subject first, then fill the unchanged global sample budget.
-    // This preserves the documented 10%/20-row cardinality while guaranteeing
-    // that a Passed serving replay contains model-input/transform evidence for
-    // every represented Route.
+    // Keep global selection dependencies in the pool, but reserve an actual
+    // model-input witness for every materialized model. Pending groups retain
+    // one representative and are re-discovered by the next job attempt.
     let mut selected = Vec::with_capacity(sample_size);
     let mut remainder = Vec::with_capacity(candidate_count.saturating_sub(by_subject.len()));
     for (_, mut subject_candidates) in by_subject {
         subject_candidates.sort_by(FeatureParityCandidate::sampling_cmp);
-        let mut subject_candidates = subject_candidates.into_iter();
-        let representative =
-            subject_candidates
-                .next()
-                .ok_or_else(|| ResearchError::Determinism {
-                    detail: "feature-parity subject group is unexpectedly empty".to_owned(),
-                })?;
+        let subject = &subject_candidates
+            .first()
+            .ok_or_else(|| ResearchError::Determinism {
+                detail: "feature-parity subject group is unexpectedly empty".to_owned(),
+            })?
+            .subject;
+        let representative_index = match subject {
+            FeatureParitySubject::RecommendationReport(_) => 0,
+            FeatureParitySubject::ModelRun(model_run_id) => {
+                let pending = subject_candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.input_witness == FeatureParityInputWitness::PendingServingEvidence
+                    })
+                    .count();
+                if pending == subject_candidates.len() {
+                    0
+                } else if pending > 0 {
+                    return Err(ResearchError::Determinism {
+                        detail: format!(
+                            "model {model_run_id} mixes pending and completed sampling evidence"
+                        ),
+                    }
+                    .into());
+                } else {
+                    subject_candidates
+                        .iter()
+                        .position(|candidate| {
+                            matches!(
+                                candidate.input_witness,
+                                FeatureParityInputWitness::VerifiedModelInput { .. }
+                            )
+                        })
+                        .ok_or_else(|| ResearchError::Determinism {
+                            detail: format!(
+                                "completed model {model_run_id} has no verified model-input sampling witness"
+                            ),
+                        })?
+                }
+            }
+        };
+        let representative = subject_candidates.swap_remove(representative_index);
         selected.push(representative);
         remainder.extend(subject_candidates);
     }
@@ -920,6 +979,7 @@ struct OutcomeEvidence {
     seen: BTreeSet<String>,
     evidence_keys: BTreeSet<String>,
     transform_hashes: BTreeSet<String>,
+    verified_input_models: HashSet<ModelRunId>,
     mismatched_report_ids: Vec<RecommendationReportId>,
     mismatched_report_keys: BTreeSet<String>,
     matched: i64,
@@ -933,6 +993,7 @@ impl OutcomeEvidence {
             seen: BTreeSet::new(),
             evidence_keys: BTreeSet::new(),
             transform_hashes: BTreeSet::new(),
+            verified_input_models: HashSet::new(),
             mismatched_report_ids: Vec::new(),
             mismatched_report_keys: BTreeSet::new(),
             matched: 0,
@@ -944,11 +1005,12 @@ impl OutcomeEvidence {
         &mut self,
         run: &FeatureParityRunInfo,
         feature_contract_hash: &ContentHash,
-        expected: &BTreeMap<String, DateTime<Utc>>,
+        expected: &BTreeMap<String, &FeatureParityCandidate>,
         comparison: FeatureParityComparison,
         ingestion_time: i64,
     ) -> QuantResult<()> {
-        validate_replayed_key(expected, &comparison.sampling_key, comparison.decision_at)?;
+        let candidate =
+            validate_replayed_key(expected, &comparison.sampling_key, comparison.decision_at)?;
         let evidence_key = format!(
             "{}/{}/{}/{}",
             comparison.sampling_key,
@@ -974,6 +1036,42 @@ impl OutcomeEvidence {
         comparison.online.validate_evidence()?;
         comparison.replay.validate_evidence()?;
         let matched = comparison.online == comparison.replay;
+        if comparison.stage == FeatureParityStage::ModelInput {
+            let FeatureParitySubject::ModelRun(model_run_id) = candidate.subject else {
+                return Err(ResearchError::Determinism {
+                    detail: "report-selection candidate cannot own model-input evidence".to_owned(),
+                }
+                .into());
+            };
+            let bound_vector = match comparison.detail {
+                FeatureParityDetailSource::ModelInput {
+                    feature_vector_id, ..
+                } => Some(feature_vector_id),
+                _ => None,
+            };
+            let verified_vector = match candidate.input_witness {
+                FeatureParityInputWitness::VerifiedModelInput { feature_vector_id } => {
+                    Some(feature_vector_id)
+                }
+                _ => None,
+            };
+            if comparison.model_run_id != Some(model_run_id)
+                || comparison.market_id != candidate.market_id
+                || bound_vector.is_none()
+                || bound_vector != verified_vector
+            {
+                return Err(ResearchError::Determinism {
+                    detail: format!(
+                        "model-input evidence does not bind candidate `{}` to model {model_run_id}",
+                        comparison.sampling_key
+                    ),
+                }
+                .into());
+            }
+            if matched && comparison.transform_hash.is_some() {
+                self.verified_input_models.insert(model_run_id);
+            }
+        }
         if matched {
             self.matched += 1;
         } else {
@@ -983,7 +1081,7 @@ impl OutcomeEvidence {
                 && comparison.online.effective_at == comparison.replay.effective_at
                 && comparison.online.available_at == comparison.replay.available_at
                 && comparison.online.cutoff == comparison.replay.cutoff;
-            tracing::error!(
+            tracing::warn!(
                 parity_run_id = %run.run_id,
                 sampling_key = %comparison.sampling_key,
                 stage = comparison.stage.as_str(),
@@ -1036,7 +1134,7 @@ impl OutcomeEvidence {
         &mut self,
         run: &FeatureParityRunInfo,
         feature_contract_hash: &ContentHash,
-        expected: &BTreeMap<String, DateTime<Utc>>,
+        expected: &BTreeMap<String, &FeatureParityCandidate>,
         pending: PendingFeatureParityComparison,
         ingestion_time: i64,
     ) -> QuantResult<()> {
@@ -1056,9 +1154,8 @@ impl OutcomeEvidence {
 
     fn finish(
         mut self,
-        expected: &BTreeMap<String, DateTime<Utc>>,
+        expected: &BTreeMap<String, &FeatureParityCandidate>,
         feature_contract_hash: ContentHash,
-        transform_required: bool,
     ) -> QuantResult<BuiltOutcome> {
         if let Some(missing) = expected.keys().find(|key| !self.seen.contains(*key)) {
             return Err(ResearchError::Determinism {
@@ -1099,14 +1196,19 @@ impl OutcomeEvidence {
         } else {
             Some(ResearchHasher::canonical(&self.transform_hashes)?)
         };
-        if status == FeatureParityRunStatus::Passed
-            && transform_required
-            && transform_hash.is_none()
-        {
-            return Err(ResearchError::Determinism {
-                detail: "passed serving parity has no model-input transform evidence".to_owned(),
+        if status == FeatureParityRunStatus::Passed {
+            for candidate in expected.values() {
+                if let FeatureParitySubject::ModelRun(model_run_id) = candidate.subject
+                    && !self.verified_input_models.contains(&model_run_id)
+                {
+                    return Err(ResearchError::Determinism {
+                        detail: format!(
+                            "passed serving parity has no model-input transform evidence for model {model_run_id}"
+                        ),
+                    }
+                    .into());
+                }
             }
-            .into());
         }
         self.mismatched_report_ids.sort_by_key(ToString::to_string);
         Ok(BuiltOutcome {
@@ -1119,7 +1221,7 @@ impl OutcomeEvidence {
                 matched_count: self.matched,
                 mismatched_count: self.mismatched,
                 pending_materialization_count: pending,
-                feature_contract_hash: Some(feature_contract_hash),
+                feature_contract_hash,
                 transform_hash,
                 failure_code: None,
                 failure_detail: None,
@@ -1133,18 +1235,11 @@ fn build_outcome(
     candidates: &[FeatureParityCandidate],
     attempt: FeatureParityReplayAttempt,
 ) -> QuantResult<BuiltOutcome> {
-    let feature_contract_hash = run.feature_contract_hash.ok_or_else(|| {
-        QuantError::from(ResearchError::Determinism {
-            detail: "parity run has no feature contract hash".to_owned(),
-        })
-    })?;
+    let feature_contract_hash = run.feature_contract_hash;
     let expected: BTreeMap<_, _> = candidates
         .iter()
-        .map(|candidate| (candidate.sampling_key.clone(), candidate.decision_at))
+        .map(|candidate| (candidate.sampling_key.clone(), candidate))
         .collect();
-    let transform_required = candidates
-        .iter()
-        .any(|candidate| matches!(&candidate.subject, FeatureParitySubject::ModelRun(_)));
     let ingestion_time = Utc::now().timestamp_millis();
     let mut evidence =
         OutcomeEvidence::with_capacity(attempt.comparisons.len() + attempt.pending.len());
@@ -1166,20 +1261,21 @@ fn build_outcome(
             ingestion_time,
         )?;
     }
-    evidence.finish(&expected, feature_contract_hash, transform_required)
+    evidence.finish(&expected, feature_contract_hash)
 }
 
-fn validate_replayed_key(
-    expected: &BTreeMap<String, DateTime<Utc>>,
+fn validate_replayed_key<'a>(
+    expected: &BTreeMap<String, &'a FeatureParityCandidate>,
     sampling_key: &str,
     decision_at: DateTime<Utc>,
-) -> QuantResult<()> {
-    let expected_decision_at = expected.get(sampling_key).ok_or_else(|| {
+) -> QuantResult<&'a FeatureParityCandidate> {
+    let candidate = *expected.get(sampling_key).ok_or_else(|| {
         QuantError::from(ResearchError::Determinism {
             detail: format!("replay source returned unselected candidate `{sampling_key}`"),
         })
     })?;
-    if *expected_decision_at != decision_at {
+    let expected_decision_at = candidate.decision_at;
+    if expected_decision_at != decision_at {
         return Err(ResearchError::Determinism {
             detail: format!(
                 "replay source changed decision_at for candidate `{sampling_key}`: expected {expected_decision_at}, got {decision_at}"
@@ -1187,7 +1283,7 @@ fn validate_replayed_key(
         }
         .into());
     }
-    Ok(())
+    Ok(candidate)
 }
 
 impl FeatureParityEvidence {
@@ -1410,17 +1506,10 @@ fn canonical_detail<T: Serialize + ?Sized>(value: &T) -> QuantResult<String> {
     })
 }
 
-fn view(info: FeatureParityRunInfo) -> QuantResult<FeatureParityRunView> {
-    FeatureParityRunView::try_from_info(info).map_err(|detail| {
-        ResearchError::Determinism {
-            detail: detail.to_owned(),
-        }
-        .into()
-    })
-}
-
 #[cfg(test)]
 mod tests {
+    mod route_sampling;
+
     use std::{
         collections::VecDeque,
         slice,
@@ -1439,7 +1528,7 @@ mod tests {
         enums::quant::FeatureParityStateTransition,
         types::{
             FeatureParityRunId, FeatureVectorId, RoleCode, SelectorHashEvidence,
-            SelectorParityEvidence,
+            SelectorParityEvidence, stable_name::FeatureName,
         },
     };
     use quant_pivot_repository::traits::{
@@ -1703,7 +1792,14 @@ mod tests {
         async fn list_candidates(
             &self,
             _run: &FeatureParityRunInfo,
+            cancel: &CancellationToken,
         ) -> QuantResult<Vec<FeatureParityCandidate>> {
+            if cancel.is_cancelled() {
+                return Err(ResearchError::Cancelled {
+                    detail: "test discovery cancelled".to_owned(),
+                }
+                .into());
+            }
             Ok(self.candidates.clone())
         }
 
@@ -1804,6 +1900,9 @@ mod tests {
             subject: FeatureParitySubject::ModelRun(ModelRunId::new(Uuid::from_u128(1))),
             market_id: Some(MarketId::new(format!("market-{index:03}"))),
             decision_at: Utc::now(),
+            input_witness: FeatureParityInputWitness::VerifiedModelInput {
+                feature_vector_id: FeatureVectorId::from_v7(),
+            },
         }
     }
 
@@ -1826,9 +1925,8 @@ mod tests {
             matched_count: 0,
             mismatched_count: 0,
             pending_materialization_count: 0,
-            feature_contract_hash: Some(
-                ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
-            ),
+            feature_contract_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64)))
+                .expect("hash"),
             transform_hash: None,
             failure_code: None,
             failure_detail: None,
@@ -1974,6 +2072,13 @@ mod tests {
                 },
                 market_id: Some(MarketId::new(format!("market-{index:03}"))),
                 decision_at: Utc::now(),
+                input_witness: if index < SAMPLE_MINIMUM {
+                    FeatureParityInputWitness::SelectionOnly
+                } else {
+                    FeatureParityInputWitness::VerifiedModelInput {
+                        feature_vector_id: FeatureVectorId::from_v7(),
+                    }
+                },
             })
             .collect();
 
@@ -1993,10 +2098,7 @@ mod tests {
     fn parity_event_identity_sensitive() {
         let now = Utc::now();
         let run = run(now);
-        let contract_hash = run
-            .feature_contract_hash
-            .as_ref()
-            .expect("feature contract hash");
+        let contract_hash = &run.feature_contract_hash;
         let compared =
             FeatureParityComparison::fixture(now, evidence("same", now), evidence("same", now));
         let first = comparison_row(
@@ -2048,6 +2150,7 @@ mod tests {
             subject: FeatureParitySubject::RecommendationReport(RecommendationReportId::from_v7()),
             market_id: None,
             decision_at: now,
+            input_witness: FeatureParityInputWitness::SelectionOnly,
         };
         validate_candidates(&run, slice::from_ref(&report_candidate))
             .expect("report-level empty selection is real evidence");
@@ -2057,6 +2160,7 @@ mod tests {
             subject: FeatureParitySubject::ModelRun(ModelRunId::from_v7()),
             market_id: None,
             decision_at: now,
+            input_witness: FeatureParityInputWitness::PendingServingEvidence,
         };
         assert!(validate_candidates(&run, &[model_candidate]).is_err());
     }
@@ -2065,15 +2169,25 @@ mod tests {
     fn exact_evidence_passes_mismatches() {
         let now = Utc::now();
         let run = run(now);
+        let model_run_id = ModelRunId::from_v7();
+        let feature_vector_id = FeatureVectorId::from_v7();
         let candidates = vec![FeatureParityCandidate {
             sampling_key: "report-a/market-001".to_owned(),
-            subject: FeatureParitySubject::ModelRun(ModelRunId::from_v7()),
+            subject: FeatureParitySubject::ModelRun(model_run_id),
             market_id: Some(MarketId::new("market-001")),
             decision_at: now,
+            input_witness: FeatureParityInputWitness::VerifiedModelInput { feature_vector_id },
         }];
         let online = evidence("fingerprint-a", now - Duration::seconds(2));
         let mut exact = FeatureParityComparison::fixture(now, online.clone(), online.clone());
-        exact.transform_hash = run.feature_contract_hash;
+        exact.stage = FeatureParityStage::ModelInput;
+        exact.model_run_id = Some(model_run_id);
+        exact.market_id = candidates[0].market_id.clone();
+        exact.detail = FeatureParityDetailSource::ModelInput {
+            raw_input_name: FeatureName::new("book.spread_bps"),
+            feature_vector_id,
+        };
+        exact.transform_hash = Some(run.feature_contract_hash);
         let passed = build_outcome(
             &run,
             &candidates,
@@ -2113,6 +2227,7 @@ mod tests {
             subject: FeatureParitySubject::ModelRun(ModelRunId::from_v7()),
             market_id: Some(MarketId::new("market-001")),
             decision_at: now,
+            input_witness: FeatureParityInputWitness::SelectionOnly,
         }];
         let exact = evidence("fingerprint-a", now);
 
@@ -2141,9 +2256,10 @@ mod tests {
             subject: FeatureParitySubject::RecommendationReport(report_id),
             market_id: Some(MarketId::new("market-001")),
             decision_at: now,
+            input_witness: FeatureParityInputWitness::SelectionOnly,
         }];
         let exact = evidence("selection-fingerprint", now);
-        let selector_hash = run.feature_contract_hash.expect("feature contract hash");
+        let selector_hash = run.feature_contract_hash;
         let selector_evidence = SelectorHashEvidence {
             selector_hash,
             contract_hash: ContentHash::from_bytes([1; 32]),
@@ -2210,6 +2326,7 @@ mod tests {
             subject: FeatureParitySubject::ModelRun(ModelRunId::from_v7()),
             market_id: Some(MarketId::new("market-001")),
             decision_at: now,
+            input_witness: FeatureParityInputWitness::PendingServingEvidence,
         }];
         let outcome = build_outcome(
             &run,
@@ -2252,6 +2369,7 @@ mod tests {
             subject: FeatureParitySubject::ModelRun(ModelRunId::from_v7()),
             market_id: Some(MarketId::new("market-001")),
             decision_at: database_now,
+            input_witness: FeatureParityInputWitness::PendingServingEvidence,
         };
         let pending = PendingFeatureParityComparison {
             sampling_key: candidate.sampling_key.clone(),
@@ -2318,6 +2436,9 @@ mod tests {
             subject: FeatureParitySubject::ModelRun(ModelRunId::from_v7()),
             market_id: Some(MarketId::new("market-001")),
             decision_at: now,
+            input_witness: FeatureParityInputWitness::VerifiedModelInput {
+                feature_vector_id: FeatureVectorId::from_v7(),
+            },
         };
         let online = evidence("online", now);
         let mut mismatch = FeatureParityComparison::fixture(now, online, evidence("replay", now));
@@ -2384,6 +2505,7 @@ mod tests {
             subject: FeatureParitySubject::ModelRun(ModelRunId::from_v7()),
             market_id: Some(MarketId::new("market-001")),
             decision_at: now,
+            input_witness: FeatureParityInputWitness::PendingServingEvidence,
         };
         let candidate_run_id = match &candidate.subject {
             FeatureParitySubject::ModelRun(run_id) => *run_id,

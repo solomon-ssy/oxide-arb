@@ -13,6 +13,9 @@ mod reader;
 mod service;
 
 pub use collector::{CollectedReconciliation, EvidenceCollector, VenueEvidenceCollector};
-pub use decide::{ReconcileFacts, ReconciliationDecision, VenuePresence};
+pub use decide::{
+    ReconcileFacts, ReconciliationDecision, ShareSettlementBasis, ShareSettlementProjection,
+    VenuePresence,
+};
 pub use reader::{ClobReconciliationReader, VenueReconciliationReader};
 pub use service::{OperatorReconcileResolution, ReconciliationService, ReconciliationServiceDeps};

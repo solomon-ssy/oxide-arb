@@ -201,14 +201,20 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
+        name: "trg_quant_account_clean_funder_blocker_append_only",
+        table: "quant_account_clean_funder_blocker",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
         name: "trg_quant_account_execution_association_append_only",
         table: "quant_account_execution_association",
         events: TriggerEvents::DeleteOrUpdate,
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
-        name: "trg_quant_account_pause_submission_updated_at",
-        table: "quant_account_pause_submission",
+        name: "trg_quant_account_pause_operation_updated_at",
+        table: "quant_account_pause_operation",
         events: TriggerEvents::Update,
         program: TriggerProgram::SetUpdatedAt,
     },
@@ -217,6 +223,24 @@ const TRIGGERS: &[TriggerSpec] = &[
         table: "quant_account_recovery_incident",
         events: TriggerEvents::Update,
         program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_account_recovery_manifest_append_only",
+        table: "quant_account_recovery_manifest",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_recommendation_economic_outcome_append_only",
+        table: "quant_recommendation_economic_outcome",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_route_economic_health_append_only",
+        table: "quant_route_economic_health",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
         name: "trg_quant_clob_trade_observation_append_only",
@@ -421,6 +445,12 @@ const TRIGGERS: &[TriggerSpec] = &[
         table: "quant_execution_attempt_reconciliation_task",
         events: TriggerEvents::Update,
         program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_economic_outcome_task_guard",
+        table: "quant_economic_outcome_reconciliation_task",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::GuardEconomicOutcomeTask,
     },
     TriggerSpec {
         name: "trg_quant_execution_rollup_task_updated_at",

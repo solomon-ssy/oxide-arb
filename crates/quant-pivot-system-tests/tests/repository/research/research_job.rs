@@ -558,7 +558,7 @@ pub async fn requeue_inflight_requeues_recovery() {
 pub async fn transient_retry_is_bounded() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let repo = PgResearchJobRepository::new(db);
+    let repo = PgResearchJobRepository::new(db.clone());
     let job_id = ResearchJobId::from_v7();
     let mut job = new_job(job_id);
     job.max_recovery_attempts = 1;
@@ -577,7 +577,7 @@ pub async fn transient_retry_is_bounded() {
             &job_id,
             &worker,
             "temporary S3 transport failure".to_owned(),
-            Duration::from_millis(5),
+            Duration::from_mins(5),
         )
         .await
         .expect("schedule typed retry");
@@ -599,7 +599,17 @@ pub async fn transient_retry_is_bounded() {
         "retry-scheduled work must not hot-loop before its DB-clock deadline"
     );
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    let released = db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE quant_research_job
+         SET next_attempt_at = statement_timestamp()
+         WHERE job_id = $1 AND status = 'retry_scheduled'::qp_research_job_status",
+            [job_id.as_uuid().into()],
+        ))
+        .await
+        .expect("release retry using database time");
+    assert_eq!(released.rows_affected(), 1, "release the scheduled retry");
     let releasable = repo
         .lease_next(&[ResearchJobKind::DatasetBuild], &worker, lease_expires)
         .await

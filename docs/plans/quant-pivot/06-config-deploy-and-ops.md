@@ -13,11 +13,13 @@
 > - `rollback_and_data_verification`: 本次实施只验证空数据库 fresh boot；不创建 upgrade/downgrade migration，
 >   也不自动重置任何真实数据库。
 
-> 状态：Runtime/Deploy Config 唯一权威目标设计。
->
-> 详细实施与字段审计：
-> [`quant-pivot-global-portfolio-runtime-deploy-config-ui-ux-closure-plan.md`](../../codex-plans/quant-pivot-global-portfolio-runtime-deploy-config-ui-ux-closure-plan.md)、
-> [`quant-pivot-current-config-field-inventory.md`](../../audit/quant-pivot-current-config-field-inventory.md)。
+> 状态：Runtime/Deploy Config 当前唯一权威目标设计。执行授权、账户恢复与经济反馈的
+> current contract 只认
+> [`phase-12/12.0-execution-authority-account-recovery-fast-feedback.md`](phase-12/12.0-execution-authority-account-recovery-fast-feedback.md)，
+> current implementation state 只认
+> [`phase-12/12.1-implementation-ledger.md`](phase-12/12.1-implementation-ledger.md)。早期 global-plan 与
+> [`quant-pivot-current-config-field-inventory.md`](../../audit/quant-pivot-current-config-field-inventory.md)
+> 只作 superseded 字段盘点，不再定义实施顺序、runtime-mode 或版本演进。
 
 ## 0. 所有权与单一来源
 
@@ -44,10 +46,9 @@ UI/TOML rendering、consumer inventory 和 audit 的单一来源。禁止人工�
 | `model_routing` | `ModelRouting` | represented-route readiness、serving generation | 新 report/evaluation run |
 | `report_schedule` | `ReportSchedule` | durable scheduler | 尚未 claim 的 future run |
 | `operations_policy` | `OperationsPolicy` | runtime admission、notification、worker supervisors | 下一次受控 admission |
-| `execution_automation_policy` | `ExecutionAutomationPolicy` | runtime-mode gate、auto execution preflight | preflight 后的下一次 admission |
+| `execution_authorization_policy` | `ExecutionAuthorizationPolicy` | operator approval TTL、policy-automatic limits、entry preflight | preflight 后的下一次 admission |
 
-删除 `operational_control`、`execution_authorization` 和全部别名/parser/DTO/UI mapping。HTTP namespace 可保留
-现有版本，但 wire contract 只接受 target shape。
+删除 `operational_control`、旧 automation resource 和全部别名/parser/DTO/UI mapping。wire contract 只接受 target shape。
 
 每个 resource document 使用唯一 `schema_version = 1`，revision immutable。该字段是 content-integrity
 invariant，不是向前/向后兼容开关；任何其他值直接拒绝且不存在 converter。validate、preflight、approval、CAS
@@ -86,12 +87,11 @@ residual/dependence、calibration uncertainty、stress catalog、bootstrap/ambig
 必须在同一治理事务中原子切换；rollback 也必须同时恢复两者。每次 report 的 concrete
 `PortfolioScenarioArtifact` 由冻结市场/L2/candidate 输入现场生成并归属 report，不进入 Runtime Config。
 
-### 1.4 Operations / automation
+### 1.4 Operations / authorization
 
 `OperationsPolicy` 持有 report pause、execution halt、notification routing、worker admission、entry-condition
-与 reconciliation operational controls。`ExecutionAutomationPolicy` 持有 SemiAuto approval TTL 和
-AutoExecution 的经济/订单硬上限，不使用 raw score/confidence threshold；自动执行只能消费已发布报告的
-`RecommendationEconomics` 与 frozen risk lineage。
+与 reconciliation operational controls。`ExecutionAuthorizationPolicy` 持有 operator approval TTL 和
+`PolicyAutomatic` 的订单数/累计 USD 硬上限，不使用 raw score/confidence threshold；自动授权只能消费已发布报告的 `RecommendationEconomics`、frozen risk lineage 与 fresh Healthy Route economic evidence。
 
 ## 2. Runtime field descriptor 与 validation contract
 
@@ -203,20 +203,20 @@ value representation：
 ## 8. Config UI/UX
 
 六个 domain-specific typed editor 分别拥有 Recommendation、Execution Risk、Model Routing、Report
-Schedule、Operations、Execution Automation。共享 Money/Probability/Duration/Artifact controls 可以复用，
+Schedule、Operations、Execution Authorization。共享 Money/Probability/Duration/Artifact controls 可以复用，
 递归 generic editor 不拥有 production edit path。
 
 工作区必须提供 Current/Draft 分栏、unit/risk/apply effect、inline + Error Summary、pointer focus、semantic
 diff、preflight、approve、activate、rollback、stale CAS。live runtime controls 与 revisioned policy 视觉隔离。
 Deployment 页面消费 safe projection；不展示 raw JSON/config。
 
-## 9. SeaORM、fresh boot 与 rollback
+## 9. SeaORM、fresh boot 与实施回退
 
 - resource kind 使用 target `ActiveEnum`；document 使用封闭 typed JSONB，不用 `serde_json::Value` 逃避建模。
 - revision、approval、activation、snapshot、audit/outbox 事务与 global bundle generation 保持原子。
-- schema migration、fresh boot snapshot、entities、repository 和 API contract 同步更新。
+- 唯一 fresh bootstrap、entities、repository 和 API contract 同步更新。
 - 应用启动只验证 schema，不自动 DDL；实际 reset/destructive operation 仍需单独授权。
-- clean-break rollback 只恢复数据库备份与对应 build，不提供 application compatibility bridge。
+- 实施回退只丢弃 disposable 基础设施，并用选定的当前 build 重建新的空基础设施；不从旧库恢复、不降级、不提供 compatibility bridge。
 
 ## 10. 验收
 

@@ -1,9 +1,21 @@
-//! Report-pipeline system contracts against disposable `PostgreSQL`.
+//! Report-pipeline system contracts against disposable `PostgreSQL` and `ClickHouse`.
 
-use chrono::{Duration, Utc};
-use quant_pivot_error::{QuantError, account::AccountError, report::ReportError};
+use std::{sync::Arc, time::Duration as StdDuration};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Duration, Utc};
+use quant_pivot_core::app::ports::quant_report::{CoreQuantReportPort, CoreQuantReportPortDeps};
+use quant_pivot_error::{
+    QuantError, account::AccountError, report::ReportError, research::ResearchError,
+    storage::StorageError,
+};
 use quant_pivot_models::{
-    domain::{api::OperationLogQuery, quant::NewEquitySnapshot},
+    domain::{
+        api::{DecisionBoundaryEvidenceView, OperationLogQuery},
+        data_plane::{DecisionClock, DecisionSource},
+        ports::QuantReportPort,
+        quant::{FeatureVectorInfo, NewEquitySnapshot, NewFeatureVector},
+    },
     entities::{
         quant_market_selection::Entity as MarketSelectionEntity,
         quant_model_run::Entity as ModelRunEntity,
@@ -12,25 +24,320 @@ use quant_pivot_models::{
         AccountSource, EmptyReportReason, RecommendationReportStatus, RecommendationStatus,
     },
     runtime_config::BuyModelRoute,
-    types::{EquitySnapshotId, ReportTriggerKey, Usd},
+    types::{
+        EquitySnapshotId, FeatureVectorId, FinalizedExecutionEvidence, RecommendationReportId,
+        ReportRunId, ReportTriggerKey, Usd,
+    },
 };
 use quant_pivot_repository::{
+    clickhouse::{ChFeatureParityEventRepository, ChQuantFactReadRepository},
     postgres::{
-        PgEquitySnapshotRepository, PgFactorRepository, PgMarketSelectionRepository,
-        PgOperationLogRepository, PgPortfolioPlanRepository,
+        PgEquitySnapshotRepository, PgFactorRepository, PgFeatureRepository,
+        PgMarketSelectionRepository, PgOperationLogRepository, PgOrderIntentRepository,
+        PgPolicyRepository, PgPortfolioPlanRepository,
     },
     traits::{
-        EquitySnapshotRepository, FactorRepository, MarketSelectionRepository,
-        OperationLogRepository, PortfolioPlanRepository, RecommendationReportRepository,
-        RecommendationRepository, ReportRunRepository,
+        EquitySnapshotRepository, FactorRepository, FeatureRepository, MarketSelectionRepository,
+        OperationLogRepository, PolicyRepository, PortfolioPlanRepository,
+        RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
     },
 };
+use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 use quant_pivot_system_tests::{
     postgres::setup_pg,
-    support::report_pipeline_harness::{HarnessOptions, MARKET_ID_2, ReportPipelineHarness},
+    stack::SystemStack,
+    support::report_pipeline_harness::{
+        HarnessOptions, MARKET_ID_2, ReportEvidenceWriters, ReportPipelineHarness,
+    },
 };
 use rust_decimal_macros::dec;
 use sea_orm::{EntityTrait, PaginatorTrait};
+use uuid::Uuid;
+
+pub async fn diagnostics_full_boundary() {
+    let stack = Box::pin(SystemStack::start())
+        .await
+        .expect("start report diagnostics PG/CH stack");
+    let verification = tokio::time::timeout(
+        StdDuration::from_mins(5),
+        Box::pin(ReportDiagnosticsFixture::verify(&stack)),
+    )
+    .await;
+    Box::pin(stack.shutdown())
+        .await
+        .expect("remove report diagnostics PG/CH stack");
+    verification.expect("report diagnostics must finish within its bounded budget");
+}
+
+struct ReportDiagnosticsFixture {
+    harness: ReportPipelineHarness,
+    clickhouse: Arc<ClickHousePool>,
+}
+
+impl ReportDiagnosticsFixture {
+    async fn verify(stack: &SystemStack) {
+        let db = stack.postgres.connection();
+        let clickhouse = Arc::new(
+            ClickHousePool::connect(&stack.clickhouse_config)
+                .await
+                .expect("connect report diagnostics evidence reader"),
+        );
+        let manager = Arc::new(ChWriteManager::new(
+            stack.clickhouse_config.max_concurrent_inserts,
+            &stack.clickhouse_config.io,
+        ));
+        // PostgreSQL keeps microseconds, while CH scalar clocks project to
+        // milliseconds. The JSON source watermark must retain this precision.
+        let watermark = DateTime::from_timestamp_micros(
+            (Utc::now() - Duration::minutes(1)).timestamp_millis() * 1_000 + 123,
+        )
+        .expect("microsecond finalized-history watermark");
+        let harness = Box::pin(ReportPipelineHarness::bootstrap(
+            db,
+            HarnessOptions {
+                evidence: ReportEvidenceWriters::clickhouse(Arc::clone(&clickhouse), manager),
+                finalized_history_watermark: Some(watermark),
+                ..HarnessOptions::default()
+            },
+        ))
+        .await;
+        let report = harness
+            .execute_ad_hoc(harness.ad_hoc_request("diagnostics-full-boundary"))
+            .await
+            .expect("production report lifecycle with acknowledged serving evidence");
+        assert_eq!(report.status, RecommendationReportStatus::Published);
+        let policy = PgPolicyRepository::new(db.clone())
+            .load_snapshot(&report.decision_policy_snapshot_id)
+            .await
+            .expect("load frozen report policy")
+            .expect("report policy exists")
+            .snapshot;
+        let expected_boundary = DecisionClock::new(0)
+            .serving_boundary(
+                report.decision_at,
+                policy
+                    .profile_artifacts
+                    .domain
+                    .definition
+                    .crypto
+                    .availability_lag_secs,
+                policy
+                    .profile_artifacts
+                    .domain
+                    .definition
+                    .weather
+                    .availability_lag_secs,
+            )
+            .expect("canonical report clock")
+            .with_source_watermark(DecisionSource::FinalizedExecution, watermark)
+            .expect("bind the observed finalized-history watermark");
+        assert!(watermark < expected_boundary.knowledge_cutoff());
+        let snapshot = harness
+            .report_repo
+            .find_data_quality_snapshot(&report.recommendation_report_id)
+            .await
+            .expect("read production data-quality snapshot")
+            .expect("report data-quality snapshot exists");
+        let vector_ids = snapshot
+            .tokens_json
+            .0
+            .iter()
+            .map(|token| token.feature_vector_id)
+            .collect::<Vec<_>>();
+        let features = Arc::new(PgFeatureRepository::new(db.clone()));
+        let persisted = features
+            .find_by_ids(&vector_ids)
+            .await
+            .expect("read actual persisted feature and capture evidence");
+        assert!(!persisted.is_empty());
+        assert!(persisted.iter().all(|feature| {
+            feature.decision_boundary == expected_boundary
+                && feature.decision_capture.finalized_execution_evidence
+                    == FinalizedExecutionEvidence::runtime(
+                        true,
+                        Some((i64::MAX - 1).unsigned_abs()),
+                        Some(watermark),
+                    )
+        }));
+        let fixture = Self {
+            harness,
+            clickhouse,
+        };
+        let diagnostics = fixture
+            .port(features)
+            .find_report_diagnostics(&report.recommendation_report_id)
+            .await
+            .expect("canonical report diagnostics accepts the complete persisted boundary")
+            .expect("report diagnostics exists");
+        assert_eq!(
+            diagnostics.decision_boundary,
+            DecisionBoundaryEvidenceView::from(&expected_boundary)
+        );
+        assert!(diagnostics.global.evidence_complete);
+        assert_eq!(
+            diagnostics.global.feature_vector_count,
+            Some(u64::try_from(persisted.len()).expect("fixture vector count fits u64"))
+        );
+        assert!(
+            diagnostics
+                .global
+                .feature_cell_count
+                .is_some_and(|count| count > 0)
+        );
+        assert_eq!(
+            diagnostics.routes.len(),
+            report.represented_routes_json.routes.len()
+        );
+        assert!(
+            diagnostics
+                .routes
+                .iter()
+                .all(|route| route.evidence.evidence_complete)
+        );
+        assert!(diagnostics.routes.iter().any(|route| {
+            route.route == BuyModelRoute::Weather
+                && route
+                    .evidence
+                    .model_input_count
+                    .is_some_and(|count| count > 0)
+                && route.evidence.model_route.is_some()
+        }));
+        fixture
+            .reject_corruption(&report.recommendation_report_id)
+            .await;
+    }
+
+    fn port(&self, feature_repo: Arc<dyn FeatureRepository>) -> CoreQuantReportPort {
+        let db = &self.harness.db;
+        CoreQuantReportPort::new(CoreQuantReportPortDeps {
+            report_repo: Arc::clone(&self.harness.report_repo)
+                as Arc<dyn RecommendationReportRepository>,
+            report_run_repo: Arc::clone(&self.harness.report_run_repo)
+                as Arc<dyn ReportRunRepository>,
+            portfolio_plan_repo: Arc::new(PgPortfolioPlanRepository::new(db.clone())),
+            recommendation_repo: Arc::clone(&self.harness.recommendation_repo)
+                as Arc<dyn RecommendationRepository>,
+            order_intent_repo: Arc::new(PgOrderIntentRepository::new(db.clone())),
+            lifecycle: Arc::clone(&self.harness.lifecycle),
+            serving_evidence: Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
+                &self.clickhouse,
+            ))),
+            feature_repo,
+            runtime_config_repo: Arc::new(PgPolicyRepository::new(db.clone())),
+            exchange_history_repo: Arc::clone(&self.harness.exchange_history_repo),
+            quant_fact_read: Arc::new(ChQuantFactReadRepository::new(Arc::clone(&self.clickhouse))),
+            operation_logs: Arc::new(PgOperationLogRepository::new(db.clone())),
+        })
+    }
+
+    async fn reject_corruption(&self, report_id: &RecommendationReportId) {
+        for fault in [
+            FeatureEvidenceFault::Clock,
+            FeatureEvidenceFault::Cutoff,
+            FeatureEvidenceFault::Capture,
+        ] {
+            let port = self.port(Arc::new(FaultedFeatureReader {
+                inner: PgFeatureRepository::new(self.harness.db.clone()),
+                fault,
+            }));
+            assert!(
+                matches!(
+                    port.find_report_diagnostics(report_id).await,
+                    Err(QuantError::Research(ResearchError::Determinism { .. }))
+                ),
+                "diagnostics must reject read-time {fault:?} corruption"
+            );
+        }
+        assert!(
+            self.port(Arc::new(PgFeatureRepository::new(self.harness.db.clone())))
+                .find_report_diagnostics(report_id)
+                .await
+                .expect("fault injection cannot mutate WORM rows")
+                .expect("report still exists")
+                .global
+                .evidence_complete
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FeatureEvidenceFault {
+    Clock,
+    Cutoff,
+    Capture,
+}
+
+struct FaultedFeatureReader {
+    inner: PgFeatureRepository,
+    fault: FeatureEvidenceFault,
+}
+
+impl FaultedFeatureReader {
+    fn corrupt(&self, feature: &mut FeatureVectorInfo) {
+        match self.fault {
+            FeatureEvidenceFault::Clock => feature.decision_at += Duration::microseconds(1),
+            FeatureEvidenceFault::Cutoff => {
+                feature.decision_boundary = feature
+                    .decision_boundary
+                    .clone()
+                    .with_source_watermark(
+                        DecisionSource::FinalizedExecution,
+                        feature
+                            .decision_boundary
+                            .cutoff_for(DecisionSource::FinalizedExecution)
+                            - Duration::microseconds(1),
+                    )
+                    .expect("tightened corruption remains a valid boundary shape");
+            }
+            FeatureEvidenceFault::Capture => {
+                feature.decision_capture.finalized_execution_evidence =
+                    FinalizedExecutionEvidence::NotRequired;
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl FeatureRepository for FaultedFeatureReader {
+    async fn create(&self, _vector: NewFeatureVector) -> Result<FeatureVectorInfo, StorageError> {
+        Err(StorageError::InvariantViolation {
+            entity: Some("quant_feature_vector"),
+            detail: "diagnostic fault injection is read-only".to_owned(),
+        })
+    }
+
+    async fn create_batch(
+        &self,
+        _vectors: Vec<NewFeatureVector>,
+    ) -> Result<Vec<FeatureVectorInfo>, StorageError> {
+        Err(StorageError::InvariantViolation {
+            entity: Some("quant_feature_vector"),
+            detail: "diagnostic fault injection is read-only".to_owned(),
+        })
+    }
+
+    async fn find_by_id(
+        &self,
+        id: &FeatureVectorId,
+    ) -> Result<Option<FeatureVectorInfo>, StorageError> {
+        let mut feature = self.inner.find_by_id(id).await?;
+        if let Some(feature) = &mut feature {
+            self.corrupt(feature);
+        }
+        Ok(feature)
+    }
+
+    async fn find_by_ids(
+        &self,
+        ids: &[FeatureVectorId],
+    ) -> Result<Vec<FeatureVectorInfo>, StorageError> {
+        let mut features = self.inner.find_by_ids(ids).await?;
+        for feature in &mut features {
+            self.corrupt(feature);
+        }
+        Ok(features)
+    }
+}
 
 pub async fn ad_hoc_publishes_recommendations() {
     let (pool, _container) = setup_pg().await;
@@ -56,9 +363,44 @@ pub async fn ad_hoc_publishes_recommendations() {
     );
     let route_runs = harness
         .report_repo
-        .list_route_runs(&report.recommendation_report_id)
+        .find_route_runs(&[report.report_run_id])
         .await
         .expect("load report Route runs");
+    assert!(
+        harness
+            .report_repo
+            .find_route_runs(&[])
+            .await
+            .expect("empty Route-run batch")
+            .is_empty()
+    );
+    assert!(
+        harness
+            .report_repo
+            .find_route_runs(&[ReportRunId::new(Uuid::now_v7())])
+            .await
+            .expect("missing Route-run batch")
+            .is_empty(),
+        "missing report runs must not fabricate Route outcomes"
+    );
+    let second_report = harness
+        .execute_ad_hoc(harness.ad_hoc_request("ad-hoc-route-batch"))
+        .await
+        .expect("second ad-hoc report");
+    let batched_route_runs = harness
+        .report_repo
+        .find_route_runs(&[second_report.report_run_id, report.report_run_id])
+        .await
+        .expect("load two reports' Route runs in one batch");
+    assert_eq!(
+        batched_route_runs.len(),
+        route_runs.len() * 2,
+        "one batch must return the exact Route rows for both report runs"
+    );
+    assert!(batched_route_runs.windows(2).all(|window| {
+        (window[0].report_run_id.as_uuid(), window[0].route)
+            <= (window[1].report_run_id.as_uuid(), window[1].route)
+    }));
     let mut factors = Vec::new();
     for model_run_id in route_runs.iter().filter_map(|run| run.model_run_id) {
         factors.extend(
@@ -165,7 +507,7 @@ pub async fn pinned_route_uses_generation() {
         .expect("a complete route generation must use its immutable model contract");
     let route_runs = harness
         .report_repo
-        .list_route_runs(&report.recommendation_report_id)
+        .find_route_runs(&[report.report_run_id])
         .await
         .expect("load pinned report Route runs");
     assert_eq!(route_runs.len(), 2);

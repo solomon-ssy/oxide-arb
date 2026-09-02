@@ -16,16 +16,19 @@ pub enum TaskId {
     /// HTTP + WebSocket server. Drained first (stage 0) so the system stops
     /// accepting outward-facing requests before detection/execution wind down.
     WebServer,
-    /// Fans `CoreEvent`s out to subscribed WebSocket sessions.
+    /// Fans `CoreEvent`s out after producers stop; drains before the session hub.
     WsBroadcaster,
     /// Claims and publishes durable feedback revisions to `research.feedback`.
     FeedbackOutboxWorker,
-    /// Single writer for WebSocket sessions and reverse subscription indexes.
+    /// Single writer for WebSocket sessions; closes ingress at root shutdown and
+    /// drains its command lanes in the final fan-out stage.
     SessionHub,
     /// Periodic + nudged `SystemStatusChanged` pushes for dashboard clients.
     SystemStatusBroadcaster,
     /// Converges the atomic runtime-control snapshot across application instances.
     RuntimeControlSync,
+    /// Publishes committed policy generations until the health-monitor drain barrier.
+    PolicyBundleReconciler,
     /// Coalesces per-market order-book changes into throttled `MarketBookUpdate`
     /// events for watching WebSocket sessions (off the hot path).
     BookUpdateCoalescer,
@@ -42,6 +45,8 @@ pub enum TaskId {
     CryptoLiveIngestWorker,
     /// Ingests public Polymarket RTDS Binance and Chainlink price topics.
     CryptoRtdsIngestWorker,
+    /// Batches source-native Crypto facts and acknowledges durable `ClickHouse` writes.
+    CryptoPriceReportWriter,
     /// Ingests Weather observations, forecasts and calibration history.
     WeatherIngestWorker,
     /// Ingests public precipitation, AQI, tornado, cyclone, climate, sea-ice,
@@ -78,9 +83,9 @@ pub enum TaskId {
     // ── Execution ─────────────────────────────────────────────────────
     /// Recovery-only worker: turns dangling submissions into reconciliation work.
     ExecutionRecovery,
-    /// Auto-execution worker: pulls `ApprovedByPolicy` intents and submits them.
+    /// Authorized-intent worker: pulls `Authorized` intents and submits them.
     ExecutionDispatcher,
-    /// Evaluates durable recommendation condition instances in all runtime modes.
+    /// Evaluates durable recommendation condition instances under every entry policy.
     EntryConditionWorker,
     /// Delivers committed condition evaluation traces from Postgres to `ClickHouse`.
     EntryConditionEvaluationOutboxWorker,
@@ -89,7 +94,7 @@ pub enum TaskId {
     ReconciliationWorker,
     /// Reconciles market/day maker awards and wallet-confirmed incentive credits.
     VenueIncentiveReconciliation,
-    /// Seals resolution and execution outcome truth in all runtime modes.
+    /// Seals resolution and execution outcome truth independently of entry authorization.
     OutcomeReconciliationWorker,
     /// Discovers resolved account-scoped cases from durable `PostgreSQL` truth.
     SettlementDiscovery,
@@ -167,11 +172,11 @@ impl TaskId {
     pub const fn kind(self) -> TaskKind {
         match self {
             Self::WebServer
-            | Self::WsBroadcaster
             | Self::FeedbackOutboxWorker
-            | Self::SessionHub
             | Self::BookUpdateCoalescer
             | Self::SystemStatusBroadcaster => TaskKind::ApiIngress,
+            Self::WsBroadcaster => TaskKind::EventFanout,
+            Self::SessionHub => TaskKind::SessionFanout,
             Self::DataPipeline
             | Self::ExchangeHistoryWorker
             | Self::DomainSourceSupervisor
@@ -192,6 +197,7 @@ impl TaskId {
             Self::HealthChecker
             | Self::RiskMetricsRefresh
             | Self::DataQualityRefresh
+            | Self::PolicyBundleReconciler
             | Self::RuntimeControlSync => TaskKind::HealthMonitor,
             Self::ExecutionRecovery
             | Self::ExecutionDispatcher
@@ -221,6 +227,7 @@ impl TaskId {
             | Self::ReportFactDeliveryWorker
             | Self::EntryConditionEvaluationOutboxWorker
             | Self::BookStreamSessionWriter
+            | Self::CryptoPriceReportWriter
             | Self::BookL2LedgerWriter
             | Self::BookMicrostructure1sWriter
             | Self::FactorEventsWriter

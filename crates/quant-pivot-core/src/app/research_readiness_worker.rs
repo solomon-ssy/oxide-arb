@@ -12,7 +12,8 @@ use super::{
     AppContext, capability_gate::wait_for_capability, task_id::TaskId, task_registry::AppRunner,
 };
 use crate::service::research_readiness::{
-    EvidenceAttestor, EvidenceScopeIdentity, ResearchReadinessEvidenceProducer,
+    EvidenceAttestor, EvidenceScopeIdentity, ResearchReadinessCaptureOutcome,
+    ResearchReadinessEvidenceProducer,
 };
 
 const CAPTURE_INTERVAL: Duration = Duration::from_mins(5);
@@ -55,13 +56,49 @@ impl AppContext {
                     return;
                 }
                 match producer.capture(required_days).await {
-                    Ok(true) => tracing::info!(
+                    Ok(ResearchReadinessCaptureOutcome::Captured(capture))
+                        if capture.retention_proven =>
+                    {
+                        tracing::info!(
+                            required_days,
+                            measured_history_days = ?capture.measured_history_days,
+                            missing_binding_count = capture.missing_binding_count,
+                            unready_binding_count = capture.unready_binding_count,
+                            retention_evidence_id = %capture.retention.evidence_id,
+                            retention_scope_hash = %capture.retention.scope_hash,
+                            retention_observed_at = %capture.retention.observed_at,
+                            retention_expires_at = %capture.retention.expires_at,
+                            latency_evidence_id = %capture.latency.evidence_id,
+                            latency_scope_hash = %capture.latency.scope_hash,
+                            latency_observed_at = %capture.latency.observed_at,
+                            latency_expires_at = %capture.latency.expires_at,
+                            "proven signed research readiness evidence captured"
+                        );
+                    }
+                    Ok(ResearchReadinessCaptureOutcome::Captured(capture)) => tracing::info!(
                         required_days,
-                        "signed research readiness evidence captured"
+                        retention_proven = capture.retention_proven,
+                        measured_history_days = ?capture.measured_history_days,
+                        missing_binding_count = capture.missing_binding_count,
+                        unready_binding_count = capture.unready_binding_count,
+                        retention_evidence_id = %capture.retention.evidence_id,
+                        retention_scope_hash = %capture.retention.scope_hash,
+                        retention_observed_at = %capture.retention.observed_at,
+                        retention_expires_at = %capture.retention.expires_at,
+                        latency_evidence_id = %capture.latency.evidence_id,
+                        latency_scope_hash = %capture.latency.scope_hash,
+                        latency_observed_at = %capture.latency.observed_at,
+                        latency_expires_at = %capture.latency.expires_at,
+                        "signed research readiness evidence captured without a proven retention runway"
                     ),
-                    Ok(false) => {}
-                    Err(error) => tracing::error!(
-                        %error,
+                    Ok(ResearchReadinessCaptureOutcome::Disabled) => tracing::warn!(
+                        "research readiness evidence producer is disabled; fit preflight remains blocked"
+                    ),
+                    Err(failure) => tracing::error!(
+                        error_code = failure.source.code(),
+                        phase = %failure.phase,
+                        kind = %failure.kind,
+                        source_error = %failure.source,
                         "research readiness evidence capture failed; previous evidence is not extended"
                     ),
                 }

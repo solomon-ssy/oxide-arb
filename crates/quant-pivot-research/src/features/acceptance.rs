@@ -19,6 +19,7 @@ use quant_pivot_models::{
             fee::MarketMakerRebateEvidence,
             registry::{CatalogMarketLeg, EventRegistryInfo, NegRiskLeg, NegRiskLegSet},
         },
+        order::PolymarketOrderRules,
         quant::{DomainAvailability, FeatureVectorInfo, MarketCandidate, MarketDataHealth},
     },
     enums::{
@@ -93,6 +94,9 @@ fn test_context(
         end_date: Some(boundary.decision_at() + ChronoDuration::days(7)),
         created_at: Some(boundary.decision_at() - ChronoDuration::days(30)),
         fee_schedule: None,
+        order_rules: Some(
+            PolymarketOrderRules::new(TickSize::Hundredth, Shares::ONE).expect("rules"),
+        ),
         maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
     }
 }
@@ -1364,6 +1368,9 @@ async fn online_offline_feature_parity() {
             end_date: Some(as_of + ChronoDuration::days(3)),
             created_at: Some(as_of - ChronoDuration::days(10)),
             fee_schedule: None,
+            order_rules: Some(
+                PolymarketOrderRules::new(TickSize::Hundredth, Shares::ONE).expect("rules"),
+            ),
             maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         },
     };
@@ -1913,6 +1920,9 @@ async fn online_offline_parity_window() {
             end_date: Some(as_of + ChronoDuration::days(3)),
             created_at: Some(as_of - ChronoDuration::days(10)),
             fee_schedule: None,
+            order_rules: Some(
+                PolymarketOrderRules::new(TickSize::Hundredth, Shares::ONE).expect("rules"),
+            ),
             maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         },
     };
@@ -2148,6 +2158,9 @@ fn sibling_leg_parity_fixture() -> (SiblingLegParityFixture, [NegRiskLeg; 3], Se
             end_date: Some(as_of + ChronoDuration::days(7)),
             created_at: Some(as_of - ChronoDuration::days(30)),
             fee_schedule: None,
+            order_rules: Some(
+                PolymarketOrderRules::new(TickSize::Hundredth, Shares::ONE).expect("rules"),
+            ),
             maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         },
     };

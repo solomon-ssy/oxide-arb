@@ -27,7 +27,10 @@ use quant_pivot_migration::{
     plan as plan_postgres_migrations,
 };
 use quant_pivot_models::{
-    config::{ClickHouseConfig, DeployConfig, DeployConfigLoadRequest, PostgresConfig},
+    config::{
+        ClickHouseConfig, ClickHouseIoConfig, ClickHouseResourceGovernance, DeployConfig,
+        DeployConfigLoadRequest, PostgresConfig,
+    },
     domain::api::{
         ConfigApiContractSchema, ResearchModelApiContractSchema,
         operator_contract::QuantOperatorApiContractSchema,
@@ -47,10 +50,9 @@ use quant_pivot_repository::{
 use quant_pivot_storage::{
     cache::{count_preproduction_namespace, unlink_preproduction_namespace},
     clickhouse::{
-        ClickHousePool, active_preproduction_query_count, apply_offline_schema_migrations,
-        apply_online_schema_migrations, database_object_count,
-        generate_clean_schema_manifest as generate_clean_clickhouse_schema_manifest, plan_schema,
-        render_schema_manifest as render_clickhouse_schema_manifest,
+        ClickHousePool, ClickHouseQueryLimits, active_preproduction_query_count, bootstrap_schema,
+        database_object_count,
+        generate_clean_schema_manifest as generate_clean_clickhouse_schema_manifest,
         reset_preproduction_database as reset_clickhouse_preproduction_database, verify_schema,
     },
     postgres::{
@@ -64,14 +66,14 @@ use quant_pivot_storage::{
 };
 use quant_pivot_system_tests::{
     performance::PerformanceProfile,
-    production_stack::{self, ProductionStackFixture},
+    production_stack::{self, ProductionServeCompletion, ProductionStackFixture},
     stack::CLICKHOUSE_IMAGE_TAG,
 };
 use rustls::crypto::aws_lc_rs;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
 use testcontainers::{
-    GenericImage, ImageExt,
+    CopyDataSource, GenericImage, ImageExt,
     core::{WaitFor, wait::HttpWaitStrategy},
     runners::AsyncRunner,
 };
@@ -81,6 +83,8 @@ use zeroize::Zeroizing;
 
 const BOOTSTRAP_ADMIN_PASSWORD_FILE_ENV: &str = "QUANT_PIVOT_BOOTSTRAP__ADMIN_PASSWORD_FILE";
 const CLEAN_BOOTSTRAP_CONFIRMATION: &str = "DELETE_ALL_PREPRODUCTION_DATA_AND_REBOOTSTRAP";
+const CLICKHOUSE_GOVERNANCE_CONFIG: &[u8] =
+    include_bytes!("../../../docker/clickhouse/config.d/quant-pivot-governance.xml");
 
 #[derive(Parser)]
 #[command(name = "quant-pivot-xtask")]
@@ -118,7 +122,7 @@ enum Commands {
         #[command(subcommand)]
         command: PerformanceCommand,
     },
-    /// Plan, apply online-safe migrations, or verify the `ClickHouse` schema.
+    /// Bootstrap, verify, or render the sole fresh `ClickHouse` schema.
     #[command(name = "clickhouse-schema")]
     ClickHouseSchema {
         #[command(subcommand)]
@@ -182,6 +186,8 @@ enum ArchitectureCommand {
 
 #[derive(Subcommand)]
 enum ConfigCommand {
+    /// Parse and validate one explicit Deploy Config without connecting to infrastructure.
+    Validate(DeployConfigArgs),
     /// Render both canonical Deploy Config TOML files.
     Render {
         /// Fail when committed files differ instead of writing them.
@@ -258,28 +264,31 @@ struct ProductionStackServeArgs {
     /// Retain the isolated run directory so CI can archive backend logs after a failure.
     #[arg(long)]
     retain_artifacts: bool,
+    /// Publish terminal backend verification only after drain and owned cleanup.
+    #[arg(long, requires = "verification_nonce")]
+    completion_report: Option<PathBuf>,
+    /// Fresh external invocation identity; must accompany --completion-report.
+    #[arg(long, requires = "completion_report")]
+    verification_nonce: Option<Uuid>,
 }
 
 #[derive(Args)]
 struct ProductionStackVerifyArgs {
     #[arg(long, default_value_t = 2)]
     runs: u16,
+    /// Retain each successful run directory as governed audit evidence.
+    #[arg(long)]
+    retain_artifacts: bool,
 }
 
 #[derive(Subcommand)]
 enum ClickHouseSchemaCommand {
-    /// Print pending migrations without changing the target database.
-    Plan(DeployConfigArgs),
-    /// Create the database and apply pending online-safe migrations.
-    ApplyOnline(DeployConfigArgs),
-    /// Apply pending offline migrations after proving destructive source tables are empty.
-    ApplyOffline(DeployConfigArgs),
-    /// Verify the migration ledger and runtime schema contract read-only.
+    /// Bootstrap the sole schema into an absent or object-empty database.
+    Bootstrap(DeployConfigArgs),
+    /// Verify the runtime schema contract read-only.
     Verify(DeployConfigArgs),
-    /// Generate the normalized SHOW CREATE semantic manifest after migrations.
-    Manifest(DeployConfigArgs),
-    /// Generate the semantic manifest from a clean, owned disposable `ClickHouse` container.
-    ManifestClean,
+    /// Generate the semantic manifest from a fresh owned disposable container.
+    Manifest,
 }
 
 #[derive(Subcommand)]
@@ -311,6 +320,22 @@ struct DeployConfigArgs {
 impl DeployConfigArgs {
     fn request(&self) -> DeployConfigLoadRequest {
         DeployConfigLoadRequest::new(self.config_file.clone(), self.expected_environment.clone())
+    }
+
+    fn validate(&self) -> Result<()> {
+        if DeployConfig::load(&self.request()).is_err() {
+            bail!(
+                "deploy config validation failed: path={} expected_environment={}",
+                self.config_file.display(),
+                self.expected_environment.as_str()
+            );
+        }
+        println!(
+            "deploy config validation passed: path={} expected_environment={}",
+            self.config_file.display(),
+            self.expected_environment.as_str()
+        );
+        Ok(())
     }
 }
 
@@ -385,6 +410,7 @@ async fn run() -> Result<()> {
             ArchitectureCommand::AuditFunctions => function_design::run(),
         },
         Commands::Config { command } => match command {
+            ConfigCommand::Validate(args) => args.validate(),
             ConfigCommand::Render { check } => config_contract::render(&workspace_root()?, check),
             ConfigCommand::Audit => config_contract::audit(&workspace_root()?),
         },
@@ -395,12 +421,17 @@ async fn run() -> Result<()> {
                     args.readiness_port,
                     args.fixture,
                     args.retain_artifacts,
+                    args.completion_report
+                        .zip(args.verification_nonce)
+                        .map(|(path, nonce)| ProductionServeCompletion::new(path, nonce)),
                 ))
                 .await
             }
-            ProductionStackCommand::Verify(args) => production_stack::verify(args.runs).await,
+            ProductionStackCommand::Verify(args) => {
+                production_stack::verify(args.runs, args.retain_artifacts).await
+            }
             ProductionStackCommand::FeedbackClosure(args) => {
-                production_stack::verify_feedback_closure(args.runs).await
+                production_stack::verify_feedback_closure(args.runs, args.retain_artifacts).await
             }
         },
         Commands::Smoke { command } => match command {
@@ -762,9 +793,9 @@ impl PreproductionResetApplyArgs {
             let postgres_status = verify_postgres_schema(postgres.connection())
                 .await
                 .context("verify recreated PostgreSQL schema")?;
-            let clickhouse_status = apply_online_schema_migrations(&deploy.db.clickhouse)
+            let clickhouse_status = bootstrap_schema(&deploy.db.clickhouse)
                 .await
-                .context("apply unique ClickHouse boot migration")?;
+                .context("bootstrap unique fresh ClickHouse schema")?;
             transition_reset_journal(
                 &self.journal_file,
                 &mut journal,
@@ -782,15 +813,15 @@ impl PreproductionResetApplyArgs {
                 &mut journal,
                 ResetStage::Verified,
             )?;
-            postgres.close().await;
+            postgres.close().await.context("close recreated PostgreSQL pool")?;
             println!("redis_unlinked={deleted}");
             println!(
                 "postgres_boot_version={} postgres_migrations={}",
                 postgres_status.current_version, postgres_status.migration_count
             );
             println!(
-                "clickhouse_boot_version={} clickhouse_objects={}",
-                clickhouse_status.current_version, clickhouse_status.required_object_count
+                "clickhouse_schema_hash={} clickhouse_objects={}",
+                clickhouse_status.schema_fingerprint, clickhouse_status.required_object_count
             );
             println!(
                 "policy_bundle_generation={} policy_snapshot_id={} policy_snapshot_hash={}",
@@ -877,10 +908,13 @@ async fn verify_reset_under_lease(deploy: &DeployConfig) -> Result<()> {
         bail!("PostgreSQL boot schema has no active six-resource policy bundle");
     }
     println!(
-        "preproduction reset verified: pg_version={} ch_version={} redis_qp_keys=0",
-        postgres_status.current_version, clickhouse_status.current_version
+        "preproduction reset verified: pg_version={} ch_schema_hash={} redis_qp_keys=0",
+        postgres_status.current_version, clickhouse_status.schema_fingerprint
     );
-    postgres.close().await;
+    postgres
+        .close()
+        .await
+        .context("close verified PostgreSQL pool")?;
     Ok(())
 }
 
@@ -891,9 +925,8 @@ async fn verify_clean_bootstrap_facts(
     let clickhouse = ClickHousePool::connect(clickhouse_config)
         .await
         .context("connect clean-bootstrap ClickHouse target")?;
-    let ledger_rows = clickhouse
-        .client()
-        .query("SELECT count() FROM quant_book_l2_ledger")
+    let ledger_rows = ClickHouseQueryLimits::new("ch.xtask.clean_bootstrap_facts.v1", 1, 64)
+        .query(&clickhouse, "SELECT count() FROM quant_book_l2_ledger")
         .fetch_one::<u64>()
         .await
         .context("count clean-bootstrap L2 ledger")?;
@@ -1225,7 +1258,9 @@ impl PostgresSchemaCommand {
                         migration.version, migration.checksum
                     );
                 }
-                pool.close().await;
+                pool.close()
+                    .await
+                    .context("close PostgreSQL schema plan pool")?;
                 Ok(())
             }
             Self::Apply(_) => apply_postgres_schema(&deploy).await,
@@ -1262,7 +1297,9 @@ impl PostgresSchemaCommand {
                     status.required_table_count,
                     status.required_index_count
                 );
-                pool.close().await;
+                pool.close()
+                    .await
+                    .context("close PostgreSQL schema verification pool")?;
                 Ok(())
             }
             Self::Manifest(_) => {
@@ -1284,7 +1321,9 @@ impl PostgresSchemaCommand {
                 let migration_path = write_postgres_migration_manifest()?;
                 println!("generated {}", path.display());
                 println!("generated {}", migration_path.display());
-                pool.close().await;
+                pool.close()
+                    .await
+                    .context("close PostgreSQL schema manifest pool")?;
                 Ok(())
             }
             Self::ManifestClean | Self::MigrationManifest => Ok(()),
@@ -1344,7 +1383,9 @@ async fn apply_postgres_schema(deploy: &DeployConfig) -> Result<()> {
         policy_bundle.decision_policy_snapshot_id,
         policy_bundle.snapshot_hash
     );
-    pool.close().await;
+    pool.close()
+        .await
+        .context("close PostgreSQL schema deployment pool")?;
     Ok(())
 }
 
@@ -1434,7 +1475,9 @@ async fn generate_clean_postgres_manifest() -> Result<()> {
         .join("manifest.json");
     fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
     let migration_path = write_postgres_migration_manifest()?;
-    pool.close().await;
+    pool.close()
+        .await
+        .context("close disposable PostgreSQL manifest pool")?;
     drop(container);
     println!("generated {} from disposable PostgreSQL 16", path.display());
     println!("generated {}", migration_path.display());
@@ -1461,140 +1504,57 @@ fn write_postgres_migration_manifest() -> Result<PathBuf> {
 impl ClickHouseSchemaCommand {
     async fn clickhouse_schema(self) -> Result<()> {
         let args = match &self {
-            Self::Plan(args)
-            | Self::ApplyOnline(args)
-            | Self::ApplyOffline(args)
-            | Self::Verify(args)
-            | Self::Manifest(args) => Some(args),
-            Self::ManifestClean => None,
+            Self::Bootstrap(args) | Self::Verify(args) => Some(args),
+            Self::Manifest => None,
         };
         let Some(args) = args else {
             return generate_clean_clickhouse_manifest().await;
         };
         let deploy = DeployConfig::load(&args.request()).context("load deploy config")?;
         let config = &deploy.db.clickhouse;
-        let mutates_schema = matches!(&self, Self::ApplyOnline(_) | Self::ApplyOffline(_));
-        let schema_mutation_lease = if mutates_schema || matches!(&self, Self::Verify(_)) {
-            Some(
-                acquire_schema_mutation_lease(&deploy.db.postgres)
-                    .await
-                    .context("acquire cross-system schema mutation lease")?,
-            )
-        } else {
-            None
-        };
+        let schema_mutation_lease = acquire_schema_mutation_lease(&deploy.db.postgres)
+            .await
+            .context("acquire cross-system schema mutation lease")?;
         let result = match self {
-            Self::Plan(_) => {
-                let plan = plan_schema(config)
-                    .await
-                    .context("plan ClickHouse schema")?;
-                println!("database_exists={}", plan.database_exists);
-                println!("migration_ledger_exists={}", plan.migration_ledger_exists);
-                println!("applied_versions={:?}", plan.applied_versions);
-                if plan.pending_migrations.is_empty() {
-                    println!("pending_migrations=[]");
-                } else {
-                    for migration in plan.pending_migrations {
-                        println!(
-                            "pending_migration version={} name={} safety={:?} checksum={}",
-                            migration.version, migration.name, migration.safety, migration.checksum
-                        );
+            Self::Bootstrap(_) => {
+                let status_result = tokio::select! {
+                    result = bootstrap_schema(config) => {
+                        result.context("bootstrap fresh ClickHouse schema")
                     }
-                }
-                Ok(())
-            }
-            Self::ApplyOnline(_) => {
-                let status_result = if let Some(lease) = schema_mutation_lease.as_ref() {
-                    tokio::select! {
-                    result = apply_online_schema_migrations(config) => {
-                        result.context("deploy ClickHouse schema")
-                    }
-                    () = lease.cancelled() => Err(anyhow::anyhow!(
-                        "canonical PostgreSQL schema mutation lease was lost during ClickHouse migration"
+                    () = schema_mutation_lease.cancelled() => Err(anyhow::anyhow!(
+                        "canonical PostgreSQL schema mutation lease was lost during ClickHouse bootstrap"
                     )),
-                    }
-                } else {
-                    Err(anyhow::anyhow!(
-                        "ClickHouse schema mutation lease is absent"
-                    ))
                 };
                 status_result.map(|status| {
                     println!(
-                        "ClickHouse schema deployed: version={}, required_objects={}",
-                        status.current_version, status.required_object_count
-                    );
-                })
-            }
-            Self::ApplyOffline(_) => {
-                let status_result = if let Some(lease) = schema_mutation_lease.as_ref() {
-                    tokio::select! {
-                    result = apply_offline_schema_migrations(config) => {
-                        result.context("deploy offline ClickHouse schema")
-                    }
-                    () = lease.cancelled() => Err(anyhow::anyhow!(
-                        "canonical PostgreSQL schema mutation lease was lost during offline ClickHouse migration"
-                    )),
-                    }
-                } else {
-                    Err(anyhow::anyhow!(
-                        "ClickHouse schema mutation lease is absent"
-                    ))
-                };
-                status_result.map(|status| {
-                    println!(
-                        "ClickHouse offline schema deployed: version={}, required_objects={}",
-                        status.current_version, status.required_object_count
+                        "ClickHouse schema bootstrapped: hash={}, required_objects={}",
+                        status.schema_fingerprint, status.required_object_count
                     );
                 })
             }
             Self::Verify(_) => {
-                let status_result = if let Some(lease) = schema_mutation_lease.as_ref() {
-                    tokio::select! {
-                        result = verify_schema(config) => result.context("verify ClickHouse schema"),
-                        () = lease.cancelled() => Err(anyhow::anyhow!(
-                            "canonical PostgreSQL schema mutation lease was lost during ClickHouse verification"
-                        )),
-                    }
-                } else {
-                    Err(anyhow::anyhow!(
-                        "ClickHouse verification schema mutation lease is absent"
-                    ))
+                let status_result = tokio::select! {
+                    result = verify_schema(config) => result.context("verify ClickHouse schema"),
+                    () = schema_mutation_lease.cancelled() => Err(anyhow::anyhow!(
+                        "canonical PostgreSQL schema mutation lease was lost during ClickHouse verification"
+                    )),
                 };
                 status_result.map(|status| {
                     println!(
-                        "ClickHouse schema verified: version={}, required_objects={}",
-                        status.current_version, status.required_object_count
+                        "ClickHouse schema verified: hash={}, required_objects={}",
+                        status.schema_fingerprint, status.required_object_count
                     );
                 })
             }
-            Self::Manifest(_) => {
-                let rendered = render_clickhouse_schema_manifest(config)
-                    .await
-                    .context("render ClickHouse semantic schema manifest")?;
-                let path = workspace_root()?
-                    .join("schema")
-                    .join("clickhouse")
-                    .join("manifest.json");
-                fs::create_dir_all(path.parent().context("manifest path has no parent")?)
-                    .context("create ClickHouse manifest directory")?;
-                fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
-                println!("generated {}", path.display());
-                Ok(())
-            }
-            Self::ManifestClean => {
-                unreachable!("clean manifest generation was handled without Deploy Config")
+            Self::Manifest => {
+                unreachable!("disposable manifest generation was handled without Deploy Config")
             }
         };
-        let active_result = schema_mutation_lease
-            .as_ref()
-            .map_or(Ok(()), |lease| lease.ensure_active().map_err(Error::from));
-        let release_result = match schema_mutation_lease {
-            Some(lease) => lease
-                .release_schema_mutation_lease()
-                .await
-                .context("release cross-system schema mutation lease"),
-            None => Ok(()),
-        };
+        let active_result = schema_mutation_lease.ensure_active().map_err(Error::from);
+        let release_result = schema_mutation_lease
+            .release_schema_mutation_lease()
+            .await
+            .context("release cross-system schema mutation lease");
         match (result, active_result, release_result) {
             (Err(error), _, _) | (Ok(()), Err(error), _) | (Ok(()), Ok(()), Err(error)) => {
                 Err(error)
@@ -1607,12 +1567,17 @@ impl ClickHouseSchemaCommand {
 async fn generate_clean_clickhouse_manifest() -> Result<()> {
     let container = GenericImage::new("clickhouse/clickhouse-server", CLICKHOUSE_IMAGE_TAG)
         .with_exposed_port(8123.into())
+        .with_exposed_port(9363.into())
         .with_wait_for(WaitFor::http(
             HttpWaitStrategy::new("/ping")
                 .with_port(8123.into())
                 .with_expected_status_code(200u16),
         ))
         .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
+        .with_copy_to(
+            "/etc/clickhouse-server/config.d/quant-pivot-governance.xml",
+            CopyDataSource::Data(CLICKHOUSE_GOVERNANCE_CONFIG.to_vec()),
+        )
         .with_startup_timeout(StdDuration::from_mins(2))
         .start()
         .await
@@ -1622,6 +1587,8 @@ async fn generate_clean_clickhouse_manifest() -> Result<()> {
         .await
         .context("resolve disposable ClickHouse manifest port")?;
     let config = ClickHouseConfig {
+        resource_governance: ClickHouseResourceGovernance::SelfManaged,
+        io: ClickHouseIoConfig::default(),
         deployment_id: "manifest-codegen".to_owned(),
         cluster_id: "disposable-clickhouse".to_owned(),
         url: format!("http://127.0.0.1:{port}"),
@@ -1630,7 +1597,10 @@ async fn generate_clean_clickhouse_manifest() -> Result<()> {
         password: "".into(),
         batch_size: 100,
         flush_interval_secs: 1,
-        max_concurrent_inserts: 1,
+        max_concurrent_inserts: 2,
+        max_inflight_write_bytes: 64 * 1024 * 1024,
+        max_concurrent_reads: 1,
+        max_threads_per_query: 2,
     };
     let rendered = generate_clean_clickhouse_schema_manifest(&config)
         .await
@@ -1715,21 +1685,64 @@ fn workspace_root() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs, os::unix::fs::PermissionsExt};
+    use std::{env, fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
     use chrono::{Duration, Utc};
+    use clap::Parser;
     use quant_pivot_models::{
-        config::DeployConfig, hashing::CanonicalDigest, types::PreproductionResetNonce,
+        config::DeployConfig,
+        hashing::CanonicalDigest,
+        types::{DeploymentEnvironment, PreproductionResetNonce},
     };
     use uuid::Uuid;
 
     use super::{
-        CLEAN_BOOTSTRAP_CONFIRMATION, PreproductionResetJournal, RESET_JOURNAL_FORMAT_VERSION,
-        RESET_PLAN_TTL_MINUTES, ResetObjectInventory, ResetStage, archive_reset_journal,
-        mark_reset_journal_failed, read_reset_journal, report_capacity_ceiling,
-        reset_target_fingerprints, transition_reset_journal, validate_completed_reset_journal,
-        validate_reset_journal, write_private_json_atomic,
+        CLEAN_BOOTSTRAP_CONFIRMATION, Cli, Commands, ConfigCommand, DeployConfigArgs,
+        PreproductionResetJournal, RESET_JOURNAL_FORMAT_VERSION, RESET_PLAN_TTL_MINUTES,
+        ResetObjectInventory, ResetStage, archive_reset_journal, mark_reset_journal_failed,
+        read_reset_journal, report_capacity_ceiling, reset_target_fingerprints,
+        transition_reset_journal, validate_completed_reset_journal, validate_reset_journal,
+        write_private_json_atomic,
     };
+
+    #[test]
+    fn config_validate_cli_parses() {
+        let cli = Cli::try_parse_from([
+            "quant-pivot-xtask",
+            "config",
+            "validate",
+            "--config-file",
+            "/tmp/quant-pivot.toml",
+            "--expected-environment",
+            "local-development",
+        ])
+        .expect("parse config validate command");
+        let Commands::Config {
+            command: ConfigCommand::Validate(args),
+        } = cli.command
+        else {
+            panic!("expected config validate command");
+        };
+        assert_eq!(args.config_file, PathBuf::from("/tmp/quant-pivot.toml"));
+        assert_eq!(
+            args.expected_environment,
+            DeploymentEnvironment::local_development()
+        );
+    }
+
+    #[test]
+    fn config_validate_sanitizes_errors() {
+        let args = DeployConfigArgs {
+            config_file: PathBuf::from("/definitely/missing/quant-pivot.toml"),
+            expected_environment: DeploymentEnvironment::local_development(),
+        };
+        let error = args
+            .validate()
+            .expect_err("missing deploy config must fail validation");
+        let message = error.to_string();
+        assert!(message.contains("deploy config validation failed"));
+        assert!(!message.contains("No such file"));
+    }
 
     #[test]
     fn report_capacity_enforces_rounding() {

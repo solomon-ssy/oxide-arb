@@ -114,4 +114,4 @@ ClickHouse 数据库、清空 Redis `qp:*` namespace，然后只执行当前唯�
 `DELETE_ALL_PREPRODUCTION_DATA_AND_REBOOTSTRAP`。完成后 ledger 必须为空，旧对象、
 row type、reader、hash、checkpoint parser 和相关研究证据不得残留。只有新账本重新
 积累数据并完成训练、CPCV、parity 和治理审批闭环后，才允许启用
-SemiAuto/AutoExecution。
+operator-authorized / policy-automatic execution。

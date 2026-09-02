@@ -1,13 +1,13 @@
 ---
 source: crates/quant-pivot-models/tests/report_payload_snapshots.rs
-expression: recommendation_not_auto_eligible()
+expression: recommendation_operator_only()
 ---
 {
-  "recommendation_id": "0577de44-6c55-56de-9919-2e8510def36b",
+  "recommendation_id": "310ca8eb-39f7-5004-8c58-90f227dea8f6",
   "recommendation_report_id": "f7a59e75-1560-57c2-abc0-972ac075aef0",
   "report_route_run_id": "639686eb-df5e-577e-9b5d-72a4440d37ba",
   "portfolio_plan_id": "e62df386-c19a-5c0d-9da3-02c7b4619335",
-  "economic_tier_id": "bcd39de0-ccc4-5b48-9567-8be324d69204",
+  "economic_tier_id": "f1410d94-d7c2-51a8-92fe-52471f81a9ed",
   "rank": 1,
   "route": "pooled",
   "market_id": "0xmarketA",
@@ -24,9 +24,9 @@ expression: recommendation_not_auto_eligible()
     "marginal_portfolio_value_usd": "38"
   },
   "economic_tier": {
-    "economic_tier_id": "bcd39de0-ccc4-5b48-9567-8be324d69204",
+    "economic_tier_id": "f1410d94-d7c2-51a8-92fe-52471f81a9ed",
     "report_route_run_id": "639686eb-df5e-577e-9b5d-72a4440d37ba",
-    "candidate_id": "8e9fb00d-2116-5f02-ad12-67cf8ff068b6",
+    "candidate_id": "993b8c6e-cdd6-5a17-9c5c-249e59714896",
     "tier_ordinal": 1,
     "route": "pooled",
     "market_id": "0xmarketA",
@@ -293,8 +293,6 @@ expression: recommendation_not_auto_eligible()
       "cvar_contribution_usd": "40",
       "portfolio_cvar_cap_usd": "500",
       "maximum_scenario_loss_cap_usd": "750",
-      "requires_approval": true,
-      "auto_execution_allowed": false,
       "risk_notes": [
         "thin book"
       ],
@@ -321,15 +319,11 @@ expression: recommendation_not_auto_eligible()
     }
   ],
   "execution_eligibility": {
-    "eligible_modes": [
-      "report_only",
-      "semi_auto"
-    ],
-    "ineligibility_reasons": [
+    "ceiling": "operator_approval",
+    "blockers": [
       "automation_cap_exceeded"
     ],
-    "approval_required": true,
-    "auto_policy_id": null
+    "policy_binding": null
   },
   "valid_from": "2023-11-14T22:13:20Z",
   "valid_until": "2023-11-15T22:13:20Z",

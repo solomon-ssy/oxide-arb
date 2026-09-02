@@ -12,8 +12,8 @@ use quant_pivot_models::{
                 RecordRelayerSettlementAcceptance, RecordRelayerSettlementChainHash,
                 RequireSettlementReconciliation, RevokeSettlementAuthorization,
                 ScheduleSettlementRetry, ScheduleSettlementWork, SettlementChainSubmissionInfo,
-                SettlementRedeemInfo, SettlementRedeemLotInfo, SettlementSubmissionOutcome,
-                SettlementWorkClaim, StageSettlementAuthorization,
+                SettlementRecoveryBlocker, SettlementRedeemInfo, SettlementRedeemLotInfo,
+                SettlementSubmissionOutcome, SettlementWorkClaim, StageSettlementAuthorization,
             },
             settlement_inventory::{
                 MarkSettlementInventoryAbsent, NewSettlementInventoryLot,
@@ -110,8 +110,14 @@ pub trait SettlementRedeemRepository: Send + Sync {
         execution_account_id: &ExecutionAccountId,
     ) -> Result<u64, StorageError>;
 
+    /// List deterministic settlement facts that can still change account inventory or collateral.
+    async fn recovery_blockers(
+        &self,
+        execution_account_id: &ExecutionAccountId,
+    ) -> Result<Vec<SettlementRecoveryBlocker>, StorageError>;
+
     /// Claim the oldest case with an active durable submission. This path is
-    /// independent from runtime mode, kill switch and current deployment.
+    /// independent from entry authorization, kill switch and current deployment.
     async fn claim_next_recovery(
         &self,
         owner: &WorkerId,

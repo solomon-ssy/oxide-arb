@@ -7,7 +7,7 @@ mod native_read;
 mod query_batch;
 mod query_limits;
 
-pub use fact::{ChFactWriter, ChQuantFactRepository};
+pub use fact::{ChCanonicalLedgerWriter, ChFactWriter, ChQuantFactRepository};
 pub use fact_read::ChQuantFactReadRepository;
 pub use feature_parity::ChFeatureParityEventRepository;
 pub use native_read::ChNativeReadRepository;

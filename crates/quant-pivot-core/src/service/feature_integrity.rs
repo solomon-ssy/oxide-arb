@@ -17,8 +17,8 @@ use quant_pivot_models::{
         pagination::Paginated,
         ports::{FeatureIntegrityActionContext, FeatureIntegrityPort},
         quant::{
-            FeatureParityRunInfo, NewFeatureParityRun, NewRecommendationReport,
-            NewReportFeatureParity, NewResearchJob, RecommendationReportInfo, ReportRunInfo,
+            NewFeatureParityRun, NewRecommendationReport, NewReportFeatureParity, NewResearchJob,
+            RecommendationReportInfo, ReportRunInfo,
         },
     },
     enums::{
@@ -138,7 +138,7 @@ impl FeatureParityRunCoordinator {
             matched_count: 0,
             mismatched_count: 0,
             pending_materialization_count: 0,
-            feature_contract_hash: Some(feature_contract_hash),
+            feature_contract_hash,
             transform_hash: None,
             failure_code: None,
             failure_detail: None,
@@ -616,14 +616,6 @@ impl FeatureIntegrityService {
             metrics,
         }
     }
-
-    fn run_view(info: FeatureParityRunInfo) -> QuantResult<FeatureParityRunView> {
-        FeatureParityRunView::try_from_info(info).map_err(|detail| {
-            QuantError::from(ResearchError::Determinism {
-                detail: detail.to_owned(),
-            })
-        })
-    }
 }
 
 #[async_trait]
@@ -661,8 +653,8 @@ impl FeatureIntegrityPort for FeatureIntegrityService {
                 watermark: None,
             },
         };
-        let last_sampled_run = latest_sampled.map(Self::run_view).transpose()?;
-        let last_full_run = latest_full.map(Self::run_view).transpose()?;
+        let last_sampled_run = latest_sampled.map(FeatureParityRunView::from);
+        let last_full_run = latest_full.map(FeatureParityRunView::from);
         let latest_finished = [last_sampled_run.as_ref(), last_full_run.as_ref()]
             .into_iter()
             .flatten()
@@ -707,8 +699,8 @@ impl FeatureIntegrityPort for FeatureIntegrityService {
         let items = page
             .items
             .into_iter()
-            .map(Self::run_view)
-            .collect::<QuantResult<Vec<_>>>()?;
+            .map(FeatureParityRunView::from)
+            .collect();
         Ok(Paginated::new(items, page.total, page.page, page.size))
     }
 
@@ -882,7 +874,7 @@ impl QueuedFullRunArgs {
             matched_count: 0,
             mismatched_count: 0,
             pending_materialization_count: 0,
-            feature_contract_hash: Some(self.feature_contract_hash),
+            feature_contract_hash: self.feature_contract_hash,
             transform_hash: None,
             failure_code: None,
             failure_detail: None,

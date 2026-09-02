@@ -53,6 +53,12 @@ pub trait StrategyPositionLotRepository: Send + Sync {
     /// All open (`Open`/`Closing`) lots — the exit monitor's scan source.
     async fn find_open_lots(&self) -> Result<Vec<StrategyPositionLot>, StorageError>;
 
+    /// All open lots owned by one immutable execution account.
+    async fn find_account_open_lots(
+        &self,
+        execution_account_id: &ExecutionAccountId,
+    ) -> Result<Vec<StrategyPositionLot>, StorageError>;
+
     /// All lots for a token (per-token aggregate view; sum at the call site).
     async fn find_lots_by_token(
         &self,

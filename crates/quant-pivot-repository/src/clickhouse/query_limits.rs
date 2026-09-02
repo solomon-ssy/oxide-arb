@@ -24,8 +24,15 @@ pub const REPORT_FUNNEL_BETWEEN: ClickHouseQueryLimits = ClickHouseQueryLimits::
 );
 pub const ENTRY_EVALUATION_LATEST: ClickHouseQueryLimits =
     ClickHouseQueryLimits::new("ch.repository.entry_evaluation_latest.v1", 1, 64 * KIB);
-pub const CRYPTO_REPORT_AT: ClickHouseQueryLimits =
-    ClickHouseQueryLimits::new("ch.repository.crypto_report_at.v1", 1, 64 * KIB);
+pub const SIGNAL_CANDIDATES_BETWEEN: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.signal_candidates_between.v1",
+    ONLINE_ROWS,
+    128 * MIB,
+);
+/// Latest source-order group may contain multiple hashes only to surface
+/// source equivocation. More than this bounded set fails via result overflow.
+pub const CRYPTO_REPORT_FRONTIER: ClickHouseQueryLimits =
+    ClickHouseQueryLimits::new("ch.repository.crypto_report_frontier.v1", 16, MIB);
 pub const CRYPTO_REPORTS_BETWEEN: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
     "ch.repository.crypto_reports_between.v1",
     RESEARCH_ROWS,
@@ -179,3 +186,13 @@ pub const REPORT_FUNNEL_VERIFY: ClickHouseQueryLimits = ClickHouseQueryLimits::n
     1_000_000,
     512 * MIB,
 );
+
+#[cfg(test)]
+mod tests {
+    use super::CRYPTO_REPORT_FRONTIER;
+
+    #[test]
+    fn crypto_frontier_is_bounded() {
+        assert_eq!(CRYPTO_REPORT_FRONTIER.max_result_rows(), 16);
+    }
+}

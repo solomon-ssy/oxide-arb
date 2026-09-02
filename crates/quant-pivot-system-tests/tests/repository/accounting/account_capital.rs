@@ -10,6 +10,7 @@ use quant_pivot_models::{
     domain::{
         api::OperationLogQuery,
         governance::{NewOperationLog, RuntimeControlUpdate},
+        order::PolymarketOrderRules,
         patch::{NullablePatch, Patch},
         quant::{
             AppendReconciliationEvidence, ExecutionOrderPatch, NewAccountSnapshot,
@@ -22,7 +23,7 @@ use quant_pivot_models::{
         quant_report_fact_delivery::Entity,
     },
     enums::{
-        common::{MarketCategory, OrderType, Side},
+        common::{MarketCategory, OrderType, Side, TickSize},
         execution::{
             CapitalAllocationState, ExecutionOrderPhase, KillSwitchState, OrderTypeKind,
             ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus,
@@ -72,8 +73,8 @@ use quant_pivot_system_tests::{
         catalog_fixtures::{make_event, make_market},
         execution_pg_seed,
         execution_pg_seed::{
-            ExecutionTxnIds, ReportBuildOptions, SharedDemoInfra, build_custom_report_transaction,
-            fixture_profile_ref, prepared_order,
+            ExecutionTxnIds, PreparedOrderFixture, ReportBuildOptions, SharedDemoInfra,
+            build_custom_report_transaction, fixture_profile_ref,
         },
         policy_fixtures::bootstrap_default_policy_bundle,
         report_lifecycle_seed::{persist_and_publish_report, persist_prepared_report},
@@ -615,15 +616,24 @@ async fn create_submit_execution_order(
             price: Price::new(dec!(0.6)),
             shares: Shares::new(dec!(100)),
             cost_usd: Usd::new(dec!(60)),
-            prepared_order_json: prepared_order(
-                TokenId::new("token-1"),
-                Side::Buy,
-                OrderType::Gtc,
-                VenueOrderAmount::Shares(Shares::new(dec!(100))),
-                Usd::ZERO,
-                Shares::new(dec!(100)),
-                Price::new(dec!(0.6)),
-            ),
+            prepared_order_json: PreparedOrderFixture {
+                market_id: MarketId::new(ids.market.clone()),
+                token_id: TokenId::new("token-1"),
+                side: Side::Buy,
+                order_type: OrderType::Gtc,
+                venue_amount: VenueOrderAmount::Shares(Shares::new(dec!(100))),
+                expected_fee: Usd::ZERO,
+                expected_filled_shares: Shares::new(dec!(100)),
+                limit_price: Price::new(dec!(0.6)),
+                order_rules: PolymarketOrderRules::new(TickSize::Hundredth, Shares::ONE)
+                    .expect("fixture order rules"),
+                book_hash: content_hash('b'),
+                clob_market_info_payload_hash: content_hash('c'),
+                prepared_at: Utc::now(),
+                valid_until: Utc::now() + Duration::hours(1),
+            }
+            .build()
+            .expect("canonical entry fixture order"),
             venue_order_id: None,
             venue_status: None,
             state: ExecutionOrderState::Planned,

@@ -7,7 +7,6 @@ expression: revoked_report()
   "report_run_id": "82ac65c4-f7b1-5195-a670-7378216815d6",
   "report_kind": "top_n",
   "decision_at": "2023-11-14T22:11:20Z",
-  "runtime_mode": "report_only",
   "top_n": 20,
   "status": "revoked",
   "account_source": "polymarket",
@@ -95,9 +94,9 @@ expression: revoked_report()
     },
     "top_rejection_reasons": [],
     "execution_eligibility_summary": {
-      "eligible_report_only": 2,
-      "eligible_semi_auto": 0,
-      "eligible_auto_execution": 0
+      "analysis_only": 2,
+      "operator_approval": 0,
+      "policy_automatic": 0
     },
     "empty_reason": null,
     "warnings": [

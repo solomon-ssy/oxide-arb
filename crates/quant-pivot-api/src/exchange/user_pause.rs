@@ -268,7 +268,7 @@ impl AlloyUserPauseReader {
         let effective_block = state
             .current_block
             .checked_add(state.interval_blocks)
-            .ok_or(UserPauseError::Overflow {
+            .ok_or_else(|| UserPauseError::Overflow {
                 field: "effectivePauseBlock",
                 value: U256::from(state.current_block) + U256::from(state.interval_blocks),
             })?;

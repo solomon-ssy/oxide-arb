@@ -16,6 +16,7 @@ use std::{
 };
 
 use quant_pivot_error::QuantError;
+use quant_pivot_models::config::CLICKHOUSE_DURABLE_SHUTDOWN_STAGE_SECS;
 use strum::IntoStaticStr;
 use tokio::{task::AbortHandle, time::MissedTickBehavior};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -43,11 +44,15 @@ pub enum ShutdownStage {
     Audit = 6,
     Analytics = 7,
     Persistence = 8,
-    DbClose = 9,
+    /// Drains the bounded `CoreEvent` bus after every event producer has stopped.
+    EventFanout = 9,
+    /// Drains fan-out commands before closing the remaining WebSocket sessions.
+    SessionFanout = 10,
+    DbClose = 11,
 }
 
 impl ShutdownStage {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 12;
 
     pub const ALL: [Self; Self::COUNT] = [
         Self::WsIngress,
@@ -59,6 +64,8 @@ impl ShutdownStage {
         Self::Audit,
         Self::Analytics,
         Self::Persistence,
+        Self::EventFanout,
+        Self::SessionFanout,
         Self::DbClose,
     ];
 
@@ -82,8 +89,8 @@ impl ShutdownStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum TaskKind {
-    /// HTTP/WebSocket server + broadcaster — outward-facing request ingress,
-    /// drained first so the system stops accepting requests before detection.
+    /// HTTP/WebSocket request ingress, drained first so the system stops
+    /// accepting outward-facing work before internal producers wind down.
     ApiIngress,
     WsIngress,
     CatalogSync,
@@ -99,6 +106,10 @@ pub enum TaskKind {
     ReportScheduler,
     /// Durable async research-job worker (dataset build / model train / backtest).
     ResearchJob,
+    /// Sole consumer of the bounded cross-subsystem runtime-event bus.
+    EventFanout,
+    /// Sole writer for WebSocket session and subscription state.
+    SessionFanout,
 }
 
 impl TaskKind {
@@ -114,6 +125,8 @@ impl TaskKind {
             Self::Audit => ShutdownStage::Audit,
             Self::AnalyticsWriter | Self::ResearchJob => ShutdownStage::Analytics,
             Self::PositionPersistence => ShutdownStage::Persistence,
+            Self::EventFanout => ShutdownStage::EventFanout,
+            Self::SessionFanout => ShutdownStage::SessionFanout,
         }
     }
 
@@ -150,7 +163,24 @@ impl ShutdownBudget {
 
     #[must_use]
     pub const fn execution() -> Self {
-        Self::from_secs([5, 10, 5, 2, 5, 20, 5, 5, 5, 3])
+        // WsIngress stops durable Crypto producers and crosses their explicit
+        // FIFO flush barrier. Analytics later drains the shared writer itself.
+        // Both budgets therefore consume the same validated ClickHouse ACK
+        // ceiling rather than an unrelated lifecycle literal.
+        Self::from_secs([
+            CLICKHOUSE_DURABLE_SHUTDOWN_STAGE_SECS,
+            10,
+            5,
+            2,
+            5,
+            20,
+            5,
+            CLICKHOUSE_DURABLE_SHUTDOWN_STAGE_SECS,
+            5,
+            3,
+            3,
+            3,
+        ])
     }
 
     #[must_use]
@@ -656,6 +686,20 @@ mod tests {
         assert_eq!(TaskKind::AnalyticsWriter.as_str(), "analytics_writer");
     }
 
+    #[test]
+    fn fanout_follows_producers() {
+        let research = TaskId::ResearchJobWorker.kind().shutdown_stage();
+        let persistence = TaskId::RiskStatePersist.kind().shutdown_stage();
+        let feedback = TaskId::FeedbackOutboxWorker.kind().shutdown_stage();
+        let broadcaster = TaskId::WsBroadcaster.kind().shutdown_stage();
+        let hub = TaskId::SessionHub.kind().shutdown_stage();
+
+        assert!(research.index() < broadcaster.index());
+        assert!(persistence.index() < broadcaster.index());
+        assert!(feedback.index() < hub.index());
+        assert!(broadcaster.index() < hub.index());
+    }
+
     #[tokio::test]
     async fn stage_order_is_respected() {
         let root = CancellationToken::new();
@@ -689,6 +733,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn policy_drain_precedes_research() {
+        let mut registry = TaskRegistry::new(CancellationToken::new());
+        let publication_stopped = Arc::new(AtomicBool::new(false));
+        let research_observed_stop = Arc::new(AtomicBool::new(false));
+        let policy_stopped = Arc::clone(&publication_stopped);
+        registry.spawn(TaskId::PolicyBundleReconciler, move |token| async move {
+            token.cancelled().await;
+            policy_stopped.store(true, Ordering::Release);
+        });
+        let observed_stop = Arc::clone(&research_observed_stop);
+        registry.spawn(TaskId::ResearchJobWorker, move |token| async move {
+            token.cancelled().await;
+            observed_stop.store(
+                publication_stopped.load(Ordering::Acquire),
+                Ordering::Release,
+            );
+        });
+
+        assert!(
+            registry
+                .drain(ShutdownBudget::tick_fixture())
+                .await
+                .is_none()
+        );
+        assert!(research_observed_stop.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
     async fn task_id_resolves_name() {
         assert_eq!(TaskId::RiskAuditBatch.kind(), TaskKind::Audit);
         assert_eq!(TaskId::RiskAuditBatch.static_name(), "risk-audit-batch");
@@ -713,6 +785,9 @@ mod tests {
             budget.stage(ShutdownStage::Execution),
             Duration::from_secs(20)
         );
+        let durable_budget = Duration::from_secs(CLICKHOUSE_DURABLE_SHUTDOWN_STAGE_SECS);
+        assert_eq!(budget.stage(ShutdownStage::WsIngress), durable_budget);
+        assert_eq!(budget.stage(ShutdownStage::Analytics), durable_budget);
     }
 
     #[tokio::test]

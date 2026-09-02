@@ -4,8 +4,8 @@
 > **Deployment contract**
 > - `fresh_boot_assumption`: 项目尚未正式生产上线；Phase 12 只交付唯一 fresh-boot schema。
 > - `schema_data_version_impact`: 不迁移开发/测试旧数据，不保留旧 enum、表、wire、parser、双读或双写。
-> - `pre_deployment_behavior`: 允许 clean break 和 bootstrap schema squash；任何真实数据销毁仍需单独授权。
-> - `post_deployment_behavior`: 首次生产部署后恢复正常前向 migration、备份、验证和显式回滚纪律。
+> - `pre_deployment_behavior`: 允许 clean break 和唯一 fresh terminal bootstrap rewrite；任何真实数据销毁仍需单独授权。
+> - `post_deployment_behavior`: 本 Phase 只交付唯一 fresh terminal bootstrap；不设计 upgrade/downgrade 或 data/schema/version migration。
 > - `rollback_and_data_verification`: 实施阶段只在 disposable PostgreSQL/ClickHouse 环境验证 fresh install。
 
 > 状态：**IMPLEMENTATION IN PROGRESS**
@@ -24,7 +24,7 @@ facts -> report/recommendation
       -> governed system order -> CLOB observation -> finalized account chain execution
       -> strategy position lot -> actual execution outcome
 
-recommendation -> frozen policy replay at profile horizon
+recommendation -> frozen policy replay at profile horizon or PIT-visible terminal
                -> recommendation economic outcome
                -> route economic health
 
@@ -34,7 +34,7 @@ break-glass UI exit -> user pause -> finalized replay -> exact reconciliation ->
 
 ## 2. 阅读和恢复顺序
 
-1. [`12.0-execution-authority-account-recovery-fast-feedback.md`](12.0-execution-authority-account-recovery-fast-feedback.md) — 唯一设计合同、删除/合并/迁移 inventory、接口和验收标准。
+1. [`12.0-execution-authority-account-recovery-fast-feedback.md`](12.0-execution-authority-account-recovery-fast-feedback.md) — 唯一设计合同、删除/合并/替换 inventory、接口和验收标准。
 2. [`12.1-implementation-ledger.md`](12.1-implementation-ledger.md) — 唯一执行状态、Todo、证据、决策、阻断和中断恢复入口。
 3. 父索引 [`../README.md`](../README.md) — 全系统阅读顺序与被 Phase 12 取代的旧语义。
 
@@ -54,4 +54,8 @@ break-glass UI exit -> user pause -> finalized replay -> exact reconciliation ->
 
 Phase 12 只有在 12.1 ledger 零 `TODO/BLOCKED/IN_PROGRESS`、设计 hash fixed point、旧 runtime-mode 语义在活跃代码/schema/UI/文档中完全消失、fresh stacks 与全部工程/故障注入门禁通过后，才允许声明 Implementation Closure。
 
-Implementation Closure 不等于 `PolicyAutomatic` Operational Activation；后者仍需真实账户、真实数据、terminal 模型/策略门禁、MTM coverage、健康 Route 和独立受治理激活。
+Implementation Closure 的业务闭环证据只来自 production-composed binary 在 owned disposable
+infrastructure/loopback rejectors 上的 feedback rehearsal，必须证明 runtime authority 与
+money-path counts 不变且 venue/chain/capital/relayer writes 全为零。Implementation Closure 不等于
+`PolicyAutomatic` Operational Activation；后者仍需真实账户、真实数据、terminal 模型/策略门禁、
+MTM coverage、健康 Route 与对 exact money-moving scope 的独立受治理授权。

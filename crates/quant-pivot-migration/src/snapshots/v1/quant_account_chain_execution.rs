@@ -66,6 +66,9 @@ pub struct Model {
         HasOne<super::quant_account_execution_association::Entity>,
     #[sea_orm(has_many)]
     pub quant_account_recovery_incidents: HasMany<super::quant_account_recovery_incident::Entity>,
+    #[sea_orm(has_one)]
+    pub quant_account_clean_funder_blocker:
+        HasOne<super::quant_account_clean_funder_blocker::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

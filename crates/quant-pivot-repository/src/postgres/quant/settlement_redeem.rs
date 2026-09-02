@@ -24,8 +24,9 @@ use quant_pivot_models::{
                 RecordEoaSettlementBroadcast, RecordRelayerSettlementAcceptance,
                 RecordRelayerSettlementChainHash, RequireSettlementReconciliation,
                 RevokeSettlementAuthorization, ScheduleSettlementRetry, ScheduleSettlementWork,
-                SettlementChainSubmissionInfo, SettlementRedeemInfo, SettlementRedeemLotInfo,
-                SettlementSubmissionOutcome, SettlementWorkClaim, StageSettlementAuthorization,
+                SettlementChainSubmissionInfo, SettlementRecoveryBlocker, SettlementRedeemInfo,
+                SettlementRedeemLotInfo, SettlementSubmissionOutcome, SettlementWorkClaim,
+                StageSettlementAuthorization,
             },
             settlement_inventory::{
                 MarkSettlementInventoryAbsent, NewSettlementInventoryLot,
@@ -740,8 +741,9 @@ fn validate_frozen_case(
         || redeem.resolution_outcome != candidate.resolution_outcome
         || redeem.resolved_at != candidate.resolved_at
     {
-        return Err(StorageError::invariant_violation(
-            Some(QUANT_SETTLEMENT_REDEEM),
+        return Err(StorageError::state_conflict(
+            QUANT_SETTLEMENT_REDEEM,
+            Some(redeem.settlement_redeem_id),
             "discovered case identity diverges from the durable resolved market",
         ));
     }
@@ -755,8 +757,9 @@ fn validate_frozen_case(
         || redeem.inventory_digest != frozen.inventory_digest
         || redeem.contributor_lots_digest != frozen.contributor_lots_digest
     {
-        return Err(StorageError::invariant_violation(
-            Some(QUANT_SETTLEMENT_REDEEM),
+        return Err(StorageError::state_conflict(
+            QUANT_SETTLEMENT_REDEEM,
+            Some(redeem.settlement_redeem_id),
             "discovered case policy or digest diverges from the canonical inventory",
         ));
     }
@@ -1763,6 +1766,32 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         execution_account_id: &ExecutionAccountId,
     ) -> Result<u64, StorageError> {
         Self::unsettled_execution_order_count(&self.db, market_id, *execution_account_id).await
+    }
+
+    async fn recovery_blockers(
+        &self,
+        execution_account_id: &ExecutionAccountId,
+    ) -> Result<Vec<SettlementRecoveryBlocker>, StorageError> {
+        let rows = Entity::find()
+            .filter(Column::ExecutionAccountId.eq(*execution_account_id))
+            .filter(Column::State.is_not_in([
+                SettlementCaseState::Confirmed,
+                SettlementCaseState::NotRequired,
+            ]))
+            .order_by_asc(Column::SettlementRedeemId)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| SettlementRecoveryBlocker {
+                settlement_redeem_id: row.settlement_redeem_id,
+                state: row.state,
+                reconciliation_state: row.reconciliation_state,
+                inventory_digest: row.inventory_digest,
+                updated_at: row.updated_at,
+            })
+            .collect())
     }
 
     async fn claim_next_recovery(

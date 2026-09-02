@@ -1154,6 +1154,18 @@ pub struct ReportScheduleGapId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RecommendationId(Uuid);
 
+/// Immutable Route economic-health assessment identifier.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RouteEconomicHealthId(Uuid);
+
+impl RouteEconomicHealthId {
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f222);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
+
 /// Stable identity for one immutable finalized resolution observation.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResolutionObservationId(Uuid);
@@ -1212,11 +1224,23 @@ impl AccountChainExecutionId {
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AccountRecoveryIncidentId(Uuid);
 
+/// One immutable account-recovery assessment manifest.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AccountRecoveryManifestId(Uuid);
+
+impl AccountRecoveryManifestId {
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x1d6f_732a_6f6b_443d_926a_2df0_310a_6bf1);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
+
 /// One durable per-exchange account pause submission.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AccountPauseSubmissionId(Uuid);
+pub struct AccountPauseOperationId(Uuid);
 
-impl AccountPauseSubmissionId {
+impl AccountPauseOperationId {
     #[must_use]
     pub fn from_content_hash(content_hash: &ContentHash) -> Self {
         const NAMESPACE: Uuid = Uuid::from_u128(0x62a9_4d77_63bd_4c88_8daf_ae1f_552c_3e10);
@@ -1288,6 +1312,20 @@ pub struct SettlementRedeemLotId(Uuid);
 /// originating intent and lets the per-token aggregate stay a query view.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StrategyPositionLotId(Uuid);
+
+impl StrategyPositionLotId {
+    #[must_use]
+    pub fn from_recovery_execution(
+        incident_id: AccountRecoveryIncidentId,
+        execution_id: AccountChainExecutionId,
+    ) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x9330_e37f_479d_451e_846f_2cb2_11a9_4f0d);
+        let mut identity = [0_u8; 32];
+        identity[..16].copy_from_slice(incident_id.as_uuid().as_bytes());
+        identity[16..].copy_from_slice(execution_id.as_uuid().as_bytes());
+        Self::new(Uuid::new_v5(&NAMESPACE, &identity))
+    }
+}
 
 /// Execution-order reconciliation record identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]

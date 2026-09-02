@@ -128,6 +128,24 @@ impl DecisionBoundary {
         Ok(self)
     }
 
+    /// Tighten an already-registered source cutoff to an observed immutable
+    /// source watermark. The watermark can never widen the globally visible
+    /// boundary, so binding a lagging finalized source remains fail closed.
+    pub fn with_source_watermark(
+        mut self,
+        source: DecisionSource,
+        watermark: DateTime<Utc>,
+    ) -> QuantResult<Self> {
+        let cutoff = self.per_source_cutoffs.get_mut(&source).ok_or_else(|| {
+            QuantError::config(format!(
+                "decision source {source:?} has no registered cutoff to bind"
+            ))
+        })?;
+        *cutoff = (*cutoff).min(watermark);
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Frozen cutoff for `source`; sources without an additional lag use the
     /// global knowledge cutoff.
     #[must_use]
@@ -149,21 +167,16 @@ impl DecisionBoundary {
     pub fn rebased(&self, decision_at: DateTime<Utc>) -> QuantResult<Self> {
         let mut boundary = DecisionClock::new(self.knowledge_lag_secs).boundary(decision_at)?;
         for (source, cutoff) in &self.per_source_cutoffs {
-            let source_lag = self
-                .decision_at
-                .signed_duration_since(*cutoff)
-                .num_seconds();
-            if source_lag < 0 {
+            let source_lag = self.decision_at.signed_duration_since(*cutoff);
+            if source_lag < Duration::zero() {
                 return Err(QuantError::config(format!(
                     "source {source:?} cutoff is after the original decision"
                 )));
             }
-            boundary = boundary.with_source_cutoff(
-                *source,
-                u64::try_from(source_lag).map_err(|error| {
-                    QuantError::config(format!("source {source:?} lag is invalid: {error}"))
-                })?,
-            )?;
+            let rebased_cutoff = decision_at.checked_sub_signed(source_lag).ok_or_else(|| {
+                QuantError::config(format!("source {source:?} cutoff is outside chrono range"))
+            })?;
+            boundary.per_source_cutoffs.insert(*source, rebased_cutoff);
         }
         boundary.validate()?;
         Ok(boundary)
@@ -329,6 +342,49 @@ mod tests {
             decision_at - Duration::seconds(600)
         );
         assert_eq!(boundary.per_source_cutoffs().len(), 7);
+    }
+
+    #[test]
+    fn source_watermark_tightens_cutoff() {
+        let decision_at = Utc
+            .with_ymd_and_hms(2026, 7, 10, 12, 0, 0)
+            .single()
+            .expect("valid decision time")
+            + Duration::milliseconds(137);
+        let watermark = decision_at - Duration::milliseconds(24_500);
+        let boundary = DecisionClock::new(2)
+            .serving_boundary(decision_at, 300, 600)
+            .expect("serving boundary")
+            .with_source_watermark(DecisionSource::FinalizedExecution, watermark)
+            .expect("finalized-execution watermark");
+        let rebased = boundary
+            .rebased(decision_at + Duration::hours(1))
+            .expect("rebased boundary");
+
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::Book),
+            decision_at - Duration::seconds(2)
+        );
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::FinalizedExecution),
+            watermark
+        );
+        assert_eq!(
+            rebased.decision_at() - rebased.cutoff_for(DecisionSource::FinalizedExecution),
+            Duration::milliseconds(24_500)
+        );
+        assert!(
+            boundary
+                .with_source_watermark(DecisionSource::Catalog, decision_at)
+                .is_ok()
+        );
+        assert!(
+            DecisionClock::new(2)
+                .boundary(decision_at)
+                .expect("base boundary")
+                .with_source_watermark(DecisionSource::FinalizedExecution, watermark)
+                .is_err()
+        );
     }
 
     #[test]

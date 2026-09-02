@@ -790,10 +790,17 @@ impl ExchangeHistoryRepository for PgExchangeHistoryRepository {
             .ok_or_else(|| {
                 StorageError::not_found("quant_history_serving_head_seal", serving_head_seal_id)
             })?;
-        if seal.seal.seal_hash != seal_hash {
+        let derived_hash = seal.derive_hash().map_err(|error| {
+            StorageError::state_conflict(
+                "quant_history_seal",
+                Some(serving_head_seal_id),
+                format!("HistoryWindowInvalidated: cannot derive serving-head seal hash: {error}"),
+            )
+        })?;
+        if seal.seal.seal_hash != seal_hash || derived_hash != seal_hash {
             return Err(history_invalidated(
                 serving_head_seal_id,
-                "serving head seal hash changed",
+                "serving head seal hash does not match its immutable preimage",
             ));
         }
         validate_seal_chunks(

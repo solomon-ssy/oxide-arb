@@ -36,10 +36,10 @@ pub trait RecommendationReportRepository: Send + Sync {
         route_run_id: &ReportRouteRunId,
     ) -> Result<Option<ReportRouteRunInfo>, StorageError>;
 
-    /// Load every Route outcome for one global report in canonical Route order.
-    async fn list_route_runs(
+    /// Load Route outcomes for the requested report runs in canonical run/Route order.
+    async fn find_route_runs(
         &self,
-        report_id: &RecommendationReportId,
+        report_run_ids: &[ReportRunId],
     ) -> Result<Vec<ReportRouteRunInfo>, StorageError>;
 
     /// Resolve the unique report Route outcome that owns one live model run.
@@ -100,11 +100,13 @@ pub trait RecommendationReportRepository: Send + Sync {
     ) -> Result<Option<ReportFactDeliveryInfo>, StorageError>;
 
     /// Acknowledge post-verification side effects under the exact lease owner.
+    /// A terminal report transition may intentionally clear the lease first;
+    /// that race is returned as a typed claim loss rather than a storage error.
     async fn acknowledge_fact_announcement(
         &self,
         report_id: &RecommendationReportId,
         worker_id: WorkerId,
-    ) -> Result<ReportFactDeliveryInfo, StorageError>;
+    ) -> Result<FactDeliverySettlement<ReportFactDeliveryInfo>, StorageError>;
 
     /// Report produced by one exact report run. The schema enforces one-to-one identity.
     async fn find_by_report_run(

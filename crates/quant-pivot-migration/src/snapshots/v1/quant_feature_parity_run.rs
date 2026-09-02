@@ -26,8 +26,8 @@ pub struct Model {
     pub matched_count: i64,
     pub mismatched_count: i64,
     pub pending_materialization_count: i64,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub feature_contract_hash: Option<String>,
+    #[sea_orm(column_type = "Text")]
+    pub feature_contract_hash: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub transform_hash: Option<String>,
     pub failure_code: Option<String>,

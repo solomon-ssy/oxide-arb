@@ -281,7 +281,8 @@ jobs:
             --project=functional-chromium \
             --project=visual-desktop-dark \
             --project=visual-desktop-light \
-            --project=visual-mobile-dark 2>&1 |
+            --project=visual-mobile-dark \
+            --project=visual-tablet-dark 2>&1 |
             tee ../target/ci-evidence/protected-e2e-run-1.log
       - name: Repeat browser E2E on a fresh production stack
         working-directory: ui
@@ -294,7 +295,8 @@ jobs:
             --project=functional-chromium \
             --project=visual-desktop-dark \
             --project=visual-desktop-light \
-            --project=visual-mobile-dark 2>&1 |
+            --project=visual-mobile-dark \
+            --project=visual-tablet-dark 2>&1 |
             tee ../target/ci-evidence/protected-e2e-run-2.log
       - name: Compare fresh-boot release manifests
         working-directory: ui

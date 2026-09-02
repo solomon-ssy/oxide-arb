@@ -18,7 +18,7 @@ use rust_decimal::{
 };
 
 use super::{MonotoneMapping, ProbabilityCalibrator};
-use crate::model::apply_mapping;
+use crate::model::{CancellationProbe, apply_mapping};
 
 /// Minimum paired samples for a numerically meaningful 2-parameter fit.
 const MIN_SAMPLES: usize = 10;
@@ -28,6 +28,7 @@ const SIGMA: f64 = 1e-12;
 const STOPPING_GRAD: f64 = 1e-5;
 /// Backtracking halving steps: `2^-step_idx` reaches `MIN_STEP` well before 40.
 const MAX_BACKTRACK_STEPS: i32 = 40;
+const CANCELLATION_INTERVAL: usize = 1_024;
 
 /// Platt's Newton loop counts samples through an exact `u32` → `f64`
 /// conversion; larger splits are rejected instead of silently capped.
@@ -40,20 +41,23 @@ fn sample_count_as_f64(len: usize) -> QuantResult<f64> {
 
 /// Convert every calibration-split score to `f64`, failing closed (never a
 /// fabricated `0.0`) the moment any single score cannot round-trip.
-fn decimals_to_f64(scores: &[Decimal]) -> QuantResult<Vec<f64>> {
-    scores
-        .iter()
-        .map(|score| {
-            score.to_f64().ok_or_else(|| {
-                QuantError::from(ResearchError::DatasetBuild {
-                    detail: format!(
-                        "platt calibration score `{score}` cannot be represented as f64 — \
+fn decimals_to_f64(scores: &[Decimal], cancellation: &CancellationProbe) -> QuantResult<Vec<f64>> {
+    let mut converted = Vec::with_capacity(scores.len());
+    for (index, score) in scores.iter().enumerate() {
+        if index % CANCELLATION_INTERVAL == 0 {
+            cancellation.check("Platt score conversion")?;
+        }
+        converted.push(score.to_f64().ok_or_else(|| {
+            QuantError::from(ResearchError::DatasetBuild {
+                detail: format!(
+                    "platt calibration score `{score}` cannot be represented as f64 — \
                          rejecting the fit rather than silently substituting 0.0"
-                    ),
-                })
+                ),
             })
-        })
-        .collect()
+        })?);
+    }
+    cancellation.check("Platt score conversion completion")?;
+    Ok(converted)
 }
 
 /// Convert a fitted Platt parameter back to `Decimal`, failing closed (never
@@ -89,7 +93,13 @@ impl ProbabilityCalibrator for PlattCalibrator {
         CalibrationMethod::Platt
     }
 
-    fn fit(&self, scores: &[Decimal], outcomes: &[bool]) -> QuantResult<MonotoneMapping> {
+    fn fit(
+        &self,
+        scores: &[Decimal],
+        outcomes: &[bool],
+        cancellation: &CancellationProbe,
+    ) -> QuantResult<MonotoneMapping> {
+        cancellation.check("Platt fit start")?;
         if scores.len() != outcomes.len() || scores.len() < MIN_SAMPLES {
             return Err(QuantError::from(ResearchError::DatasetBuild {
                 detail: format!(
@@ -102,8 +112,9 @@ impl ProbabilityCalibrator for PlattCalibrator {
         // silent 0"): a score that cannot round-trip through `f64` must
         // reject the whole fit, not silently corrupt the Newton loop with a
         // fabricated `0.0`.
-        let scores_f64 = decimals_to_f64(scores)?;
-        let (param_a, param_b) = fit_platt(&scores_f64, outcomes)?;
+        let scores_f64 = decimals_to_f64(scores, cancellation)?;
+        let (param_a, param_b) = fit_platt(&scores_f64, outcomes, cancellation)?;
+        cancellation.check("Platt fit completion")?;
         Ok(MonotoneMapping::Platt {
             a: decimal_from_f64(param_a, "param_a")?,
             b: decimal_from_f64(param_b, "param_b")?,
@@ -117,7 +128,7 @@ impl ProbabilityCalibrator for PlattCalibrator {
 
 /// Evaluate the calibrated sigmoid `1 / (1 + exp(a*score + b))` at `score`,
 /// numerically stable for large `|a*score+b|`.
-pub fn sigmoid(a: Decimal, b: Decimal, score: Decimal) -> QuantResult<Decimal> {
+pub(super) fn sigmoid(a: Decimal, b: Decimal, score: Decimal) -> QuantResult<Decimal> {
     let strict_f64 = |value: Decimal, field: &'static str| {
         value
             .to_f64()
@@ -152,9 +163,19 @@ fn sigmoid_pair(linear_term: f64) -> (f64, f64) {
 }
 
 /// Lin–Lin–Weng Algorithm 1: Newton's method with backtracking line search.
-fn fit_platt(scores: &[f64], outcomes: &[bool]) -> QuantResult<(f64, f64)> {
+fn fit_platt(
+    scores: &[f64],
+    outcomes: &[bool],
+    cancellation: &CancellationProbe,
+) -> QuantResult<(f64, f64)> {
     let sample_len = scores.len();
-    let won_count = outcomes.iter().filter(|&&won| won).count();
+    let mut won_count = 0_usize;
+    for (index, &won) in outcomes.iter().enumerate() {
+        if index % CANCELLATION_INTERVAL == 0 {
+            cancellation.check("Platt outcome scan")?;
+        }
+        won_count += usize::from(won);
+    }
     let won_count_f64 = sample_count_as_f64(won_count)?;
     let total_count_f64 = sample_count_as_f64(sample_len)?;
     let lost_count_f64 = total_count_f64 - won_count_f64;
@@ -164,28 +185,33 @@ fn fit_platt(scores: &[f64], outcomes: &[bool]) -> QuantResult<(f64, f64)> {
         }));
     }
 
-    let targets: Vec<f64> = outcomes
-        .iter()
-        .map(|&won| {
-            if won {
-                prior_positive_target(won_count_f64)
-            } else {
-                prior_negative_target(lost_count_f64)
-            }
-        })
-        .collect();
+    let mut targets = Vec::with_capacity(outcomes.len());
+    for (index, &won) in outcomes.iter().enumerate() {
+        if index % CANCELLATION_INTERVAL == 0 {
+            cancellation.check("Platt target construction")?;
+        }
+        targets.push(if won {
+            prior_positive_target(won_count_f64)
+        } else {
+            prior_negative_target(lost_count_f64)
+        });
+    }
 
     let mut param_a = 0.0_f64;
     let mut param_b = ((lost_count_f64 + 1.0) / (won_count_f64 + 1.0)).ln();
-    let mut neg_ll = neg_log_likelihood(scores, &targets, param_a, param_b);
+    let mut neg_ll = neg_log_likelihood(scores, &targets, param_a, param_b, cancellation)?;
 
-    for _ in 0..MAX_ITERATIONS {
+    for iteration in 0..MAX_ITERATIONS {
+        cancellation.check("Platt Newton iteration")?;
         let mut hess_aa = SIGMA;
         let mut hess_bb = SIGMA;
         let mut hess_cross = 0.0_f64;
         let mut grad_a = 0.0_f64;
         let mut grad_b = 0.0_f64;
         for idx in 0..sample_len {
+            if idx % CANCELLATION_INTERVAL == 0 {
+                cancellation.check("Platt Hessian scan")?;
+            }
             let linear_term = param_a.mul_add(scores[idx], param_b);
             let (sigmoid_prob, sigmoid_complement) = sigmoid_pair(linear_term);
             let hess_term = sigmoid_prob * sigmoid_complement;
@@ -215,7 +241,8 @@ fn fit_platt(scores: &[f64], outcomes: &[bool]) -> QuantResult<(f64, f64)> {
             }
             let trial_a = step.mul_add(step_a, param_a);
             let trial_b = step.mul_add(step_b, param_b);
-            let trial_neg_ll = neg_log_likelihood(scores, &targets, trial_a, trial_b);
+            let trial_neg_ll =
+                neg_log_likelihood(scores, &targets, trial_a, trial_b, cancellation)?;
             if trial_neg_ll < 0.0001_f64.mul_add(step * grad_dot_step, neg_ll) {
                 param_a = trial_a;
                 param_b = trial_b;
@@ -227,15 +254,28 @@ fn fit_platt(scores: &[f64], outcomes: &[bool]) -> QuantResult<(f64, f64)> {
         if !updated {
             break;
         }
+        if iteration + 1 == MAX_ITERATIONS {
+            cancellation.check("Platt iteration limit")?;
+        }
     }
+    cancellation.check("Platt optimization completion")?;
     Ok((param_a, param_b))
 }
 
 /// Negative log-likelihood at `(param_a, param_b)`, numerically stable for either
 /// sign of `linear_term` (Lin–Lin–Weng eq. 4).
-fn neg_log_likelihood(scores: &[f64], targets: &[f64], param_a: f64, param_b: f64) -> f64 {
+fn neg_log_likelihood(
+    scores: &[f64],
+    targets: &[f64],
+    param_a: f64,
+    param_b: f64,
+    cancellation: &CancellationProbe,
+) -> QuantResult<f64> {
     let mut total = 0.0_f64;
     for idx in 0..scores.len() {
+        if idx % CANCELLATION_INTERVAL == 0 {
+            cancellation.check("Platt likelihood scan")?;
+        }
         let linear_term = param_a.mul_add(scores[idx], param_b);
         total += if linear_term >= 0.0 {
             targets[idx].mul_add(linear_term, (-linear_term).exp().ln_1p())
@@ -243,22 +283,34 @@ fn neg_log_likelihood(scores: &[f64], targets: &[f64], param_a: f64, param_b: f6
             (targets[idx] - 1.0).mul_add(linear_term, linear_term.exp().ln_1p())
         };
     }
-    total
+    Ok(total)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     use super::{PlattCalibrator, fit_platt};
-    use crate::model::calibrator::{MonotoneMapping, ProbabilityCalibrator};
+    use crate::model::{
+        CancellationProbe,
+        calibrator::{MonotoneMapping, ProbabilityCalibrator},
+    };
 
     #[test]
     fn fit_rejects_without_classes() {
         let scores = vec![dec!(0.1); 20];
         let outcomes = vec![true; 20];
-        assert!(PlattCalibrator.fit(&scores, &outcomes).is_err());
+        assert!(
+            PlattCalibrator
+                .fit(&scores, &outcomes, &CancellationProbe::default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -271,7 +323,8 @@ mod tests {
             scores.push(score);
             outcomes.push(score > 0.0);
         }
-        let (param_a, param_b) = fit_platt(&scores, &outcomes).expect("fit");
+        let (param_a, param_b) =
+            fit_platt(&scores, &outcomes, &CancellationProbe::default()).expect("fit");
         // P(win) increasing in score requires param_a < 0 (since P = 1/(1+exp(a*f+b))).
         // The magnitude check (not just the sign) guards against a degenerate fit that
         // "converges" to ~0 after a single corrupted Newton step — the exact failure
@@ -298,7 +351,8 @@ mod tests {
             let base = score > 0.0;
             outcomes.push(if i % 6 == 0 { !base } else { base });
         }
-        let (param_a, param_b) = fit_platt(&scores, &outcomes).expect("fit");
+        let (param_a, param_b) =
+            fit_platt(&scores, &outcomes, &CancellationProbe::default()).expect("fit");
         let golden_a = -1.026_860_098_423_914;
         let golden_b = -0.051_343_004_921_195_81;
         assert!(
@@ -321,7 +375,9 @@ mod tests {
             scores.push(score);
             outcomes.push(i >= 50);
         }
-        let mapping = calibrator.fit(&scores, &outcomes).expect("fit");
+        let mapping = calibrator
+            .fit(&scores, &outcomes, &CancellationProbe::default())
+            .expect("fit");
         let MonotoneMapping::Platt { .. } = &mapping else {
             panic!("expected platt mapping");
         };
@@ -336,5 +392,23 @@ mod tests {
             .expect("calibrate high");
         assert!(low.inner() < mid.inner());
         assert!(mid.inner() < high.inner());
+    }
+
+    #[test]
+    fn fit_observes_cancellation() {
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&checks);
+        let cancellation =
+            CancellationProbe::new(move || observed.fetch_add(1, Ordering::Relaxed) >= 8);
+        let scores = (0..100_000)
+            .map(|index| Decimal::from(index) / Decimal::from(100_000))
+            .collect::<Vec<_>>();
+        let outcomes = (0..100_000).map(|index| index % 3 != 0).collect::<Vec<_>>();
+        let result = PlattCalibrator.fit(&scores, &outcomes, &cancellation);
+        assert!(
+            result.is_err(),
+            "running Platt fit must observe cancellation"
+        );
+        assert!(checks.load(Ordering::Relaxed) > 8);
     }
 }

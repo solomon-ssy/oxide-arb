@@ -232,10 +232,9 @@ impl FeatureWindowProvider {
             .await?;
         let mut grouped: HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>> = HashMap::new();
         for row in rows {
-            let report = CryptoPriceReport::from_clickhouse_row(row).ok_or_else(|| {
+            let report = CryptoPriceReport::try_from_clickhouse_row(&row).map_err(|error| {
                 ResearchError::PitResolution {
-                    detail: "crypto price report contains an invalid persisted timestamp"
-                        .to_owned(),
+                    detail: format!("persisted Crypto price report is invalid: {error}"),
                 }
             })?;
             if report.event_time < from

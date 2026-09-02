@@ -218,9 +218,9 @@ decimal_newtype!(
 /// this type validates every untrusted boundary. A corrupt database value or
 /// wire payload outside the closed interval `0..=1` is rejected rather than
 /// becoming a training label. Split resolutions such as `0.5` are preserved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
 #[serde(transparent)]
-pub struct PayoutRatio(Decimal);
+pub struct PayoutRatio(#[schemars(with = "String")] Decimal);
 
 impl PayoutRatio {
     pub const ZERO: Self = Self(Decimal::ZERO);

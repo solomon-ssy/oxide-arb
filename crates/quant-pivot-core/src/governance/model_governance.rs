@@ -85,7 +85,9 @@ use crate::{
     runtime_config::DecisionPolicyStore,
     service::{
         frozen_model_parity::FrozenModelParityService,
-        model_serving_preimage::{ModelServingPreimageService, VerifiedModelServingPreimage},
+        model_serving_preimage::{
+            ModelPreimageReadContext, ModelServingPreimageService, VerifiedModelServingPreimage,
+        },
         training_dataset,
     },
 };
@@ -571,10 +573,12 @@ impl ModelGovernancePort for ModelGovernanceService {
         actor: GovernanceActor,
     ) -> QuantResult<ModelVersionInfo> {
         let version = self.find_version(model_version_id).await?;
-        let source = self.deps.serving_preimages.load(&version).await?;
+        let context = ModelPreimageReadContext::default();
+        let source = self.deps.serving_preimages.load(&version, &context).await?;
         let calibrator = self
-            .load_score_calibrator(&command.calibrator_ref, &source)
+            .load_score_calibrator(&command.calibrator_ref, &source, &context)
             .await?;
+        drop(context);
         let calibrated = self
             .store_calibrated_artifact(&source, &command, calibrator.content_hash())
             .await?;
@@ -587,6 +591,7 @@ impl ModelGovernanceService {
         &self,
         calibrator_ref: &CalibrationArtifactId,
         source: &VerifiedModelServingPreimage,
+        context: &ModelPreimageReadContext<'_>,
     ) -> QuantResult<VerifiedModelScoreCalibration> {
         let info = self
             .deps
@@ -599,7 +604,7 @@ impl ModelGovernanceService {
             })?;
         self.deps
             .serving_preimages
-            .verify_calibrator(source, &info)
+            .verify_calibrator(source, &info, context)
             .await
     }
 
@@ -803,7 +808,9 @@ impl ModelGovernanceService {
             sell_thresholds_from_config(&config.profile_artifacts.research_method.model_promotion);
         let model_family = Self::model_family_for_version(version);
 
-        let serving_preimage = self.deps.serving_preimages.load(version).await?;
+        let context = ModelPreimageReadContext::default();
+        let serving_preimage = self.deps.serving_preimages.load(version, &context).await?;
+        drop(context);
         let validation_thresholds = validation_thresholds_from_config(
             &serving_preimage
                 .policy_snapshot()

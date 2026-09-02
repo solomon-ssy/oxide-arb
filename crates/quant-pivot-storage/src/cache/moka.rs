@@ -65,6 +65,13 @@ impl CacheBackend for MokaBackend {
         Ok(true)
     }
 
+    async fn delete_many(&self, keys: &[&str]) -> Result<usize, StorageError> {
+        for key in keys {
+            self.cache.remove(*key).await;
+        }
+        Ok(keys.len())
+    }
+
     async fn exists(&self, key: &str) -> Result<bool, StorageError> {
         Ok(self.cache.contains_key(key))
     }
@@ -90,5 +97,34 @@ impl CacheBackend for MokaBackend {
                 .await;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{CacheBackend, MokaBackend};
+
+    #[tokio::test]
+    async fn batch_delete_removes_keys() {
+        let cache = MokaBackend::new(16);
+        cache
+            .set("first", b"1", Duration::from_mins(1))
+            .await
+            .expect("seed first cache key");
+        cache
+            .set("second", b"2", Duration::from_mins(1))
+            .await
+            .expect("seed second cache key");
+
+        let removed = cache
+            .delete_many(&["first", "second"])
+            .await
+            .expect("delete cache batch");
+
+        assert_eq!(removed, 2);
+        assert!(!cache.exists("first").await.expect("inspect first key"));
+        assert!(!cache.exists("second").await.expect("inspect second key"));
     }
 }

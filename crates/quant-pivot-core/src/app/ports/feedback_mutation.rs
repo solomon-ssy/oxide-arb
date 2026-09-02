@@ -64,7 +64,7 @@ use crate::{
         feedback_coordinator::{FeedbackCoordinatorWake, FeedbackTimeline},
         model_route_governance::ModelRouteGovernanceService,
         model_serving_generation::ModelServingGenerationStore,
-        model_serving_preimage::ModelServingPreimageService,
+        model_serving_preimage::{ModelPreimageReadContext, ModelServingPreimageService},
         promotion_preflight::{PromotionPreflightDraft, PromotionPreflightService},
     },
 };
@@ -509,7 +509,9 @@ impl CoreFeedbackMutationPort {
             })?;
         let champion_identity = serving.published_champion_identity()?;
         let champion = serving.active_version();
-        let preimage = self.deps.serving_preimages.load(champion).await?;
+        let context = ModelPreimageReadContext::default();
+        let preimage = self.deps.serving_preimages.load(champion, &context).await?;
+        drop(context);
         if preimage.profile() != profile
             || champion.profile_ref != profile.profile_ref
             || champion.category_scope != route.category()

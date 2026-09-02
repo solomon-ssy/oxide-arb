@@ -3,14 +3,19 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, Utc};
+use quant_pivot_core::service::feedback_cohort::evaluate_feedback_cohort;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{MarketResolutionFactInput, MarketResolutionRow},
     domain::quant::{
-        ExecutionAttemptReconciliationResult, ExecutionRollupReconciliationResult,
-        FeedbackCohortCandidate, FeedbackCohortCursor, FeedbackCohortPage, FeedbackCohortPageQuery,
-        FeedbackCohortSnapshot, FeedbackCohortWindow, InsertResolutionOutcomeResult,
-        NewReconciliation, RecommendationExecutionRollupInfo,
+        EconomicExitEvidenceKind, ExecutionAttemptReconciliationResult,
+        ExecutionRollupDeferredReason, ExecutionRollupReconciliationResult,
+        FeedbackCohortCandidate, FeedbackCohortCursor, FeedbackCohortDecision, FeedbackCohortPage,
+        FeedbackCohortPageQuery, FeedbackCohortSnapshot, FeedbackCohortWindow,
+        InsertResolutionOutcomeResult, NewRecommendationEconomicOutcome, NewReconciliation,
+        RecommendationEconomicAmounts, RecommendationEconomicEvidence,
+        RecommendationEconomicOutcomeInput, RecommendationEconomicOutcomePayload,
+        RecommendationEconomicStateDetail, RecommendationExecutionRollupInfo,
     },
     entities::{
         quant_execution_order::Entity as QuantExecutionOrderEntity,
@@ -20,36 +25,48 @@ use quant_pivot_models::{
         quant_recommendation::{
             ActiveModel as QuantRecommendationActiveModel, Entity as QuantRecommendationEntity,
         },
+        quant_recommendation_report::Entity as RecommendationReportEntity,
         quant_reconciliation::Entity as QuantReconciliationEntity,
+        quant_report_route_run::Entity as RouteRunEntity,
+        research_profile_artifact::Entity as ProfileEntity,
     },
     enums::{
         execution::{ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus},
-        quant::{ExecutionOrderState, FeedbackCohort, OrderIntentStatus, RecommendationStatus},
+        quant::{
+            CohortCensorReason, CohortExclusionReason, ExecutionOrderState, FeedbackCohort,
+            OrderIntentStatus, RecommendationEconomicOutcomeState, RecommendationStatus,
+        },
     },
     types::{
         ContentHash, EvmBlockHash, EvmTransactionHash, PayoutRatio, RecommendationId,
         ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId, Shares, TokenId,
+        Usd,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgExecutionAttemptOutcomeRepository, PgFeedbackCohortRepository,
-        PgRecommendationExecutionRollupRepository, PgRecommendationResolutionOutcomeRepository,
+        PgRecommendationEconomicOutcomeRepository, PgRecommendationExecutionRollupRepository,
+        PgRecommendationResolutionOutcomeRepository,
     },
     traits::{
         ExecutionAttemptOutcomeRepository, FeedbackCohortRepository,
-        RecommendationExecutionRollupRepository, RecommendationResolutionOutcomeRepository,
+        RecommendationEconomicOutcomeRepository, RecommendationExecutionRollupRepository,
+        RecommendationResolutionOutcomeRepository,
     },
 };
 use quant_pivot_system_tests::{
     postgres::{PostgresClock, setup_pg},
-    support::execution_pg_seed::{
-        ExecutionTxnIds, FEEDBACK_SCALE_REPORT_COUNT, FEEDBACK_SCALE_TOTAL, ReportSeedConfig,
-        SharedDemoInfra, entry_execution_order, fixture_profile_ref, seed_approved_intent,
-        seed_feedback_scale, seed_report_fixture, seed_report_on_infra,
-        seed_settlement_report_fixture, seed_shared_demo_infra,
+    support::{
+        economic_outcome_fixtures::seed_report_at,
+        execution_pg_seed::{
+            ExecutionTxnIds, FEEDBACK_SCALE_REPORT_COUNT, FEEDBACK_SCALE_TOTAL, ReportSeedConfig,
+            SharedDemoInfra, entry_execution_order, fixture_profile_ref, seed_approved_intent,
+            seed_feedback_scale, seed_report_fixture, seed_report_on_infra, seed_shared_demo_infra,
+        },
     },
 };
+use rust_decimal_macros::dec;
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
     IntoActiveModel, Statement,
@@ -84,22 +101,35 @@ pub async fn candidate_page_keyset_frozen() {
 pub async fn cohort_truth_planes_exact() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
-    let ids = seed_settlement_report_fixture(&db).await;
+    let infra = seed_shared_demo_infra(&db).await;
+    let profile = fixture_profile_ref()
+        .resolve_builtin_research_profile()
+        .expect("economic cohort profile");
+    let horizon = Duration::seconds(
+        i64::try_from(profile.spec.target_horizon_secs).expect("economic cohort horizon"),
+    );
+    let decision_at = db.statement_time().await - horizon - Duration::minutes(5);
+    let ids = seed_report_at(&db, &infra, decision_at)
+        .await
+        .expect("publish mature economic cohort report");
+    let source_clock = db.statement_time().await;
     let resolution_repository = PgRecommendationResolutionOutcomeRepository::new(db.clone());
     resolution_repository
         .reconcile_fact(
             &ids.recommendation,
             &resolution_fact(
                 &ids,
-                Utc::now() - Duration::minutes(2),
-                Utc::now() - Duration::minutes(1),
+                source_clock - Duration::minutes(2),
+                source_clock - Duration::minutes(1),
                 71,
             ),
         )
         .await
         .expect("seal visible resolution outcome");
     let execution = seed_unfilled_execution_rollup(&db, &ids).await;
+    let economic_available_at = seed_economic_outcome(&db, &ids).await;
     let cutoff = db.statement_time().await;
+    assert!(economic_available_at <= cutoff);
     let window_start = ids.decision_at - Duration::minutes(1);
     let repository = PgFeedbackCohortRepository::new(db.clone());
 
@@ -116,6 +146,7 @@ pub async fn cohort_truth_planes_exact() {
     );
     assert!(model.resolution_outcome().is_some());
     assert!(model.execution_rollup().is_none());
+    assert!(model.economic_outcome().is_none());
 
     let execution_candidate = only_candidate(
         &repository
@@ -129,6 +160,7 @@ pub async fn cohort_truth_planes_exact() {
             .expect("read execution-learning plane"),
     );
     assert!(execution_candidate.resolution_outcome().is_none());
+    assert!(execution_candidate.economic_outcome().is_none());
     assert_eq!(
         execution_candidate
             .execution_rollup()
@@ -150,6 +182,7 @@ pub async fn cohort_truth_planes_exact() {
     );
     assert!(policy.resolution_outcome().is_some());
     assert!(policy.execution_rollup().is_some());
+    assert!(policy.economic_outcome().is_some());
 
     corrupt_execution_rollup_hash(&db, ids.recommendation).await;
     assert!(
@@ -176,6 +209,195 @@ pub async fn cohort_truth_planes_exact() {
             .expect_err("consumed execution corruption must fail closed"),
         StorageError::InvariantViolation { .. }
     ));
+}
+
+pub async fn execution_truth_requires_rollup() {
+    let (pool, _database) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let rollups = PgRecommendationExecutionRollupRepository::new(db.clone());
+    let open_cutoff = db.statement_time().await;
+    assert_eq!(
+        rollups
+            .reconcile_recommendation(ids.recommendation, open_cutoff)
+            .await
+            .expect("open recommendation reconciliation"),
+        ExecutionRollupReconciliationResult::Deferred(
+            ExecutionRollupDeferredReason::RecommendationAuthorityOpen,
+        )
+    );
+    assert!(
+        rollups
+            .find_by_recommendation(ids.recommendation)
+            .await
+            .expect("read absent open recommendation rollup")
+            .is_none()
+    );
+
+    let repository = PgFeedbackCohortRepository::new(db.clone());
+    let open_window = feedback_window(ids.decision_at - Duration::minutes(1), open_cutoff);
+    let open_snapshot = FeedbackCohortSnapshot::try_new(open_window.clone(), open_cutoff)
+        .expect("open execution snapshot");
+    let open_candidate = only_candidate(
+        &repository
+            .list_page(page_query(
+                FeedbackCohort::ExecutionLearning,
+                open_window,
+                None,
+                10,
+            ))
+            .await
+            .expect("read open execution-learning plane"),
+    );
+    assert!(open_candidate.execution_rollup().is_none());
+    assert_eq!(
+        evaluate_feedback_cohort(
+            FeedbackCohort::ExecutionLearning,
+            &open_snapshot,
+            open_candidate.context(),
+            open_candidate.resolution_outcome(),
+            open_candidate.execution_rollup(),
+            open_candidate.economic_outcome(),
+        )
+        .expect("classify open execution truth"),
+        FeedbackCohortDecision::Censored(CohortCensorReason::ExecutionOutcomeUnavailableAtCutoff,)
+    );
+
+    let recommendation = QuantRecommendationEntity::find_by_id(ids.recommendation)
+        .one(&db)
+        .await
+        .expect("read recommendation before closure")
+        .expect("recommendation before closure");
+    assert_eq!(recommendation.status, RecommendationStatus::Published);
+    let closed_at = db.statement_time().await;
+    let mut active: QuantRecommendationActiveModel = recommendation.into_active_model();
+    active.status = ActiveValue::Set(RecommendationStatus::Expired);
+    active.status_changed_at = ActiveValue::Set(closed_at);
+    active
+        .update(&db)
+        .await
+        .expect("close recommendation authority");
+    let rollup = match rollups
+        .reconcile_recommendation(ids.recommendation, db.statement_time().await)
+        .await
+        .expect("seal zero-attempt recommendation rollup")
+    {
+        ExecutionRollupReconciliationResult::Inserted(rollup) => rollup,
+        ExecutionRollupReconciliationResult::AlreadyPresent(_)
+        | ExecutionRollupReconciliationResult::Deferred(_) => {
+            panic!("closed zero-attempt recommendation must insert its final rollup")
+        }
+    };
+    assert_eq!((rollup.intent_count, rollup.attempt_count), (0, 0));
+
+    let closed_cutoff = db.statement_time().await;
+    let closed_window = feedback_window(ids.decision_at - Duration::minutes(1), closed_cutoff);
+    let closed_snapshot = FeedbackCohortSnapshot::try_new(closed_window.clone(), closed_cutoff)
+        .expect("closed execution snapshot");
+    let closed_candidate = only_candidate(
+        &repository
+            .list_page(page_query(
+                FeedbackCohort::ExecutionLearning,
+                closed_window,
+                None,
+                10,
+            ))
+            .await
+            .expect("read closed execution-learning plane"),
+    );
+    assert_eq!(closed_candidate.execution_rollup(), Some(&rollup));
+    assert_eq!(
+        evaluate_feedback_cohort(
+            FeedbackCohort::ExecutionLearning,
+            &closed_snapshot,
+            closed_candidate.context(),
+            closed_candidate.resolution_outcome(),
+            closed_candidate.execution_rollup(),
+            closed_candidate.economic_outcome(),
+        )
+        .expect("classify closed execution truth"),
+        FeedbackCohortDecision::Excluded(CohortExclusionReason::ExecutionNotAttempted)
+    );
+}
+
+async fn seed_economic_outcome(db: &DatabaseConnection, ids: &ExecutionTxnIds) -> DateTime<Utc> {
+    let recommendation = QuantRecommendationEntity::find_by_id(ids.recommendation)
+        .one(db)
+        .await
+        .expect("economic recommendation read")
+        .expect("economic recommendation exists");
+    let report = RecommendationReportEntity::find_by_id(ids.report)
+        .one(db)
+        .await
+        .expect("economic report read")
+        .expect("economic report exists");
+    let route_run = RouteRunEntity::find_by_id(recommendation.report_route_run_id)
+        .one(db)
+        .await
+        .expect("economic Route run read")
+        .expect("economic Route run exists");
+    let profile_id = route_run
+        .research_profile_artifact_id
+        .clone()
+        .expect("economic profile id");
+    let profile = ProfileEntity::find_by_id(profile_id.clone())
+        .one(db)
+        .await
+        .expect("economic profile read")
+        .expect("economic profile exists");
+    let horizon_at = report.decision_at
+        + Duration::seconds(
+            i64::try_from(profile.spec.target_horizon_secs).expect("economic horizon"),
+        );
+    let available_at = db.statement_time().await;
+    assert!(
+        horizon_at < available_at,
+        "economic fixture horizon must already be mature"
+    );
+    let outcome = NewRecommendationEconomicOutcome::try_seal(RecommendationEconomicOutcomeInput {
+        recommendation_id: recommendation.recommendation_id,
+        recommendation_report_id: report.recommendation_report_id,
+        report_route_run_id: route_run.report_route_run_id,
+        decision_policy_snapshot_id: report.decision_policy_snapshot_id,
+        economic_tier_id: recommendation.economic_tier_id,
+        model_version_id: route_run.model_version_id.expect("economic model"),
+        trade_policy_artifact_id: route_run.trade_policy_artifact_id.expect("economic policy"),
+        research_profile_artifact_id: profile_id,
+        state: RecommendationEconomicOutcomeState::EntryNotTriggered,
+        decision_at: report.decision_at,
+        horizon_at,
+        source_available_until: horizon_at,
+        replay_kernel_version: "test-policy-replay".to_owned(),
+        payload: RecommendationEconomicOutcomePayload {
+            detail: RecommendationEconomicStateDetail::EntryNotTriggered,
+            amounts: RecommendationEconomicAmounts {
+                entry_filled_shares: Shares::ZERO,
+                exited_shares: Shares::ZERO,
+                entry_cost_usd: Usd::ZERO,
+                exit_proceeds_usd: Usd::ZERO,
+                resolution_payout_usd: Usd::ZERO,
+                execution_fee_usd: Usd::ZERO,
+                expected_maker_rebate_usd: Usd::ZERO,
+                net_pnl_usd: Some(Usd::ZERO),
+                net_return_bps: Some(dec!(0)),
+            },
+            evidence: RecommendationEconomicEvidence {
+                exit_evidence_kind: EconomicExitEvidenceKind::None,
+                full_l2_covered: true,
+                fee_covered: true,
+                passive_trade_covered: None,
+                replay_input_hash: ContentHash::from_bytes([81; 32]),
+                replay_output_hash: ContentHash::from_bytes([82; 32]),
+            },
+        },
+        available_at,
+    })
+    .expect("economic outcome contract");
+    let inserted = PgRecommendationEconomicOutcomeRepository::new(db.clone())
+        .insert(outcome)
+        .await
+        .expect("insert cohort economic outcome");
+    inserted.available_at
 }
 
 pub async fn cutoff_excludes_late_pages() {
@@ -471,7 +693,7 @@ async fn seed_unfilled_execution_rollup(
         .expect("read submitted intent")
         .expect("submitted intent");
     let mut active: QuantOrderIntentActiveModel = intent.into_active_model();
-    active.status = ActiveValue::Set(OrderIntentStatus::AuthorizationRejected);
+    active.status = ActiveValue::Set(OrderIntentStatus::Failed);
     active.updated_at = ActiveValue::Set(terminal_at);
     active.update(db).await.expect("mark intent rejected");
 

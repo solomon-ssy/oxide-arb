@@ -313,7 +313,7 @@ impl CoreFeedbackReadPort {
             artifact_hash,
             evaluation_window_start: artifact.evaluation_window.window_start(),
             label_cutoff: artifact.evaluation_window.cutoff(),
-            policy_evaluation_count: artifact.gate_input.policy_evaluation_count,
+            model_learning_candidate_count: artifact.gate_input.model_learning_candidate_count,
             mature_label_count: artifact.gate_input.mature_label_count,
             new_mature_label_count: artifact.gate_input.new_mature_label_count,
             minimum_mature_labels: artifact.gate_input.minimum_mature_labels,

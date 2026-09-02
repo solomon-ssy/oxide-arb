@@ -34,7 +34,7 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
     ) -> Result<(OrderIntentInfo, EntryConditionInstanceInfo), StorageError>;
 
     /// Release a claim on transient admission defer: `AdmissionPending ->
-    /// Approved` (semi-auto) or `ApprovedByPolicy` (auto), so the dispatcher may
+    /// Authorized`, so the dispatcher may
     /// retry later. No-op (returns the current row) if the intent has since left
     /// `AdmissionPending`.
     async fn revert_claim(

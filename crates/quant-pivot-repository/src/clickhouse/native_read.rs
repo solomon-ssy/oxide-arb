@@ -28,7 +28,7 @@ impl ChNativeReadRepository {
     ) -> Result<Vec<QuantReportRecommendationFactRow>, StorageError> {
         REPORT_RECOMMENDATION_VERIFY
             .query(
-                self.pool.client(),
+                self.pool.as_ref(),
                 "SELECT ?fields FROM quant_report_recommendation_fact FINAL \
                  WHERE recommendation_report_id = ? \
                  ORDER BY rank, recommendation_id",
@@ -36,7 +36,6 @@ impl ChNativeReadRepository {
             .bind(*report_id)
             .fetch_all::<QuantReportRecommendationFactRow>()
             .await
-            .map_err(StorageError::from)
     }
 
     pub async fn report_funnel_rows(
@@ -45,13 +44,12 @@ impl ChNativeReadRepository {
     ) -> Result<Vec<ReportMarketFunnelRow>, StorageError> {
         REPORT_FUNNEL_VERIFY
             .query(
-                self.pool.client(),
+                self.pool.as_ref(),
                 "SELECT ?fields FROM quant_report_market_funnel FINAL \
                  WHERE recommendation_report_id = ? ORDER BY market_id",
             )
             .bind(*report_id)
             .fetch_all::<ReportMarketFunnelRow>()
             .await
-            .map_err(StorageError::from)
     }
 }

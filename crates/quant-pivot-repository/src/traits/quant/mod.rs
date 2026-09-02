@@ -44,6 +44,7 @@ mod order_intent;
 mod portfolio_plan;
 mod promotion_permit;
 mod recommendation;
+mod recommendation_economic_outcome;
 mod recommendation_execution_rollup;
 mod recommendation_report;
 mod recommendation_resolution_outcome;
@@ -53,6 +54,7 @@ mod research_job;
 mod research_readiness;
 mod reserved_capital;
 mod resolution_observation;
+mod route_economic_health;
 mod runtime_activity;
 mod selection;
 pub mod settlement_governance;
@@ -64,7 +66,7 @@ mod trade_policy;
 mod venue_incentive;
 
 pub use account_chain_execution::AccountChainExecutionRepository;
-pub use account_pause::AccountPauseRepository;
+pub use account_pause::AccountPauseOperationRepository;
 pub use account_recovery::AccountRecoveryRepository;
 pub use account_snapshot::AccountSnapshotRepository;
 pub use attribution_artifact::{AttributionArtifactRepository, AttributionArtifactWriteOutcome};
@@ -86,7 +88,9 @@ pub use execution_attempt_outcome::ExecutionAttemptOutcomeRepository;
 pub use execution_order::ExecutionOrderRepository;
 pub use execution_submission::ExecutionSubmissionRepository;
 pub use fact::{FactWriter, QuantFactRepository};
-pub use fact_read::QuantFactReadRepository;
+pub use fact_read::{
+    CryptoReportFrontierQuery, CryptoReportsAvailableQuery, QuantFactReadRepository,
+};
 pub use factor::FactorRepository;
 pub use feature::FeatureRepository;
 pub use feature_parity::{
@@ -129,6 +133,7 @@ pub use promotion_permit::{
     PromotionPermitRevokeOutcome,
 };
 pub use recommendation::RecommendationRepository;
+pub use recommendation_economic_outcome::RecommendationEconomicOutcomeRepository;
 pub use recommendation_execution_rollup::RecommendationExecutionRollupRepository;
 pub use recommendation_report::RecommendationReportRepository;
 pub use recommendation_resolution_outcome::RecommendationResolutionOutcomeRepository;
@@ -141,6 +146,7 @@ pub use research_job::{
 pub use research_readiness::{ResearchReadinessEvidenceRepository, ShadowLatencyObservation};
 pub use reserved_capital::ReservedCapitalRepository;
 pub use resolution_observation::ResolutionObservationRepository;
+pub use route_economic_health::RouteEconomicHealthRepository;
 pub use runtime_activity::RuntimeActivityRepository;
 pub use selection::MarketSelectionRepository;
 pub use shadow_comparison::{ShadowComparisonRepository, ShadowComparisonWriteOutcome};

@@ -680,7 +680,7 @@ fn immediate_entry_plan(
             min_depth_usd: *min_depth_usd,
             max_book_age_ms: *max_book_age_ms,
             cancel_if_not_triggered: true,
-            entry_reason: "bootstrap report-only guidance priced and sized from frozen live L2"
+            entry_reason: "bootstrap analysis-only guidance priced and sized from frozen live L2"
                 .to_owned(),
         });
     }

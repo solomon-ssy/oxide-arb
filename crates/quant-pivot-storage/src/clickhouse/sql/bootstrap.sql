@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS book_microstructure_1m (
+CREATE TABLE book_microstructure_1m (
     `token_id` String,
     `market_id` Nullable(String),
     `bucket_time` DateTime64(3, 'UTC'),
@@ -32,8 +32,9 @@ CREATE TABLE IF NOT EXISTS book_microstructure_1m (
     `available_at` DateTime64(3, 'UTC') DEFAULT bucket_time,
     `bucket_date` Date MATERIALIZED toDate(bucket_time)
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(bucket_date)
-ORDER BY (token_id, bucket_time) SETTINGS index_granularity = 4096;
-CREATE TABLE IF NOT EXISTS book_microstructure_1s (
+ORDER BY (token_id, bucket_time) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 4096;
+CREATE TABLE book_microstructure_1s (
     `token_id` String,
     `market_id` Nullable(String),
     `bucket_time` DateTime64(3, 'UTC'),
@@ -67,8 +68,9 @@ CREATE TABLE IF NOT EXISTS book_microstructure_1s (
     `available_at` DateTime64(3, 'UTC') DEFAULT bucket_time,
     `bucket_date` Date MATERIALIZED toDate(bucket_time)
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(bucket_date)
-ORDER BY (token_id, bucket_time) SETTINGS index_granularity = 4096;
-CREATE TABLE IF NOT EXISTS market_resolution_event (
+ORDER BY (token_id, bucket_time) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 4096;
+CREATE TABLE market_resolution_event (
     `market_id` String,
     `token_ids` Array(String),
     `payout_ratios` Array(Decimal(20, 18)),
@@ -102,7 +104,7 @@ ORDER BY (
     source_log_index,
     resolution_fact_hash
 ) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_book_l2_ledger (
+CREATE TABLE quant_book_l2_ledger (
     `stream_session_id` UUID,
     `shard_id` UInt32,
     `token_id` String,
@@ -135,7 +137,7 @@ CREATE TABLE IF NOT EXISTS quant_book_l2_ledger (
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
 ORDER BY (token_id, stream_session_id, token_sequence) SETTINGS non_replicated_deduplication_window = 10000,
     index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_book_stream_session (
+CREATE TABLE quant_book_stream_session (
     `stream_session_id` UUID,
     `shard_id` UInt32,
     `ledger_sequence` UInt32,
@@ -158,8 +160,9 @@ CREATE TABLE IF NOT EXISTS quant_book_stream_session (
     `schema_version` UInt32,
     `session_date` Date MATERIALIZED toDate(opened_at)
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(session_date)
-ORDER BY (stream_session_id, ledger_sequence) SETTINGS index_granularity = 4096;
-CREATE TABLE IF NOT EXISTS quant_capital_allocation_event (
+ORDER BY (stream_session_id, ledger_sequence) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 4096;
+CREATE TABLE quant_capital_allocation_event (
     `event_time` DateTime64(3, 'UTC'),
     `capital_allocation_id` String,
     `order_intent_id` String,
@@ -188,10 +191,12 @@ CREATE TABLE IF NOT EXISTS quant_capital_allocation_event (
     `released_usd` Decimal(38, 18),
     `ingestion_time` DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
-ORDER BY (order_intent_id, event_time, ingestion_time) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_crypto_price_report (
+ORDER BY (order_intent_id, event_time, ingestion_time) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_crypto_price_report (
     `source_id` LowCardinality(String),
     `instrument_key` String,
+    `gap_generation` UInt64,
     `source_sequence` UInt64,
     `price` Decimal(18, 8),
     `quantity` Nullable(Decimal(18, 8)),
@@ -208,12 +213,13 @@ CREATE TABLE IF NOT EXISTS quant_crypto_price_report (
 ORDER BY (
         source_id,
         instrument_key,
+        gap_generation,
         source_sequence,
         event_time,
         report_hash
     ) SETTINGS non_replicated_deduplication_window = 10000,
     index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_domain_event (
+CREATE TABLE quant_domain_event (
     `event_id` UUID,
     `source` String,
     `event_type` LowCardinality(String),
@@ -228,14 +234,15 @@ CREATE TABLE IF NOT EXISTS quant_domain_event (
     `source_checkpoint_hash` String,
     `payload_json` String
 ) ENGINE = ReplacingMergeTree(available_at) PARTITION BY toYYYYMM(event_time)
-ORDER BY (
+    ORDER BY (
         subject,
         event_type,
         event_time,
         revision,
         event_id
-    ) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_domain_observation (
+    ) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_domain_observation (
     `family` LowCardinality(String),
     `source_id` LowCardinality(String),
     `instrument_key` LowCardinality(String),
@@ -249,7 +256,7 @@ CREATE TABLE IF NOT EXISTS quant_domain_observation (
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
 ORDER BY (instrument_key, metric, event_time) SETTINGS non_replicated_deduplication_window = 10000,
     index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_entry_condition_evaluation_event (
+CREATE TABLE quant_entry_condition_evaluation_event (
     `evaluation_id` String,
     `condition_instance_id` UUID,
     `base_revision` Int64,
@@ -265,8 +272,9 @@ CREATE TABLE IF NOT EXISTS quant_entry_condition_evaluation_event (
     `tree_json` String,
     `schema_version` UInt32
 ) ENGINE = ReplacingMergeTree(evaluated_at) PARTITION BY toYYYYMM(evaluated_at)
-ORDER BY (condition_instance_id, evaluation_id) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_execution_event (
+ORDER BY (condition_instance_id, evaluation_id) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_execution_event (
     `event_time` DateTime64(3, 'UTC'),
     `order_intent_id` String,
     `execution_order_id` String,
@@ -291,8 +299,9 @@ CREATE TABLE IF NOT EXISTS quant_execution_event (
     `venue_order_id` Nullable(String),
     `ingestion_time` DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
-ORDER BY (order_intent_id, event_time, ingestion_time) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_exit_signal_evaluation_event (
+ORDER BY (order_intent_id, event_time, ingestion_time) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_exit_signal_evaluation_event (
     `event_time` DateTime64(3, 'UTC'),
     `order_intent_id` String,
     `position_id` String,
@@ -316,8 +325,9 @@ CREATE TABLE IF NOT EXISTS quant_exit_signal_evaluation_event (
     `detail` String,
     `ingestion_time` DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
-ORDER BY (order_intent_id, event_time, ingestion_time) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_factor_event (
+ORDER BY (order_intent_id, event_time, ingestion_time) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_factor_event (
     `event_time` DateTime64(3, 'UTC'),
     `decision_at` DateTime64(3, 'UTC'),
     `market_id` String,
@@ -343,13 +353,14 @@ CREATE TABLE IF NOT EXISTS quant_factor_event (
     `model_run_id` String,
     `ingestion_time` DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
-ORDER BY (
+    ORDER BY (
         model_run_id,
         market_id,
         factor_name,
         decision_at
-    ) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_feature_event (
+    ) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_feature_event (
     `event_time` DateTime64(3, 'UTC'),
     `feature_vector_id` String,
     `decision_policy_snapshot_id` String,
@@ -410,13 +421,14 @@ CREATE TABLE IF NOT EXISTS quant_feature_event (
     `audit_fingerprint` String,
     `ingestion_time` DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
-ORDER BY (
+    ORDER BY (
         feature_vector_id,
         feature_name,
         decision_at,
         ingestion_time
-    ) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_feature_parity_event (
+    ) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_feature_parity_event (
     `event_time` DateTime64(3, 'UTC'),
     `parity_event_id` String,
     `parity_run_id` String,
@@ -447,8 +459,9 @@ CREATE TABLE IF NOT EXISTS quant_feature_parity_event (
     `detail_json` String,
     `ingestion_time` DateTime64(3, 'UTC')
 ) ENGINE = ReplacingMergeTree(ingestion_time)
-ORDER BY (parity_run_id, parity_event_id) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_model_input_event (
+ORDER BY (parity_run_id, parity_event_id) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_model_input_event (
     `event_time` DateTime64(3, 'UTC'),
     `format_version` UInt32,
     `decision_at` DateTime64(3, 'UTC'),
@@ -469,15 +482,16 @@ CREATE TABLE IF NOT EXISTS quant_model_input_event (
     `audit_fingerprint` String,
     `ingestion_time` DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
-ORDER BY (
+    ORDER BY (
         model_run_id,
         feature_vector_id,
         market_id,
         encoded_column,
         decision_at,
         ingestion_time
-    ) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_strategy_position_lot_event (
+    ) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_strategy_position_lot_event (
     `event_time` DateTime64(3, 'UTC'),
     `strategy_position_lot_id` String,
     `origin_kind` Enum8(
@@ -513,8 +527,9 @@ CREATE TABLE IF NOT EXISTS quant_strategy_position_lot_event (
     `realized_pnl_usd` Decimal(38, 18),
     `ingestion_time` DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
-ORDER BY (market_id, token_id, event_time, ingestion_time) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_report_market_funnel (
+ORDER BY (market_id, token_id, event_time, ingestion_time) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_report_market_funnel (
     `event_time` DateTime64(3, 'UTC'),
     `recommendation_report_id` String,
     `market_selection_id` String,
@@ -535,8 +550,9 @@ CREATE TABLE IF NOT EXISTS quant_report_market_funnel (
     `row_hash` String,
     `ingestion_time` DateTime64(3, 'UTC')
 ) ENGINE = ReplacingMergeTree(ingestion_time) PARTITION BY toYYYYMM(event_time)
-ORDER BY (recommendation_report_id, market_id) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_report_recommendation_fact (
+ORDER BY (recommendation_report_id, market_id) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_report_recommendation_fact (
     `event_time` DateTime64(3, 'UTC'),
     `recommendation_report_id` String,
     `recommendation_id` String,
@@ -557,8 +573,9 @@ CREATE TABLE IF NOT EXISTS quant_report_recommendation_fact (
     `hard_reserved_cash_usd` Decimal(38, 18),
     `valid_until` DateTime64(3, 'UTC')
 ) ENGINE = ReplacingMergeTree(event_time)
-ORDER BY (recommendation_report_id, recommendation_id) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_serving_evidence_completion (
+ORDER BY (recommendation_report_id, recommendation_id) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_serving_evidence_completion (
     `event_time` DateTime64(3, 'UTC'),
     `format_version` UInt32,
     `model_run_id` String,
@@ -572,24 +589,29 @@ CREATE TABLE IF NOT EXISTS quant_serving_evidence_completion (
     `completion_hash` String,
     `ingestion_time` DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
-ORDER BY (model_run_id, ingestion_time) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_signal_candidate_event (
+ORDER BY (model_run_id, ingestion_time) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_signal_candidate_event (
     `event_time` DateTime64(3, 'UTC'),
     `signal_candidate_id` String,
     `model_run_id` String,
+    `model_version_id` String,
     `market_id` String,
     `token_id` String,
     `side` Enum8('yes' = 1, 'no' = 2),
     `score` Decimal(18, 8),
     `confidence` Decimal(18, 8),
+    `expected_return_bps` Decimal(18, 8),
     `entry_price` Decimal(18, 8),
     `target_price` Decimal(18, 8),
     `stop_price` Decimal(18, 8),
     `route_rank` UInt32,
-    `rejection_reason` LowCardinality(String)
+    `rejection_reason` LowCardinality(String),
+    `ingestion_time` DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
-ORDER BY (model_run_id, route_rank, market_id) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_exchange_log_raw (
+ORDER BY (model_run_id, route_rank, market_id) SETTINGS non_replicated_deduplication_window = 10000,
+    index_granularity = 8192;
+CREATE TABLE quant_exchange_log_raw (
     `chain_id` UInt64,
     `contract_key` LowCardinality(String),
     `exchange_version` Enum8('V2' = 2),
@@ -620,7 +642,7 @@ CREATE TABLE IF NOT EXISTS quant_exchange_log_raw (
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
 ORDER BY (contract_address, block_number, transaction_index, log_index)
 SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_exchange_event (
+CREATE TABLE quant_exchange_event (
     `event_id` FixedString(32),
     `raw_log_hash` FixedString(32),
     `chain_id` UInt64,
@@ -655,7 +677,7 @@ CREATE TABLE IF NOT EXISTS quant_exchange_event (
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
 ORDER BY (contract_address, block_number, transaction_index, log_index)
 SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_exchange_fee_charge (
+CREATE TABLE quant_exchange_fee_charge (
     `fee_charge_id` FixedString(32),
     `raw_log_hash` FixedString(32),
     `chain_id` UInt64,
@@ -679,7 +701,7 @@ CREATE TABLE IF NOT EXISTS quant_exchange_fee_charge (
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
 ORDER BY (contract_address, block_number, transaction_index, log_index)
 SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_exchange_match (
+CREATE TABLE quant_exchange_match (
     `match_id` FixedString(32),
     `orders_matched_event_id` FixedString(32),
     `aggregate_taker_event_id` FixedString(32),
@@ -706,7 +728,7 @@ CREATE TABLE IF NOT EXISTS quant_exchange_match (
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
 ORDER BY (block_number, transaction_hash, match_id)
 SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_market_execution (
+CREATE TABLE quant_market_execution (
     `execution_id` FixedString(32),
     `match_id` Nullable(FixedString(32)),
     `maker_order_filled_event_id` FixedString(32),
@@ -739,7 +761,7 @@ CREATE TABLE IF NOT EXISTS quant_market_execution (
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
 ORDER BY (market_id, token_id, effective_at, block_number, transaction_index, log_index)
 SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_execution_participant (
+CREATE TABLE quant_execution_participant (
     `execution_id` FixedString(32),
     `market_id` String,
     `token_id` String,
@@ -755,7 +777,7 @@ CREATE TABLE IF NOT EXISTS quant_execution_participant (
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
 ORDER BY (market_id, token_id, effective_at, execution_id, participant_role)
 SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_exchange_history_acceptance (
+CREATE TABLE quant_exchange_history_acceptance (
     `chunk_id` UUID,
     `frontier` LowCardinality(String),
     `from_block` UInt64,
@@ -772,7 +794,7 @@ CREATE TABLE IF NOT EXISTS quant_exchange_history_acceptance (
 ) ENGINE = ReplacingMergeTree(state_revision)
 ORDER BY (frontier, from_block, to_block, chunk_id)
 SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_weather_forecast_fact (
+CREATE TABLE quant_weather_forecast_fact (
     `source_id` LowCardinality(String),
     `instrument_key` String,
     `subject_key` LowCardinality(String),
@@ -803,7 +825,7 @@ ORDER BY (
         report_hash
     ) SETTINGS non_replicated_deduplication_window = 10000,
     index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_weather_observation_fact (
+CREATE TABLE quant_weather_observation_fact (
     `source_id` LowCardinality(String),
     `instrument_key` String,
     `subject_key` LowCardinality(String),
@@ -833,7 +855,7 @@ ORDER BY (
         report_hash
     ) SETTINGS non_replicated_deduplication_window = 10000,
     index_granularity = 8192;
-CREATE MATERIALIZED VIEW IF NOT EXISTS book_microstructure_1m_mv TO book_microstructure_1m (
+CREATE MATERIALIZED VIEW book_microstructure_1m_mv TO book_microstructure_1m (
     `token_id` String,
     `market_id` Nullable(String),
     `bucket_time` DateTime('UTC'),
